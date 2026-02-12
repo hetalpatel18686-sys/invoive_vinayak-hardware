@@ -5,16 +5,13 @@ import { supabase } from '@/lib/supabaseClient';
 
 export default function Home() {
   useEffect(() => {
-    // If already signed in, send to your default landing page (e.g., /customers)
-    // If not signed in, send to /login
     supabase.auth.getUser().then(({ data }) => {
       if (data.user) {
-        window.location.href = '/customers'; // change to /items or /reports if you prefer
+        window.location.href = '/customers'; // landing page *after* login
       } else {
-        window.location.href = '/login';
+        window.location.href = '/login';     // force login first
       }
     });
   }, []);
-
-  return null; // nothing visible on /
+  return null;
 }
