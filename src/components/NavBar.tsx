@@ -1,17 +1,16 @@
 'use client';
+
 import Link from 'next/link';
-import { supabase } from '@/lib/supabaseClient';
+import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
+import { supabase } from '@/lib/supabaseClient';
 
 export default function NavBar() {
-  // ✅ 1) Hide NavBar on the login page
-  if (typeof window !== 'undefined') {
-    if (window.location.pathname === '/login') {
-      return null;
-    }
-  }
+  // --- Hide NavBar on /login (and you can add /signup if you ever create it) ---
+  const pathname = usePathname();
+  if (pathname === '/login') return null;
 
-  // Brand from environment variables (set in Vercel → Settings → Environment Variables)
+  // Brand from env (set in Vercel → Project → Settings → Environment Variables)
   const brandName = process.env.NEXT_PUBLIC_BRAND_NAME || 'Vinayak Hardware';
   const brandLogo = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '';
 
@@ -23,13 +22,14 @@ export default function NavBar() {
 
   const signOut = async () => {
     await supabase.auth.signOut();
-    window.location.href = '/login';
+    // Hard navigation so Back button won’t reveal cached pages
+    window.location.replace('/login');
   };
 
   return (
     <header className="w-full bg-primary text-white">
       <nav className="mx-auto max-w-6xl flex items-center justify-between px-4 py-3">
-        {/* ✅ 2) Brand (logo + name) on the left */}
+        {/* Brand (logo + name) */}
         <div className="flex items-center gap-3">
           {brandLogo ? (
             <img
@@ -63,10 +63,7 @@ export default function NavBar() {
               </button>
             </div>
           ) : (
-            <Link
-              className="bg-white/15 hover:bg-white/25 rounded px-3 py-1"
-              href="/login"
-            >
+            <Link className="bg-white/15 hover:bg-white/25 rounded px-3 py-1" href="/login">
               Sign in
             </Link>
           )}
