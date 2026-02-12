@@ -12,10 +12,10 @@ interface FoundItem {
   description?: string | null
 }
 
-export default function Stock(){
+export default function Stock() {
   // --- State for SKU-based flow ---
-  const [sku, setSku] = useState('')                          // user types SKU here
-  const [found, setFound] = useState<FoundItem | null>(null)  // item we find by SKU
+  const [sku, setSku] = useState('')
+  const [found, setFound] = useState<FoundItem | null>(null)
 
   const [moveType, setMoveType] = useState<MoveType>('receive')
   const [qty, setQty] = useState<number>(0)
@@ -24,14 +24,16 @@ export default function Stock(){
   const [history, setHistory] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
 
-  useEffect(()=>{ loadHistory() },[])
+  useEffect(() => {
+    loadHistory()
+  }, [])
 
   // Load last 50 moves for the right-hand table
-  const loadHistory = async()=>{
+  const loadHistory = async () => {
     const h = await supabase
       .from('stock_moves')
       .select('created_at, move_type, qty, ref, items(name, sku)')
-      .order('created_at', {ascending:false})
+      .order('created_at', { ascending: false })
       .limit(50)
     setHistory(h.data ?? [])
   }
@@ -39,46 +41,59 @@ export default function Stock(){
   // Find item by SKU
   const findBySku = async () => {
     setFound(null)
-    if(!sku.trim()) { alert('Please enter SKU'); return }
+    const trimmed = sku.trim()
+    if (!trimmed) {
+      alert('Please enter SKU')
+      return
+    }
     const { data, error } = await supabase
       .from('items')
       .select('id, sku, name, description')
-      .eq('sku', sku.trim())
+      .eq('sku', trimmed)
       .limit(1)
-    if(error) { alert(error.message); return }
-    if(!data || data.length === 0){
-      alert('No item found for this SKU'); 
+    if (error) {
+      alert(error.message)
+      return
+    }
+    if (!data || data.length === 0) {
+      alert('No item found for this SKU')
       return
     }
     setFound(data[0] as FoundItem)
   }
 
   // Save stock move using found item id
-  const submit = async(e: React.FormEvent)=>{
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if(!found) { alert('Please find an item by SKU first'); return }
-    if(!qty || qty <= 0) { alert('Quantity must be > 0'); return }
+    if (!found) {
+      alert('Please find an item by SKU first')
+      return
+    }
+    if (!qty || qty <= 0) {
+      alert('Quantity must be > 0')
+      return
+    }
 
     setLoading(true)
-    try{
+    try {
       const payload = {
         item_id: found.id,
-        move_type: moveType,      // string value; PostgREST will cast to enum if your column is ENUM
+        move_type: moveType, // PostgREST will cast string to enum if your column is ENUM
         qty: Number(qty),
         ref: ref || null,
         reason: reason || null,
       }
       const { error } = await supabase.from('stock_moves').insert([payload])
-      if(error) throw error
+      if (error) throw error
 
-      // Clear only what you want to reset after save:
+      // Clear the fast-entry fields:
       setQty(0)
       setRef('')
       setReason('')
       await loadHistory()
-    }catch(err:any){
+    } catch (err: any) {
       alert(err.message)
-    }finally{
+    } finally {
       setLoading(false)
     }
   }
@@ -96,10 +111,17 @@ export default function Stock(){
               className="input"
               placeholder="SKU (e.g., TEST-1)"
               value={sku}
-              onChange={e => setSku(e.target.value)}
-              onKeyDown={e => { if(e.key === 'Enter'){ e.preventDefault(); findBySku() } }}
+              onChange={(e) => setSku(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  findBySku()
+                }
+              }}
             />
-            <Button type="button" onClick={findBySku}>Find</Button>
+            <Button type="button" onClick={findBySku}>
+              Find
+            </Button>
           </div>
 
           {/* Read-only item preview */}
@@ -107,7 +129,13 @@ export default function Stock(){
             <label className="label">Item</label>
             <input
               className="input"
-              value={found ? `${found.name ?? ''}${found.description ? ' — ' + found.description : ''}` : ''}
+              value={
+                found
+                  ? `${found.name ?? ''}${
+                      found.description ? ' — ' + found.description : ''
+                    }`
+                  : ''
+              }
               placeholder="(description will appear after Find)"
               readOnly
             />
@@ -116,7 +144,11 @@ export default function Stock(){
           {/* Move type */}
           <div>
             <label className="label">Type</label>
-            <select className="input" value={moveType} onChange={e=> setMoveType(e.target.value as MoveType)}>
+            <select
+              className="input"
+              value={moveType}
+              onChange={(e) => setMoveType(e.target.value as MoveType)}
+            >
               <option value="receive">Receive</option>
               <option value="adjust">Adjust</option>
               <option value="return">Return</option>
@@ -127,14 +159,34 @@ export default function Stock(){
           {/* Qty */}
           <div>
             <label className="label">Qty</label>
-            <input className="input" type="number" min={1} value={qty} onChange={e=> setQty(parseInt(e.target.value||'0'))} />
+            <input
+              className="input"
+              type="number"
+              min={1}
+              value={qty}
+              onChange={(e) =>
+                setQty(Number.isNaN(parseInt(e.target.value)) ? 0 : parseInt(e.target.value))
+              }
+            />
           </div>
 
           {/* Ref & Reason */}
-          <input className="input" placeholder="Reference (PO# etc.)" value={ref} onChange={e=> setRef(e.target.value)} />
-          <input className="input" placeholder="Reason / Note" value={reason} onChange={e=> setReason(e.target.value)} />
+          <input
+            className="input"
+            placeholder="Reference (PO# etc.)"
+            value={ref}
+            onChange={(e) => setRef(e.target.value)}
+          />
+          <input
+            className="input"
+            placeholder="Reason / Note"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+          />
 
-          <Button type="submit" disabled={loading || !found}>{loading ? 'Saving...' : 'Save'}</Button>
+          <Button type="submit" disabled={loading || !found}>
+            {loading ? 'Saving...' : 'Save'}
+          </Button>
         </form>
       </div>
 
@@ -143,9 +195,29 @@ export default function Stock(){
         <h2 className="font-semibold mb-2">Recent Stock Movements</h2>
         <table className="table">
           <thead>
-            <tr><th>Date</th><th>Item</th><th>Type</th><th>Qty</th><th>Ref</th></tr>
+            <tr>
+              <th>Date</th>
+              <th>Item</th>
+              <th>Type</th>
+              <th>Qty</th>
+              <th>Ref</th>
+            </tr>
           </thead>
           <tbody>
-            {history.map((h, idx)=> (
+            {history.map((h, idx) => (
               <tr key={idx}>
                 <td>{new Date(h.created_at).toLocaleString()}</td>
+                <td>
+                  {h.items?.sku} — {h.items?.name}
+                </td>
+                <td>{h.move_type}</td>
+                <td>{h.qty}</td>
+                <td>{h.ref}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
