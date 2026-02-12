@@ -1,39 +1,86 @@
 
-'use client'
-import { useState } from 'react'
-import { supabase } from '@/lib/supabaseClient'
-import Button from '@/components/Button'
+'use client';
+import { useState } from 'react';
+import { supabase } from '@/lib/supabaseClient';
 
-export default function Login(){
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [msg, setMsg] = useState('')
+export default function LoginPage() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  const onSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setMsg('Signing in...')
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-    if(error){ setMsg(error.message); return }
-    setMsg('Success! Redirecting...')
-    window.location.href = '/'
-  }
+  const signIn = async (e: any) => {
+    e.preventDefault();
+    setLoading(true);
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password
+    });
+
+    if (error) {
+      alert(error.message);
+    } else {
+      window.location.href = '/customers'; // after login
+    }
+
+    setLoading(false);
+  };
 
   return (
-    <div className="max-w-md mx-auto card">
-      <h1 className="text-xl font-semibold mb-4">Sign in</h1>
-      <form onSubmit={onSubmit} className="space-y-3">
-        <div>
-          <label className="label">Email</label>
-          <input className="input" value={email} onChange={e=>setEmail(e.target.value)} type="email" required />
-        </div>
-        <div>
-          <label className="label">Password</label>
-          <input className="input" value={password} onChange={e=>setPassword(e.target.value)} type="password" required />
-        </div>
-        <Button type="submit">Sign in</Button>
-      </form>
-      {msg && <p className="mt-3 text-sm text-gray-600">{msg}</p>}
-      <p className="text-xs text-gray-500 mt-4">Tip: Create a user in Supabase Auth (Dashboard → Authentication → Add user), then insert a matching row in <code>profiles</code> with role 'admin'.</p>
+    <div className="min-h-screen bg-gray-100 flex items-center justify-center p-6">
+
+      <div className="bg-white shadow-lg rounded-xl p-10 max-w-md w-full text-center">
+
+        {/* LOGO */}
+        <img 
+          src={process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png'} 
+          alt="Logo" 
+          className="mx-auto mb-6 h-24 w-24 object-contain"
+        />
+
+        {/* SHOP NAME */}
+        <h1 className="text-3xl font-bold text-orange-600 mb-2">
+          {process.env.NEXT_PUBLIC_BRAND_NAME || 'Vinayak Hardware'}
+        </h1>
+
+        {/* WELCOME MESSAGE */}
+        <p className="text-gray-600 mb-8 text-lg">Welcome to Vinayak Hardware</p>
+
+        <form onSubmit={signIn} className="space-y-4 text-left">
+          <div>
+            <label className="text-sm font-medium">Email</label>
+            <input 
+              type="email" 
+              className="input mt-1"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e)=>setEmail(e.target.value)}
+              required 
+            />
+          </div>
+
+          <div>
+            <label className="text-sm font-medium">Password</label>
+            <input 
+              type="password" 
+              className="input mt-1"
+              placeholder="••••••••"
+              value={password}
+              onChange={(e)=>setPassword(e.target.value)}
+              required 
+            />
+          </div>
+
+          <button 
+            type="submit"
+            className="w-full bg-orange-600 text-white py-2 rounded-lg font-semibold hover:bg-orange-700"
+            disabled={loading}
+          >
+            {loading ? 'Signing in...' : 'Sign In'}
+          </button>
+
+        </form>
+      </div>
     </div>
-  )
+  );
 }
