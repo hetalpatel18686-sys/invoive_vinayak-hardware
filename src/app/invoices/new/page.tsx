@@ -30,27 +30,23 @@ interface Item {
 
 interface Row {
   id: string;
-  // Product identity
   item_id: string;
   sku: string;
   description: string;
-  // Pricing
-  base_price: number;   // base (item price or original invoice price)
-  unit_price: number;   // sale: base + margin%; return: original price
+  base_price: number;   // base item price or original invoice price
+  unit_price: number;   // sale: base + margin; return: original price
   tax_rate: number;
-  // Qty controls
   qty: number;
-  max_qty?: number;     // only in Return mode (cap to original qty)
-  // Margin
-  margin_pct: number;   // sale only; hidden on print
+  max_qty?: number;     // only used in returns
+  margin_pct: number;   // sale only (print:hidden)
 }
 
 export default function NewInvoice() {
-  // ---- Brand (ENV first, fallback to your details) ----
-  const brandName   = process.env.NEXT_PUBLIC_BRAND_NAME   || 'Vinayak Hardware';
-  const brandLogo   = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png';
-  const brandAddress= process.env.NEXT_PUBLIC_BRAND_ADDRESS|| 'Bilimora, Gandevi, Navsari, Gujarat, 396321';
-  const brandPhone  = process.env.NEXT_PUBLIC_BRAND_PHONE  || '+91 7046826808';
+  // ---- Brand (ENV first; fallback to your details) ----
+  const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
+  const brandLogo    = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png';
+  const brandAddress = process.env.NEXT_PUBLIC_BRAND_ADDRESS  || 'Bilimora, Gandevi, Navsari, Gujarat, 396321';
+  const brandPhone   = process.env.NEXT_PUBLIC_BRAND_PHONE    || '+91 7046826808';
 
   // ---- Header controls ----
   const [issuedAt, setIssuedAt] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -80,16 +76,15 @@ export default function NewInvoice() {
   const [invoiceIdJustSaved, setInvoiceIdJustSaved] = useState<string | null>(null);
   const [invoiceNoJustSaved, setInvoiceNoJustSaved] = useState<string | null>(null);
 
-  // Init: load items and one empty row
+  // Init: load active items and start with one blank row
   useEffect(() => {
     (async () => {
-      const { data, error } = await supabase
+      const { data } = await supabase
         .from('items')
         .select('id, sku, name, unit_price, tax_rate')
         .eq('is_active', true)
         .order('name');
-      if (!error && data) setItems(data as Item[]);
-
+      setItems((data as Item[]) ?? []);
       setRows([blankRow()]);
     })();
   }, []);
@@ -119,7 +114,7 @@ export default function NewInvoice() {
     margin_pct: 0,
   });
 
-  // ---- Customer lookup ----
+  // ---- Customer lookup by phone ----
   async function lookupCustomerByPhone() {
     const phone = customerPhone.trim();
     if (!phone) return alert('Please enter a mobile number');
@@ -133,9 +128,7 @@ export default function NewInvoice() {
     if (!data || data.length === 0) {
       setNewCust((p) => ({ ...p, phone }));
       setShowCreateCustomer(true);
-      setCustomerId('');
-      setCustomerName('');
-      setCustomerAddr1('');
+      setCustomerId(''); setCustomerName(''); setCustomerAddr1('');
     } else {
       const c = data[0] as Customer;
       setCustomerId(c.id);
@@ -148,6 +141,7 @@ export default function NewInvoice() {
   async function createCustomer() {
     if (!newCust.first_name || !newCust.last_name)
       return alert('Please enter first & last name');
+
     const { data, error } = await supabase
       .from('customers')
       .insert([newCust])
@@ -168,7 +162,10 @@ export default function NewInvoice() {
     const s = (skuValue || '').trim();
     if (!s) return;
 
+    // 1) try from loaded items
     let it = items.find((x) => (x.sku || '').toLowerCase() === s.toLowerCase());
+
+    // 2) if not found, fetch directly (covers not-preloaded items)
     if (!it) {
       const { data, error } = await supabase
         .from('items')
@@ -182,6 +179,7 @@ export default function NewInvoice() {
       it = data[0] as Item;
     }
 
+    // Update the row with description, base price, price, tax
     setRows((rows) =>
       rows.map((r) =>
         r.id === rowId
@@ -190,9 +188,9 @@ export default function NewInvoice() {
               item_id: it!.id,
               sku: it!.sku || s,
               description: it!.name,
-              base_price: it!.unit_price,
-              unit_price: it!.unit_price, // margin applies later
-              tax_rate: it!.tax_rate,
+              base_price: Number(it!.unit_price) || 0,
+              unit_price: Number(it!.unit_price) || 0,
+              tax_rate: Number(it!.tax_rate) || 0,
             }
           : r
       )
@@ -220,7 +218,7 @@ export default function NewInvoice() {
     );
   }
 
-  // ---- Return mode: load original invoice → rows from original lines ----
+  // ---- Return mode: load original invoice → rows from its items ----
   async function loadOriginalInvoice() {
     const no = originalInvoiceNo.trim();
     if (!no) return alert('Enter original invoice number');
@@ -237,8 +235,7 @@ export default function NewInvoice() {
     const { data: cust } = await supabase
       .from('customers')
       .select('id, first_name, last_name, phone, street_name, village_town, city, state, postal_code')
-      .eq('id', inv.customer_id)
-      .single();
+      .eq('id', inv.customer_id).single();
     if (cust) {
       const c = cust as Customer;
       setCustomerId(c.id);
@@ -247,7 +244,7 @@ export default function NewInvoice() {
       setCustomerAddr1(oneLineAddress(c));
     }
 
-    // Lines with item (for sku)
+    // original lines (+ item sku)
     const { data: lines, error: eLines } = await supabase
       .from('invoice_items')
       .select('item_id, description, qty, unit_price, tax_rate, items(sku, name)')
@@ -259,14 +256,13 @@ export default function NewInvoice() {
       item_id: ln.item_id,
       sku: ln.items?.sku || '',
       description: ln.description || ln.items?.name || '',
-      base_price: ln.unit_price,
-      unit_price: ln.unit_price,
-      tax_rate: ln.tax_rate || 0,
+      base_price: Number(ln.unit_price) || 0,
+      unit_price: Number(ln.unit_price) || 0,
+      tax_rate: Number(ln.tax_rate) || 0,
       qty: 0, // choose how many to return
       max_qty: Number(ln.qty || 0),
       margin_pct: 0,
     }));
-
     setRows(newRows.length ? newRows : [blankRow()]);
   }
 
@@ -284,7 +280,6 @@ export default function NewInvoice() {
   // ---- Save invoice & stock moves ----
   async function saveInvoice() {
     if (!customerId) return alert('Lookup or create the customer first');
-
     if (docType === 'sale') {
       if (!rows.length || !rows[0].item_id) return alert('Add at least one line item');
     } else {
@@ -295,33 +290,29 @@ export default function NewInvoice() {
 
     setSaving(true);
     try {
-      // Try sequential invoice number, else fallback
+      // sequential invoice no, else fallback
       let invoiceNo = '';
       const { data: nextNo, error: eNo } = await supabase.rpc('next_invoice_no');
       invoiceNo = !eNo && nextNo ? String(nextNo) : 'INV-' + Date.now();
 
-      // Insert invoice (link to original in return mode if you added return_of_invoice_id)
       const { data: inv, error: e1 } = await supabase
         .from('invoices')
-        .insert([
-          {
-            invoice_no: invoiceNo,
-            customer_id: customerId,
-            notes,
-            subtotal: totals.subtotal,
-            tax_total: totals.tax,
-            grand_total: totals.grand,
-            status: 'sent',
-            doc_type: docType,
-            issued_at: issuedAt,
-            // return_of_invoice_id: docType === 'return' ? originalInvoiceId : null, // uncomment if column exists
-          },
-        ])
-        .select()
-        .single();
+        .insert([{
+          invoice_no: invoiceNo,
+          customer_id: customerId,
+          notes,
+          subtotal: totals.subtotal,
+          tax_total: totals.tax,
+          grand_total: totals.grand,
+          status: 'sent',
+          doc_type: docType,
+          issued_at: issuedAt,
+          // If you added this column earlier, you can link returns:
+          // return_of_invoice_id: docType === 'return' ? originalInvoiceId : null,
+        }])
+        .select().single();
       if (e1) throw e1;
 
-      // Line items
       const lineRows = rows
         .filter((r) => (docType === 'sale' ? r.item_id : r.qty > 0))
         .map((r) => ({
@@ -338,7 +329,6 @@ export default function NewInvoice() {
       const { error: e2 } = await supabase.from('invoice_items').insert(lineRows);
       if (e2) throw e2;
 
-      // Stock moves
       const moveType = docType === 'sale' ? 'issue' : 'return';
       const moves = lineRows.map((r) => ({
         item_id: r.item_id,
@@ -360,38 +350,25 @@ export default function NewInvoice() {
     }
   }
 
-  // ---- Top buttons ----
+  // ---- Buttons: New invoice / Print ----
   function handleNewInvoice() {
-    // reset the entire page state cleanly
     setIssuedAt(new Date().toISOString().slice(0,10));
-    setDocType('sale');
-    setOriginalInvoiceNo('');
-    setOriginalInvoiceId(null);
-    setCustomerPhone('');
-    setCustomerId('');
-    setCustomerName('');
-    setCustomerAddr1('');
+    setDocType('sale'); setOriginalInvoiceNo(''); setOriginalInvoiceId(null);
+    setCustomerPhone(''); setCustomerId(''); setCustomerName(''); setCustomerAddr1('');
     setShowCreateCustomer(false);
-    setNewCust({
-      first_name:'', last_name:'', phone:'', street_name:'', village_town:'',
-      city:'', state:'', postal_code:''
-    });
+    setNewCust({ first_name:'', last_name:'', phone:'', street_name:'', village_town:'', city:'', state:'', postal_code:'' });
     setRows([blankRow()]);
-    setNotes('');
-    setSaving(false);
-    setInvoiceIdJustSaved(null);
-    setInvoiceNoJustSaved(null);
+    setNotes(''); setSaving(false);
+    setInvoiceIdJustSaved(null); setInvoiceNoJustSaved(null);
   }
 
   function openPrint() {
-    if (invoiceIdJustSaved) {
-      window.open(`/invoices/${invoiceIdJustSaved}`, '_blank');
-    }
+    if (invoiceIdJustSaved) window.open(`/invoices/${invoiceIdJustSaved}`, '_blank');
   }
 
   return (
     <Protected>
-      {/* ---- Brand header ---- */}
+      {/* Brand header + action buttons */}
       <div className="card mb-4">
         <div className="flex items-center gap-4">
           <img src={brandLogo} alt="logo" className="h-14 w-14 rounded bg-white object-contain" />
@@ -400,22 +377,13 @@ export default function NewInvoice() {
             <div className="text-sm text-gray-700">{brandAddress}</div>
             <div className="text-sm text-gray-700">Phone: {brandPhone}</div>
           </div>
-
-          {/* Right side action buttons */}
           <div className="ml-auto flex gap-2">
-            {invoiceIdJustSaved && (
-              <Button type="button" onClick={openPrint}>
-                Print Invoice
-              </Button>
-            )}
-            <Button type="button" onClick={handleNewInvoice} className="bg-gray-700 hover:bg-gray-800">
-              New Invoice
-            </Button>
+            {invoiceIdJustSaved && <Button onClick={openPrint}>Print Invoice</Button>}
+            <Button onClick={handleNewInvoice} className="bg-gray-700 hover:bg-gray-800">New Invoice</Button>
           </div>
         </div>
       </div>
 
-      {/* ---- Main Card ---- */}
       <div className="card">
         <h1 className="text-xl font-semibold mb-4">New Invoice</h1>
 
@@ -428,16 +396,13 @@ export default function NewInvoice() {
               <option value="return">Return</option>
             </select>
           </div>
-
           <div>
             <label className="label">Invoice Date</label>
             <input className="input" type="date" value={issuedAt} onChange={(e) => setIssuedAt(e.target.value)} />
           </div>
-
           <div>
             <label className="label">Notes</label>
-            <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)}
-              placeholder="Private notes (not printed)" />
+            <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Private notes (not printed)" />
           </div>
         </div>
 
@@ -467,33 +432,32 @@ export default function NewInvoice() {
             </div>
           </div>
 
-          {/* Create-customer inline panel */}
           {showCreateCustomer && (
             <div className="mt-4 border rounded p-3 bg-orange-50">
               <div className="font-semibold mb-2">Create New Customer</div>
               <div className="grid md:grid-cols-2 gap-2 mb-2">
-                <input className="input" placeholder="First name"
-                  value={newCust.first_name} onChange={(e) => setNewCust({ ...newCust, first_name: e.target.value })} />
-                <input className="input" placeholder="Last name"
-                  value={newCust.last_name} onChange={(e) => setNewCust({ ...newCust, last_name: e.target.value })} />
+                <input className="input" placeholder="First name" value={newCust.first_name}
+                  onChange={(e) => setNewCust({ ...newCust, first_name: e.target.value })} />
+                <input className="input" placeholder="Last name" value={newCust.last_name}
+                  onChange={(e) => setNewCust({ ...newCust, last_name: e.target.value })} />
               </div>
               <div className="grid md:grid-cols-2 gap-2 mb-2">
-                <input className="input" placeholder="Mobile"
-                  value={newCust.phone} onChange={(e) => setNewCust({ ...newCust, phone: e.target.value })} />
-                <input className="input" placeholder="Street name"
-                  value={newCust.street_name} onChange={(e) => setNewCust({ ...newCust, street_name: e.target.value })} />
+                <input className="input" placeholder="Mobile" value={newCust.phone}
+                  onChange={(e) => setNewCust({ ...newCust, phone: e.target.value })} />
+                <input className="input" placeholder="Street name" value={newCust.street_name}
+                  onChange={(e) => setNewCust({ ...newCust, street_name: e.target.value })} />
               </div>
               <div className="grid md:grid-cols-3 gap-2 mb-2">
-                <input className="input" placeholder="Village/Town"
-                  value={newCust.village_town} onChange={(e) => setNewCust({ ...newCust, village_town: e.target.value })} />
-                <input className="input" placeholder="City"
-                  value={newCust.city} onChange={(e) => setNewCust({ ...newCust, city: e.target.value })} />
-                <input className="input" placeholder="State"
-                  value={newCust.state} onChange={(e) => setNewCust({ ...newCust, state: e.target.value })} />
+                <input className="input" placeholder="Village/Town" value={newCust.village_town}
+                  onChange={(e) => setNewCust({ ...newCust, village_town: e.target.value })} />
+                <input className="input" placeholder="City" value={newCust.city}
+                  onChange={(e) => setNewCust({ ...newCust, city: e.target.value })} />
+                <input className="input" placeholder="State" value={newCust.state}
+                  onChange={(e) => setNewCust({ ...newCust, state: e.target.value })} />
               </div>
               <div className="grid md:grid-cols-3 gap-2 mb-2">
-                <input className="input" placeholder="PIN"
-                  value={newCust.postal_code} onChange={(e) => setNewCust({ ...newCust, postal_code: e.target.value })} />
+                <input className="input" placeholder="PIN" value={newCust.postal_code}
+                  onChange={(e) => setNewCust({ ...newCust, postal_code: e.target.value })} />
                 <div />
                 <div />
               </div>
@@ -514,17 +478,13 @@ export default function NewInvoice() {
                 <input className="input" placeholder="e.g., INV-2026-000123"
                   value={originalInvoiceNo} onChange={(e) => setOriginalInvoiceNo(e.target.value)} />
               </div>
-              <div>
-                <Button type="button" onClick={loadOriginalInvoice}>Load Items</Button>
-              </div>
-              <div className="text-sm text-gray-600">
-                (Loads items, original price & tax; choose quantities to return)
-              </div>
+              <div><Button type="button" onClick={loadOriginalInvoice}>Load Items</Button></div>
+              <div className="text-sm text-gray-600">(Loads items, original price & tax; choose return qty)</div>
             </div>
           </div>
         )}
 
-        {/* Lines table */}
+        {/* Lines table: SKU/Description/Qty/Margin/Price/Tax */}
         <table className="table">
           <thead>
             <tr>
@@ -541,36 +501,27 @@ export default function NewInvoice() {
           <tbody>
             {rows.map((r) => (
               <tr key={r.id}>
-                {/* SKU input (scan / type → Enter) */}
                 <td>
                   <input
                     className="input"
                     placeholder="Scan or type SKU"
                     value={r.sku}
-                    onChange={(e) =>
-                      setRows(rows.map((x) => (x.id === r.id ? { ...x, sku: e.target.value } : x)))
-                    }
+                    onChange={(e) => setRows(rows.map((x)=> x.id===r.id ? { ...x, sku:e.target.value } : x))}
+                    onBlur={() => { if (docType === 'sale') applySkuToRow(r.id, r.sku); }}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        if (docType === 'sale') applySkuToRow(r.id, r.sku);
-                      }
+                      if (e.key === 'Enter') { e.preventDefault(); if (docType === 'sale') applySkuToRow(r.id, r.sku); }
                     }}
                     disabled={docType === 'return'}
                   />
                 </td>
-
-                {/* Description */}
                 <td>
                   <input
                     className="input"
                     value={r.description}
-                    onChange={(e) => setRows(rows.map((x) => (x.id === r.id ? { ...x, description: e.target.value } : x)))}
+                    onChange={(e) => setRows(rows.map((x)=> x.id===r.id ? { ...x, description:e.target.value } : x))}
                     readOnly={docType === 'return'}
                   />
                 </td>
-
-                {/* Qty */}
                 <td>
                   <input
                     className="input"
@@ -583,8 +534,6 @@ export default function NewInvoice() {
                     <div className="text-xs text-gray-500 mt-1">Max: {r.max_qty}</div>
                   )}
                 </td>
-
-                {/* Margin (sale only; hidden on print) */}
                 <td className={docType === 'sale' ? 'print:hidden' : 'hidden'}>
                   <input
                     className="input"
@@ -594,85 +543,56 @@ export default function NewInvoice() {
                     onChange={(e) => setMargin(r.id, parseFloat(e.target.value) || 0)}
                   />
                 </td>
-
-                {/* Price */}
                 <td>
                   <input
                     className="input"
                     type="number"
                     step="0.01"
                     value={r.unit_price}
-                    onChange={(e) =>
-                      setRows(rows.map((x) => (x.id === r.id ? { ...x, unit_price: parseFloat(e.target.value) || 0 } : x)))
-                    }
+                    onChange={(e) => setRows(rows.map((x)=> x.id===r.id ? { ...x, unit_price: parseFloat(e.target.value) || 0 } : x))}
                     readOnly={docType === 'return'}
                   />
                 </td>
-
-                {/* Tax */}
                 <td>
                   <input
                     className="input"
                     type="number"
                     step="0.01"
                     value={r.tax_rate}
-                    onChange={(e) =>
-                      setRows(rows.map((x) => (x.id === r.id ? { ...x, tax_rate: parseFloat(e.target.value) || 0 } : x)))
-                    }
+                    onChange={(e) => setRows(rows.map((x)=> x.id===r.id ? { ...x, tax_rate: parseFloat(e.target.value) || 0 } : x))}
                     readOnly={docType === 'return'}
                   />
                 </td>
-
-                {/* Line total */}
                 <td>₹{(r.qty * r.unit_price).toFixed(2)}</td>
-
-                {/* Remove row */}
                 <td>
-                  <button className="text-red-600" onClick={() => setRows(rows.filter((x) => x.id !== r.id))}>
-                    ✕
-                  </button>
+                  <button className="text-red-600" onClick={() => setRows(rows.filter((x) => x.id !== r.id))}>✕</button>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
 
-        {/* Add row (sale only) */}
+        {/* Add line (sale only) */}
         {docType === 'sale' && (
           <div className="mt-3">
-            <button className="text-primary" onClick={() => setRows([...rows, blankRow()])}>
-              + Add Line
-            </button>
+            <button className="text-primary" onClick={() => setRows([...rows, blankRow()])}>+ Add Line</button>
           </div>
         )}
 
-        {/* Totals + Save */}
+        {/* Totals + Save + (after save) Print/New */}
         <div className="mt-6 grid md:grid-cols-2">
           <div />
           <div className="card">
-            <div className="flex justify-between">
-              <span>Subtotal</span>
-              <span>₹{totals.subtotal.toFixed(2)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>Tax</span>
-              <span>₹{totals.tax.toFixed(2)}</span>
-            </div>
-            <div className="flex justify-between font-semibold text-lg">
-              <span>Grand Total</span>
-              <span>₹{totals.grand.toFixed(2)}</span>
-            </div>
+            <div className="flex justify-between"><span>Subtotal</span><span>₹{totals.subtotal.toFixed(2)}</span></div>
+            <div className="flex justify-between"><span>Tax</span><span>₹{totals.tax.toFixed(2)}</span></div>
+            <div className="flex justify-between font-semibold text-lg"><span>Grand Total</span><span>₹{totals.grand.toFixed(2)}</span></div>
 
             <div className="mt-3 flex gap-2">
-              <Button disabled={saving} onClick={saveInvoice}>
-                {saving ? 'Saving...' : 'Save Invoice'}
-              </Button>
+              <Button disabled={saving} onClick={saveInvoice}>{saving ? 'Saving...' : 'Save Invoice'}</Button>
               {invoiceIdJustSaved && (
                 <>
                   <Button type="button" onClick={openPrint}>Print Invoice</Button>
-                  <Button type="button" onClick={handleNewInvoice} className="bg-gray-700 hover:bg-gray-800">
-                    New Invoice
-                  </Button>
+                  <Button type="button" onClick={handleNewInvoice} className="bg-gray-700 hover:bg-gray-800">New Invoice</Button>
                 </>
               )}
             </div>
@@ -681,9 +601,7 @@ export default function NewInvoice() {
             {invoiceIdJustSaved && (
               <div className="mt-3 text-sm">
                 Saved #{invoiceNoJustSaved}.{' '}
-                <a className="text-primary underline" href={`/invoices/${invoiceIdJustSaved}`} target="_blank" rel="noreferrer">
-                  Open / Print invoice
-                </a>
+                <a className="text-primary underline" href={`/invoices/${invoiceIdJustSaved}`} target="_blank" rel="noreferrer">Open / Print invoice</a>
               </div>
             )}
           </div>
@@ -692,3 +610,4 @@ export default function NewInvoice() {
     </Protected>
   );
 }
+``
