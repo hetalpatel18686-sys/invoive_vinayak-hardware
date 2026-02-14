@@ -1,368 +1,130 @@
+
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
-import Protected from '@/components/Protected';
+import { useEffect, useState } from 'react';
 
-interface UomRow {
+type Row = {
   id: string;
-  code: string;
-  name: string;
-}
+  sku: string | null;
+  name: string | null;
+  stock_qty: number | null;
+  unit_cost: number | null;
+};
 
-interface ItemRow {
-  id: string;
-  sku: string;
-  name: string;
-  stock_qty: number;
-  unit_cost: number;
-  low_stock_threshold: number | null;
-  uom_id: string | null;
-}
+export default function InventoryRestMode() {
+  const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
-interface ViewRow {
-  id: string;
-  sku: string;
-  name: string;
-  stock_qty: number;
-  unit_cost: number;
-  low_stock_threshold: number | null;
-  uom_code: string;
-  uom_name: string;
-}
-
-export default function InventoryPage() {
-  const [items, setItems] = useState<ItemRow[]>([]);
-  const [uomMap, setUomMap] = useState<Record<string, UomRow>>({});
-  const [rows, setRows] = useState<ViewRow[]>([]);
-
-  const [q, setQ] = useState('');
-  const [showOnlyLow, setShowOnlyLow] = useState(false);
+  const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorText, setErrorText] = useState('');
+  const [http, setHttp] = useState<{ok:boolean;status:number;statusText:string}|null>(null);
 
   const load = async () => {
     setLoading(true);
     setErrorText('');
+    setRows([]);
+    setHttp(null);
 
     try {
-      // 1) Fetch items (no join)
-      const { data: itemsData, error: itemsErr } = await supabase
-        .from('items')
-        .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id')
-        .order('sku', { ascending: true });
-
-      if (itemsErr) throw itemsErr;
-
-      const normalizedItems: ItemRow[] = (itemsData ?? []).map((d: any) => ({
-        id: d.id,
-        sku: d.sku,
-        name: d.name,
-        stock_qty: Number(d.stock_qty ?? 0),
-        unit_cost: Number(d.unit_cost ?? 0),
-        low_stock_threshold: d.low_stock_threshold ?? null,
-        uom_id: d.uom_id ?? null,
-      }));
-      setItems(normalizedItems);
-
-      // 2) Fetch UoMs into a map (best-effort; page still works if empty)
-      const { data: uoms, error: uErr } = await supabase
-        .from('units_of_measure')
-        .select('id, code, name')
-        .order('code', { ascending: true });
-
-      if (!uErr) {
-        const map: Record<string, UomRow> = {};
-        (uoms ?? []).forEach((u: any) => {
-          map[u.id] = { id: u.id, code: u.code, name: u.name };
-        });
-        setUomMap(map);
+      if (!supaUrl.startsWith('https://') || !supaUrl.includes('.supabase.co')) {
+        setErrorText(`Runtime URL looks wrong: "${supaUrl}"`);
+        setLoading(false);
+        return;
+      }
+      if (!anon) {
+        setErrorText('Runtime anon key is missing.');
+        setLoading(false);
+        return;
       }
 
-      // 3) Compose display rows using the map we (may) have right now
-      setRows(
-        normalizedItems.map((it) => {
-          const u = it.uom_id ? uomMap[it.uom_id] ?? null : null;
-          return {
-            id: it.id,
-            sku: it.sku,
-            name: it.name,
-            stock_qty: it.stock_qty,
-            unit_cost: it.unit_cost,
-            low_stock_threshold: it.low_stock_threshold,
-            uom_code: u?.code ?? '',
-            uom_name: u?.name ?? '',
-          };
-        })
-      );
+      const url = `${supaUrl}/rest/v1/items?select=id,sku,name,stock_qty,unit_cost&order=sku.asc`;
+      const res = await fetch(url, {
+        headers: { apikey: anon, Authorization: `Bearer ${anon}` },
+      });
+
+      setHttp({ ok: res.ok, status: res.status, statusText: res.statusText });
+
+      const text = await res.text();
+      let body: any = null;
+      try { body = JSON.parse(text); } catch { body = text; }
+
+      if (!res.ok) {
+        setErrorText(
+          typeof body === 'string'
+            ? `HTTP ${res.status} ${res.statusText} — ${body}`
+            : `HTTP ${res.status} ${res.statusText} — ${body?.message || text}`
+        );
+      } else {
+        setRows(Array.isArray(body) ? (body as Row[]) : []);
+      }
     } catch (e: any) {
-      setErrorText(e?.message || String(e));
-      setItems([]);
-      setUomMap({});
-      setRows([]);
+      setErrorText(`Fetch threw: ${e?.message || String(e)}`);
     } finally {
       setLoading(false);
     }
   };
 
-  // Recompose rows if the UoM map arrives after items
-  useEffect(() => {
-    setRows(
-      items.map((it) => {
-        const u = it.uom_id ? uomMap[it.uom_id] ?? null : null;
-        return {
-          id: it.id,
-          sku: it.sku,
-          name: it.name,
-          stock_qty: it.stock_qty,
-          unit_cost: it.unit_cost,
-          low_stock_threshold: it.low_stock_threshold,
-          uom_code: u?.code ?? '',
-          uom_name: u?.name ?? '',
-        };
-      })
-    );
-  }, [uomMap, items]);
+  useEffect(() => { load(); }, []);
 
-  useEffect(() => {
-    load();
-  }, []);
-
-  // Filtering
-  const filtered = useMemo(() => {
-    const term = q.trim().toLowerCase();
-    return rows.filter((r) => {
-      const matchSearch =
-        !term ||
-        r.sku.toLowerCase().includes(term) ||
-        (r.name ?? '').toLowerCase().includes(term);
-      const isLow =
-        r.low_stock_threshold != null &&
-        r.low_stock_threshold > 0 &&
-        r.stock_qty <= r.low_stock_threshold;
-      return matchSearch && (!showOnlyLow || isLow);
-    });
-  }, [rows, q, showOnlyLow]);
-
-  // Totals
-  const totals = useMemo(() => {
-    let qty = 0;
-    let value = 0;
-    for (const r of filtered) {
-      qty += r.stock_qty;
-      value += r.stock_qty * r.unit_cost;
-    }
-    const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
-    return { qty: round2(qty), value: round2(value) };
-  }, [filtered]);
-
-  // CSV export (filtered)
-  const exportCsv = () => {
-    const header = [
-      'SKU',
-      'Item',
-      'UoM',
-      'Qty',
-      'Avg Unit Cost',
-      'Total Value',
-      'Minimum',
-    ];
-    const lines = filtered.map((r) => {
-      const total = r.stock_qty * r.unit_cost;
-      return [
-        r.sku,
-        (r.name ?? '').replaceAll('"', '""'),
-        r.uom_code,
-        String(r.stock_qty),
-        r.unit_cost.toFixed(2),
-        total.toFixed(2),
-        r.low_stock_threshold != null ? String(r.low_stock_threshold) : '',
-      ]
-        .map((v) => `"${v}"`)
-        .join(',');
-    });
-    const csv = [header.join(','), ...lines].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    const date = new Date().toISOString().slice(0, 10);
-    a.download = `inventory_${date}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  // Print low-stock report (filtered)
-  const printLowStock = () => {
-    const low = filtered.filter((r) => {
-      return (
-        r.low_stock_threshold != null &&
-        r.low_stock_threshold > 0 &&
-        r.stock_qty <= r.low_stock_threshold
-      );
-    });
-
-    const html = `
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Low-Stock Report</title>
-    <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 16px; }
-      h1 { font-size: 18px; margin: 0 0 12px; }
-      table { width: 100%; border-collapse: collapse; }
-      th, td { border: 1px solid #ddd; padding: 6px 8px; font-size: 12px; }
-      th { background: #f5f5f5; text-align: left; }
-    </style>
-  </head>
-  <body>
-    <h1>Low-Stock Report</h1>
-    <table>
-      <thead>
-        <tr>
-          <th>SKU</th>
-          <th>Item</th>
-          <th>UoM</th>
-          <th>Qty</th>
-          <th>Minimum</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${low
-          .map(
-            (r) => `
-          <tr>
-            <td>${r.sku}</td>
-            <td>${(r.name ?? '').replace(/</g, '&lt;')}</td>
-            <td>${r.uom_code || '-'}</td>
-            <td>${r.stock_qty}</td>
-            <td>${r.low_stock_threshold ?? ''}</td>
-          </tr>`
-          )
-          .join('')}
-      </tbody>
-    </table>
-    <script>
-      window.print();
-      setTimeout(() => window.close(), 500);
-    </script>
-  </body>
-</html>`.trim();
-
-    const w = window.open('', '_blank', 'width=900,height=700');
-    if (!w) return;
-    w.document.open();
-    w.document.write(html);
-    w.document.close();
-  };
+  const money = (n: number | null | undefined) =>
+    `₹ ${(Number(n || 0)).toFixed(2)}`;
 
   return (
-    <Protected>
-      {/* Top bar: counts + errors + actions */}
+    <div className="card">
+      <h1 className="text-xl font-semibold mb-3">Inventory (REST mode)</h1>
+
       <div className="mb-2 text-xs text-gray-600">
-        Items fetched: <b>{items.length}</b> • Display rows: <b>{rows.length}</b>
-        {errorText ? (
-          <span className="ml-3 text-red-600">Error: {errorText}</span>
-        ) : null}
-        <button className="ml-3 underline" onClick={load}>
-          Reload
-        </button>
-      </div>
-
-      <div className="card">
-        <h1 className="text-xl font-semibold mb-4">Inventory</h1>
-
-        {/* Filters / Actions */}
-        <div className="mb-3 grid md:grid-cols-5 gap-2">
-          <input
-            className="input"
-            placeholder="Search SKU or Name…"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-          />
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={showOnlyLow}
-              onChange={(e) => setShowOnlyLow(e.target.checked)}
-            />
-            Low stock only
-          </label>
-          <button type="button" className="btn" onClick={exportCsv}>
-            Export CSV
-          </button>
-          <button
-            type="button"
-            className="btn"
-            onClick={printLowStock}
-            title="Print items where Qty ≤ Minimum"
-          >
-            Print Low-Stock
-          </button>
-        </div>
-
-        {/* Table */}
-        {loading ? (
-          <p>Loading…</p>
-        ) : rows.length === 0 ? (
-          <div className="p-4 text-sm text-gray-700">
-            No items found. If you see rows in Supabase Table Editor, try Reload.
-            If it stays empty, open DevTools → Console and share any red error.
-          </div>
-        ) : (
-          <div className="overflow-auto">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>SKU</th>
-                  <th>Item</th>
-                  <th>UoM</th>
-                  <th className="text-right">Qty</th>
-                  <th className="text-right">Minimum</th>
-                  <th className="text-right">Avg Unit Cost</th>
-                  <th className="text-right">Total Value (₹)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((r) => {
-                  const total = r.stock_qty * r.unit_cost;
-                  const isLow =
-                    r.low_stock_threshold != null &&
-                    r.low_stock_threshold > 0 &&
-                    r.stock_qty <= r.low_stock_threshold;
-                  return (
-                    <tr key={r.id} className={isLow ? 'bg-red-50' : ''}>
-                      <td>{r.sku}</td>
-                      <td>{r.name}</td>
-                      <td>{r.uom_code || '-'}</td>
-                      <td className="text-right">{r.stock_qty}</td>
-                      <td className="text-right">
-                        {r.low_stock_threshold != null
-                          ? r.low_stock_threshold
-                          : '—'}
-                      </td>
-                      <td className="text-right">₹ {r.unit_cost.toFixed(2)}</td>
-                      <td className="text-right">₹ {total.toFixed(2)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-              <tfoot>
-                <tr className="font-semibold">
-                  <td colSpan={3} className="text-right">
-                    Totals:
-                  </td>
-                  <td className="text-right">{totals.qty}</td>
-                  <td className="text-right">—</td>
-                  <td className="text-right">—</td>
-                  <td className="text-right">₹ {totals.value.toFixed(2)}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
+        {http && (
+          <span className="mr-3">
+            HTTP: <b>{http.status}</b> {http.statusText} (ok: {String(http.ok)})
+          </span>
         )}
+        <button className="underline" onClick={load}>Reload</button>
       </div>
-    </Protected>
+
+      {errorText && (
+        <div className="mb-3 text-sm text-red-600">Error: {errorText}</div>
+      )}
+
+      {loading ? (
+        <p>Loading…</p>
+      ) : rows.length === 0 ? (
+        <div className="p-4 text-sm text-gray-700">
+          No items returned from REST. (But your /debug/rest showed rows —
+          if this stays empty, please hard refresh or confirm the file was replaced.)
+        </div>
+      ) : (
+        <div className="overflow-auto">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>SKU</th>
+                <th>Item</th>
+                <th className="text-right">Qty</th>
+                <th className="text-right">Avg Unit Cost</th>
+                <th className="text-right">Total Value (₹)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const qty = Number(r.stock_qty || 0);
+                const cost = Number(r.unit_cost || 0);
+                const total = qty * cost;
+                return (
+                  <tr key={r.id}>
+                    <td>{r.sku}</td>
+                    <td>{r.name}</td>
+                    <td className="text-right">{qty}</td>
+                    <td className="text-right">{money(cost)}</td>
+                    <td className="text-right">{money(total)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
