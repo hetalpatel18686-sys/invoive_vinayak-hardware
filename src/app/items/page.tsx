@@ -1,7 +1,7 @@
 
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 import Protected from '@/components/Protected';
@@ -13,6 +13,10 @@ interface Uom {
   name: string; // e.g., 'Each', 'Box'
 }
 
+/**
+ * We store UoM as a simple string code (uom_code) after normalizing the join.
+ * This avoids the array/object shape mismatch from Supabase.
+ */
 interface Item {
   id: string;
   sku: string;
@@ -24,10 +28,8 @@ interface Item {
   stock_qty: number;
   low_stock_threshold: number | null;
 
-  // From DB
-  uom_id?: string | null;
-  // Joined (for display)
-  uom?: { code: string; name: string } | null;
+  uom_id?: string | null;    // FK on items
+  uom_code?: string;         // normalized from relation ('' if missing)
 }
 
 export default function Items() {
@@ -49,22 +51,36 @@ export default function Items() {
   const load = async () => {
     setLoading(true);
 
-    // Load items with join to UoM so we can show code in the table
+    // 1) Load items + join UoM, then normalize to { uom_code: string }
     const { data: itemsData, error: itemsError } = await supabase
       .from('items')
       .select(`
         id, sku, name, description, unit_cost, unit_price, tax_rate, stock_qty, low_stock_threshold, uom_id,
-        uom:units_of_measure ( code, name )
+        uom:units_of_measure ( code )
       `)
       .order('created_at', { ascending: false });
 
     if (itemsError) {
       alert(itemsError.message);
     } else {
-      setItems((itemsData as Item[]) ?? []);
+      const normalized: Item[] = (itemsData ?? []).map((d: any) => ({
+        id: d.id,
+        sku: d.sku,
+        name: d.name,
+        description: d.description,
+        unit_cost: Number(d.unit_cost ?? 0),
+        unit_price: Number(d.unit_price ?? 0),
+        tax_rate: Number(d.tax_rate ?? 0),
+        stock_qty: Number(d.stock_qty ?? 0),
+        low_stock_threshold: d.low_stock_threshold ?? null,
+        uom_id: d.uom_id ?? null,
+        // if Supabase returns uom as array, take first element's code
+        uom_code: Array.isArray(d.uom) ? (d.uom[0]?.code ?? '') : (d.uom?.code ?? ''),
+      }));
+      setItems(normalized);
     }
 
-    // Load UoMs for the dropdown
+    // 2) Load UoMs for the Add form dropdown
     const { data: uomsData, error: uomsError } = await supabase
       .from('units_of_measure')
       .select('id, code, name')
@@ -96,14 +112,14 @@ export default function Items() {
       low_stock_threshold: Number.isFinite(form.low_stock_threshold)
         ? Number(form.low_stock_threshold)
         : 0,
-      uom_id: form.uom_id || null,   // <-- save selection (null allowed)
+      uom_id: form.uom_id || null, // save selection
     };
 
     const { error } = await supabase.from('items').insert([payload]);
     if (error) {
       alert(error.message);
     } else {
-      // Reset the form
+      // Reset form and reload list
       setForm({
         sku: '',
         name: '',
@@ -123,7 +139,9 @@ export default function Items() {
       <div className="grid md:grid-cols-3 gap-4">
         {/* LEFT: Items table */}
         <div className="card md:col-span-2">
-          <h1 className="text-xl font-semibold mb-3">Items &amp; Pricing</h1>
+          <h1 className="text-xl font-semibold mb-3">
+            Items &amp; Pricing <span className="text-xs text-gray-500">(UoM v2)</span>
+          </h1>
           {loading ? (
             <p>Loading...</p>
           ) : (
@@ -141,11 +159,10 @@ export default function Items() {
               </thead>
               <tbody>
                 {items.map((it) => {
-                  const margin = (it.unit_price || 0) - (it.unit_cost || 0);
-                  const pct =
-                    (it.unit_price || 0) > 0
-                      ? (margin / it.unit_price) * 100
-                      : 0;
+                  const price = Number(it.unit_price || 0);
+                  const cost = Number(it.unit_cost || 0);
+                  const margin = price - cost;
+                  const pct = price > 0 ? (margin / price) * 100 : 0;
                   const low =
                     it.low_stock_threshold != null &&
                     it.low_stock_threshold > 0 &&
@@ -155,9 +172,9 @@ export default function Items() {
                     <tr key={it.id} className={low ? 'bg-orange-50' : ''}>
                       <td>{it.sku}</td>
                       <td>{it.name}</td>
-                      <td>{it.uom?.code ?? '-'}</td>
-                      <td>${(it.unit_price || 0).toFixed(2)}</td>
-                      <td>${(it.unit_cost || 0).toFixed(2)}</td>
+                      <td>{it.uom_code || '-'}</td>
+                      <td>${price.toFixed(2)}</td>
+                      <td>${cost.toFixed(2)}</td>
                       <td>
                         {margin.toFixed(2)} ({pct.toFixed(1)}%)
                       </td>
@@ -215,6 +232,8 @@ export default function Items() {
                 onChange={(e) =>
                   setForm({ ...form, unit_price: parseFloat(e.target.value || '0') })
                 }
+                required
+                min={0}
               />
               <input
                 className="input"
@@ -242,7 +261,7 @@ export default function Items() {
               ))}
             </select>
 
-            {/* Removed: Profit preview line */}
+            {/* Removed the old Profit preview line */}
 
             <input
               className="input"
