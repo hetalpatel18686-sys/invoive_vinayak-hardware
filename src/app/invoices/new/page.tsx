@@ -21,26 +21,27 @@ interface Customer {
   postal_code?: string | null; // PIN
 }
 
+/**
+ * We normalize the related UoM to a simple string code.
+ * (Avoids the array/object shape issue from Supabase join.)
+ */
 interface Item {
   id: string;
   name: string;
   unit_price: number;
   tax_rate: number;
-  uom?: {
-    code: string;
-    name: string;
-  } | null;
+  uom_code: string; // <-- normalized from relation ('' if missing)
 }
 
 interface Row {
   id: string;
   item_id: string;
   description?: string;
-  uom_code?: string;   // auto from item.uom.code (read-only in UI)
+  uom_code?: string;   // read-only in UI (auto from selected item)
   base_price: number;  // base price from DB
   margin_pct: number;  // % added to base (optional)
   qty: number;
-  unit_price: number;  // (auto) base + margin%  | user can override
+  unit_price: number;  // (auto) base + margin% | can be edited
   tax_rate: number;
 }
 
@@ -94,7 +95,8 @@ export default function NewInvoice() {
           id, name, unit_price, tax_rate,
           uom:units_of_measure ( code, name )
         `)
-        .eq('is_active', true)       // remove this line if your items table has no is_active column
+        // If your items table does NOT have is_active, comment the next line:
+        // .eq('is_active', true)
         .order('name');
 
       if (error) {
@@ -102,7 +104,17 @@ export default function NewInvoice() {
         alert(error.message);
       }
 
-      setItems((data as Item[]) ?? []);
+      // Normalize: ensure uom_code is a string (first entry if array)
+      const normalized: Item[] = (data ?? []).map((d: any) => ({
+        id: d.id,
+        name: d.name,
+        unit_price: Number(d.unit_price || 0),
+        tax_rate: Number(d.tax_rate || 0),
+        uom_code: Array.isArray(d.uom) ? (d.uom[0]?.code ?? '') : (d.uom?.code ?? ''),
+      }));
+
+      setItems(normalized);
+
       setRows([
         {
           id: crypto.randomUUID(),
@@ -216,7 +228,7 @@ export default function NewInvoice() {
               margin_pct: r.margin_pct || 0,
               unit_price: it?.unit_price || 0, // auto price
               tax_rate: it?.tax_rate || 0,
-              uom_code: it?.uom?.code ?? '',   // auto UoM
+              uom_code: it?.uom_code ?? '',   // auto UoM
             }
           : r
       )
@@ -759,4 +771,3 @@ export default function NewInvoice() {
     </Protected>
   );
 }
-``
