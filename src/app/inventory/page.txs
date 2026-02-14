@@ -17,8 +17,8 @@ interface Row {
   stock_qty: number;
   unit_cost: number;
   low_stock_threshold: number | null;
-  uom_code: string; // normalized from relation ('' if missing)
-  uom_name: string; // normalized ('' if missing)
+  uom_code: string; // may be '' if missing
+  uom_name: string; // may be '' if missing
 }
 
 export default function InventoryPage() {
@@ -28,49 +28,80 @@ export default function InventoryPage() {
   const [uomFilter, setUomFilter] = useState(''); // filter by UoM code
   const [showOnlyLow, setShowOnlyLow] = useState(false); // low-stock toggle
   const [loading, setLoading] = useState(true);
+  const [lastError, setLastError] = useState<string>('');
 
-  // Load items + UoMs
   const load = async () => {
     setLoading(true);
+    setLastError('');
 
-    // Items with UoM (normalize array/object shapes)
-    const { data, error } = await supabase
-      .from('items')
-      .select(`
-        id, sku, name, stock_qty, unit_cost, low_stock_threshold,
-        uom:units_of_measure ( code, name )
-      `)
-      .order('sku', { ascending: true });
+    try {
+      // 1) Try items WITH UoM join
+      const { data, error } = await supabase
+        .from('items')
+        .select(`
+          id, sku, name, stock_qty, unit_cost, low_stock_threshold,
+          uom:units_of_measure ( code, name )
+        `)
+        .order('sku', { ascending: true });
 
-    if (error) {
-      alert(error.message);
-      setLoading(false);
-      return;
+      if (error) throw error;
+
+      // Log raw rows to help us see shape
+      // Open DevTools → Console to see this.
+      // eslint-disable-next-line no-console
+      console.log('Inventory items (joined):', data);
+
+      // Normalize UoM shape (array vs object)
+      const normalized: Row[] = (data ?? []).map((d: any) => {
+        const u = Array.isArray(d.uom) ? (d.uom[0] ?? null) : d.uom ?? null;
+        return {
+          id: d.id,
+          sku: d.sku,
+          name: d.name,
+          stock_qty: Number(d.stock_qty ?? 0),
+          unit_cost: Number(d.unit_cost ?? 0),
+          low_stock_threshold: d.low_stock_threshold ?? null,
+          uom_code: u?.code ?? '',
+          uom_name: u?.name ?? '',
+        };
+      });
+
+      setRows(normalized);
+    } catch (e: any) {
+      // 2) If join fails (e.g., RLS on units_of_measure), fall back to items only
+      setLastError(`Join failed: ${e?.message || String(e)}. Falling back to items only.`);
+      const { data: itemsOnly, error: e2 } = await supabase
+        .from('items')
+        .select(`id, sku, name, stock_qty, unit_cost, low_stock_threshold`)
+        .order('sku', { ascending: true });
+
+      if (e2) {
+        setLastError(`Items fetch failed: ${e2.message}`);
+        setRows([]);
+      } else {
+        // eslint-disable-next-line no-console
+        console.log('Inventory items (no join):', itemsOnly);
+        const normalized: Row[] = (itemsOnly ?? []).map((d: any) => ({
+          id: d.id,
+          sku: d.sku,
+          name: d.name,
+          stock_qty: Number(d.stock_qty ?? 0),
+          unit_cost: Number(d.unit_cost ?? 0),
+          low_stock_threshold: d.low_stock_threshold ?? null,
+          uom_code: '',
+          uom_name: '',
+        }));
+        setRows(normalized);
+      }
     }
 
-    const normalized: Row[] = (data ?? []).map((d: any) => {
-      const u = Array.isArray(d.uom) ? (d.uom[0] ?? null) : d.uom ?? null;
-      return {
-        id: d.id,
-        sku: d.sku,
-        name: d.name,
-        stock_qty: Number(d.stock_qty ?? 0),
-        unit_cost: Number(d.unit_cost ?? 0),
-        low_stock_threshold: d.low_stock_threshold ?? null,
-        uom_code: u?.code ?? '',
-        uom_name: u?.name ?? '',
-      };
-    });
-
-    setRows(normalized);
-
-    // UoMs for filter dropdown
+    // 3) Load UoMs for filter dropdown (best-effort)
     const { data: uomData, error: uomErr } = await supabase
       .from('units_of_measure')
       .select('id, code, name')
       .order('code', { ascending: true });
-
     if (!uomErr) setUoms((uomData as Uom[]) ?? []);
+
     setLoading(false);
   };
 
@@ -78,7 +109,6 @@ export default function InventoryPage() {
     load();
   }, []);
 
-  // Filtered rows
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();
     return rows.filter((r) => {
@@ -96,7 +126,6 @@ export default function InventoryPage() {
     });
   }, [rows, q, uomFilter, showOnlyLow]);
 
-  // Totals over filtered rows
   const totals = useMemo(() => {
     let qty = 0;
     let value = 0;
@@ -108,7 +137,6 @@ export default function InventoryPage() {
     return { qty: round2(qty), value: round2(value) };
   }, [filtered]);
 
-  // CSV export (filtered)
   const exportCsv = () => {
     const header = [
       'SKU',
@@ -144,7 +172,6 @@ export default function InventoryPage() {
     URL.revokeObjectURL(url);
   };
 
-  // Print Low-Stock Report (opens a simple print window)
   const printLowStock = () => {
     const low = filtered.filter((r) => {
       return (
@@ -211,6 +238,24 @@ export default function InventoryPage() {
 
   return (
     <Protected>
+      {/* DEBUG BAR */}
+      <div className="mb-2 text-xs text-gray-600">
+        <span>Items fetched: <b>{rows.length}</b></span>
+        {lastError ? <span className="ml-3 text-red-600">Error: {lastError}</span> : null}
+        <button
+          className="ml-3 underline"
+          onClick={() => { /* eslint-disable no-console */ console.log('Rows normalized:', rows); }}
+        >
+          Log rows
+        </button>
+        <button
+          className="ml-3 underline"
+          onClick={() => load()}
+        >
+          Reload
+        </button>
+      </div>
+
       <div className="card">
         <h1 className="text-xl font-semibold mb-4">Inventory</h1>
 
@@ -262,6 +307,15 @@ export default function InventoryPage() {
         {/* Table */}
         {loading ? (
           <p>Loading…</p>
+        ) : rows.length === 0 ? (
+          <div className="p-4 text-sm text-gray-700">
+            No items found. Tips:
+            <ul className="list-disc ml-6 mt-2">
+              <li>Add an item on <b>Items</b> page (with price/UoM).</li>
+              <li>Or check RLS policies for <code>items</code> table to allow <b>SELECT</b> for your user.</li>
+              <li>Open browser Console for <b>Inventory items</b> logs and any errors.</li>
+            </ul>
+          </div>
         ) : (
           <div className="overflow-auto">
             <table className="table">
