@@ -94,7 +94,7 @@ export default function NewInvoice() {
           id, name, unit_price, tax_rate,
           uom:units_of_measure ( code, name )
         `)
-        .eq('is_active', true)
+        .eq('is_active', true)       // remove this line if your items table has no is_active column
         .order('name');
 
       if (error) {
@@ -202,7 +202,7 @@ export default function NewInvoice() {
 
   /* -------- Row setters -------- */
 
-  // When user picks an item: auto-fill price, tax, description, UoM (popup automatically)
+  // When user picks an item: auto-fill price, tax, description, UoM
   const setItem = (rowId: string, itemId: string) => {
     const it = items.find((x) => x.id === itemId);
     setRows((prev) =>
@@ -214,17 +214,16 @@ export default function NewInvoice() {
               description: it?.name || '',
               base_price: it?.unit_price || 0,
               margin_pct: r.margin_pct || 0,
-              // Auto price = base (you can still edit later)
-              unit_price: it?.unit_price || 0,
+              unit_price: it?.unit_price || 0, // auto price
               tax_rate: it?.tax_rate || 0,
-              uom_code: it?.uom?.code ?? '', // <-- auto show Unit of Measure
+              uom_code: it?.uom?.code ?? '',   // auto UoM
             }
           : r
       )
     );
   };
 
-  // Optional: allow setting Margin% which recalculates unit_price (base + margin%)
+  // Optional: set Margin% => recalculates unit_price
   const setMargin = (rowId: string, m: number) => {
     setRows((prev) =>
       prev.map((r) =>
@@ -328,9 +327,9 @@ export default function NewInvoice() {
         .single();
       if (e1) throw e1;
 
-      // lines (NOTE: not storing UoM yet — tell me if you want it saved to DB)
+      // lines (NOTE: not storing UoM yet — say "save UoM too" if you want column added)
       const lineRows = rows.map((r) => ({
-        invoice_id: inv.id,
+        invoice_id: (inv as any).id,
         item_id: r.item_id,
         description: r.description,
         qty: r.qty,
@@ -637,7 +636,7 @@ export default function NewInvoice() {
                       />
                     </td>
 
-                    {/* UoM - auto popup (read-only) */}
+                    {/* UoM - auto (read-only) */}
                     <td>
                       <input
                         className="input"
@@ -660,3 +659,104 @@ export default function NewInvoice() {
                     </td>
 
                     {/* Margin % (optional) */}
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.01"
+                        value={r.margin_pct}
+                        onChange={(e) =>
+                          setMargin(r.id, parseFloat(e.target.value || '0'))
+                        }
+                      />
+                    </td>
+
+                    {/* Unit price (auto from item, editable) */}
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.01"
+                        value={r.unit_price}
+                        onChange={(e) =>
+                          setUnitPrice(r.id, parseFloat(e.target.value || '0'))
+                        }
+                      />
+                    </td>
+
+                    {/* Tax % */}
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.01"
+                        value={r.tax_rate}
+                        onChange={(e) =>
+                          setTaxRate(r.id, parseFloat(e.target.value || '0'))
+                        }
+                      />
+                    </td>
+
+                    {/* Line total */}
+                    <td>₹ {lineTotal.toFixed(2)}</td>
+
+                    {/* Remove */}
+                    <td>
+                      <button
+                        type="button"
+                        className="text-red-600 hover:underline"
+                        onClick={() => removeRow(r.id)}
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={8}>
+                  <Button type="button" onClick={addRow}>
+                    + Add Line
+                  </Button>
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+
+        {/* Totals + Actions */}
+        <div className="mt-6 grid md:grid-cols-3 gap-4">
+          <div className="md:col-span-2"></div>
+          <div className="card">
+            <div className="flex justify-between">
+              <div>Subtotal</div>
+              <div>₹ {totals.subtotal.toFixed(2)}</div>
+            </div>
+            <div className="flex justify-between">
+              <div>Tax</div>
+              <div>₹ {totals.tax.toFixed(2)}</div>
+            </div>
+            <div className="flex justify-between font-semibold text-lg">
+              <div>Total</div>
+              <div>₹ {totals.grand.toFixed(2)}</div>
+            </div>
+
+            <div className="mt-4 flex gap-2">
+              <Button type="button" onClick={save} disabled={saving}>
+                {saving ? 'Saving…' : 'Save Invoice'}
+              </Button>
+              {invoiceNoJustSaved && (
+                <div className="text-sm text-gray-600 self-center">
+                  Saved #{invoiceNoJustSaved}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </Protected>
+  );
+}
+``
