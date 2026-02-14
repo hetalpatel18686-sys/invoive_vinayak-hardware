@@ -1,0 +1,39 @@
+
+'use client';
+
+import { supabase } from '@/lib/supabaseClient';
+
+export default function SupaDebug() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '(missing)';
+  const keyFirst8 =
+    (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '(missing)').slice(0, 8);
+
+  const testQuery = async () => {
+    const { data, error } = await supabase.from('items').select('id, sku').limit(3);
+    alert(
+      error
+        ? `Error: ${error.message}`
+        : `OK – items returned: ${data?.length ?? 0}`
+    );
+    console.log('Items sample:', data, 'Error:', error);
+  };
+
+  return (
+    <div className="card">
+      <h1 className="text-xl font-semibold mb-2">Supabase Debug</h1>
+      <div className="space-y-2 text-sm">
+        <div>
+          <b>NEXT_PUBLIC_SUPABASE_URL:</b>{' '}
+          <code>{url.length > 60 ? url.slice(0, 60) + '…' : url}</code>
+        </div>
+        <div>
+          <b>NEXT_PUBLIC_SUPABASE_ANON_KEY (first 8):</b>{' '}
+          <code>{keyFirst8}</code>
+        </div>
+        <button className="btn mt-2" onClick={testQuery}>
+          Test SELECT from items
+        </button>
+      </div>
+    </div>
+  );
+}
