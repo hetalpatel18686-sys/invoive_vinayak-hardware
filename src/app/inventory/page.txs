@@ -1,9 +1,67 @@
 'use client';
 
-export default function InventorySmoke() {
+import { useEffect, useState } from 'react';
+import { createClient } from '@supabase/supabase-js';
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+);
+
+export default function InventoryPage() {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const fetchItems = async () => {
+      const { data, error } = await supabase
+        .from('items')
+        .select('*');
+
+      if (error) {
+        setError(error.message);
+      } else {
+        setItems(data);
+      }
+
+      setLoading(false);
+    };
+
+    fetchItems();
+  }, []);
+
+  if (loading) return <div style={{ padding: 20 }}>Loading inventory...</div>;
+  if (error) return <div style={{ padding: 20, color: 'red' }}>Error: {error}</div>;
+
   return (
-    <div style={{ padding: 24, fontSize: 24, fontWeight: 700 }}>
-      INVENTORY SMOKE ✅
+    <div style={{ padding: 24 }}>
+      <h2 style={{ fontSize: 24, marginBottom: 20 }}>Inventory</h2>
+
+      {items.length === 0 ? (
+        <div>No items found.</div>
+      ) : (
+        <table border="1" cellPadding="10" style={{ borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>SKU</th>
+              <th>Name</th>
+              <th>Stock</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => (
+              <tr key={item.id}>
+                <td>{item.id}</td>
+                <td>{item.sku}</td>
+                <td>{item.name}</td>
+                <td>{item.stock}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }
