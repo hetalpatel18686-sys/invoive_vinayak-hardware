@@ -1,4 +1,3 @@
-
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
@@ -30,8 +29,10 @@ export default function InventoryPage() {
         .order('sku', { ascending: true });
 
       if (error) throw error;
-      // eslint-disable-next-line no-console
-      console.log('Inventory items:', data);
+
+      // Optional: inspect in DevTools console
+      // console.log('Inventory items:', data);
+
       setRows(
         (data ?? []).map((d: any) => ({
           id: d.id,
@@ -80,8 +81,12 @@ export default function InventoryPage() {
     <Protected>
       <div className="mb-2 text-xs text-gray-600">
         Items fetched: <b>{rows.length}</b>
-        {errorText ? <span className="ml-3 text-red-600">Error: {errorText}</span> : null}
-        <button className="ml-3 underline" onClick={() => load()}>Reload</button>
+        {errorText ? (
+          <span className="ml-3 text-red-600">Error: {errorText}</span>
+        ) : null}
+        <button className="ml-3 underline" onClick={() => load()}>
+          Reload
+        </button>
       </div>
 
       <div className="card">
@@ -100,7 +105,8 @@ export default function InventoryPage() {
           <p>Loading…</p>
         ) : rows.length === 0 ? (
           <div className="p-4 text-sm text-gray-700">
-            No items found. If you do see rows in Supabase Table Editor, we likely have a configuration issue (see next steps).
+            No items found. If you do see rows in Supabase Table Editor, we
+            likely have a configuration issue (env vars / domain / policies).
           </div>
         ) : (
           <div className="overflow-auto">
@@ -130,7 +136,9 @@ export default function InventoryPage() {
               </tbody>
               <tfoot>
                 <tr className="font-semibold">
-                  <td colSpan={2} className="text-right">Totals:</td>
+                  <td colSpan={2} className="text-right">
+                    Totals:
+                  </td>
                   <td className="text-right">{totals.qty}</td>
                   <td className="text-right">—</td>
                   <td className="text-right">₹ {totals.value.toFixed(2)}</td>
