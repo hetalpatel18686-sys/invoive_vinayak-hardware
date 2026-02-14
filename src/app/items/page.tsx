@@ -6,11 +6,11 @@ import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 import Protected from '@/components/Protected';
 
-/** ---------- Types ---------- */
+/* ---------- Types ---------- */
 interface Uom {
   id: string;
-  code: string; // e.g. 'EA', 'BOX'
-  name: string; // e.g. 'Each', 'Box'
+  code: string; // e.g., 'EA', 'BOX'
+  name: string; // e.g., 'Each', 'Box'
 }
 
 interface Item {
@@ -24,11 +24,12 @@ interface Item {
   stock_qty: number;
   low_stock_threshold: number | null;
 
-  // New: link to units_of_measure
+  // From DB
   uom_id?: string | null;
+  // Joined (for display)
+  uom?: { code: string; name: string } | null;
 }
 
-/** ---------- Page ---------- */
 export default function Items() {
   const [items, setItems] = useState<Item[]>([]);
   const [uoms, setUoms] = useState<Uom[]>([]);
@@ -45,32 +46,35 @@ export default function Items() {
     uom_id: '' as string | '',
   });
 
-  // Quick map so we can find UoM code by id efficiently
-  const uomMap = useMemo(() => {
-    const m = new Map<string, Uom>();
-    for (const u of uoms) m.set(u.id, u);
-    return m;
-  }, [uoms]);
-
-  /** Load items + UoMs */
   const load = async () => {
     setLoading(true);
 
-    // Load items
+    // Load items with join to UoM so we can show code in the table
     const { data: itemsData, error: itemsError } = await supabase
       .from('items')
-      .select('*')
+      .select(`
+        id, sku, name, description, unit_cost, unit_price, tax_rate, stock_qty, low_stock_threshold, uom_id,
+        uom:units_of_measure ( code, name )
+      `)
       .order('created_at', { ascending: false });
 
-    if (!itemsError) setItems((itemsData as Item[]) ?? []);
+    if (itemsError) {
+      alert(itemsError.message);
+    } else {
+      setItems((itemsData as Item[]) ?? []);
+    }
 
-    // Load UoMs (for dropdown)
+    // Load UoMs for the dropdown
     const { data: uomsData, error: uomsError } = await supabase
       .from('units_of_measure')
       .select('id, code, name')
       .order('code', { ascending: true });
 
-    if (!uomsError) setUoms((uomsData as Uom[]) ?? []);
+    if (uomsError) {
+      alert(uomsError.message);
+    } else {
+      setUoms((uomsData as Uom[]) ?? []);
+    }
 
     setLoading(false);
   };
@@ -79,7 +83,6 @@ export default function Items() {
     load();
   }, []);
 
-  /** Add a new item */
   const add = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -93,14 +96,14 @@ export default function Items() {
       low_stock_threshold: Number.isFinite(form.low_stock_threshold)
         ? Number(form.low_stock_threshold)
         : 0,
-      uom_id: form.uom_id || null, // allow empty selection
+      uom_id: form.uom_id || null,   // <-- save selection (null allowed)
     };
 
     const { error } = await supabase.from('items').insert([payload]);
     if (error) {
       alert(error.message);
     } else {
-      // Reset and reload
+      // Reset the form
       setForm({
         sku: '',
         name: '',
@@ -138,26 +141,27 @@ export default function Items() {
               </thead>
               <tbody>
                 {items.map((it) => {
-                  const margin = it.unit_price - it.unit_cost;
-                  const pct = it.unit_price > 0 ? (margin / it.unit_price) * 100 : 0;
+                  const margin = (it.unit_price || 0) - (it.unit_cost || 0);
+                  const pct =
+                    (it.unit_price || 0) > 0
+                      ? (margin / it.unit_price) * 100
+                      : 0;
                   const low =
                     it.low_stock_threshold != null &&
                     it.low_stock_threshold > 0 &&
-                    it.stock_qty <= it.low_stock_threshold;
-
-                  const uom = it.uom_id ? uomMap.get(it.uom_id) : undefined;
+                    (it.stock_qty || 0) <= it.low_stock_threshold;
 
                   return (
                     <tr key={it.id} className={low ? 'bg-orange-50' : ''}>
                       <td>{it.sku}</td>
                       <td>{it.name}</td>
-                      <td>{uom?.code ?? '-'}</td>
-                      <td>${it.unit_price.toFixed(2)}</td>
-                      <td>${it.unit_cost.toFixed(2)}</td>
+                      <td>{it.uom?.code ?? '-'}</td>
+                      <td>${(it.unit_price || 0).toFixed(2)}</td>
+                      <td>${(it.unit_cost || 0).toFixed(2)}</td>
                       <td>
                         {margin.toFixed(2)} ({pct.toFixed(1)}%)
                       </td>
-                      <td>{it.stock_qty}</td>
+                      <td>{it.stock_qty ?? 0}</td>
                     </tr>
                   );
                 })}
@@ -197,7 +201,7 @@ export default function Items() {
                 type="number"
                 step="0.01"
                 placeholder="Cost"
-                value={Number.isFinite(form.unit_cost) ? form.unit_cost : 0}
+                value={form.unit_cost}
                 onChange={(e) =>
                   setForm({ ...form, unit_cost: parseFloat(e.target.value || '0') })
                 }
@@ -207,7 +211,7 @@ export default function Items() {
                 type="number"
                 step="0.01"
                 placeholder="Price"
-                value={Number.isFinite(form.unit_price) ? form.unit_price : 0}
+                value={form.unit_price}
                 onChange={(e) =>
                   setForm({ ...form, unit_price: parseFloat(e.target.value || '0') })
                 }
@@ -217,14 +221,14 @@ export default function Items() {
                 type="number"
                 step="0.01"
                 placeholder="Tax %"
-                value={Number.isFinite(form.tax_rate) ? form.tax_rate : 0}
+                value={form.tax_rate}
                 onChange={(e) =>
                   setForm({ ...form, tax_rate: parseFloat(e.target.value || '0') })
                 }
               />
             </div>
 
-            {/* NEW: UoM selection */}
+            {/* UoM SELECT */}
             <select
               className="input"
               value={form.uom_id}
@@ -238,21 +242,17 @@ export default function Items() {
               ))}
             </select>
 
-            {/* REMOVED: Profit preview */}
+            {/* Removed: Profit preview line */}
 
             <input
               className="input"
               type="number"
               placeholder="Low stock threshold"
-              value={
-                Number.isFinite(form.low_stock_threshold)
-                  ? form.low_stock_threshold
-                  : 0
-              }
+              value={form.low_stock_threshold}
               onChange={(e) =>
                 setForm({
                   ...form,
-                  low_stock_threshold: parseInt(e.target.value || '0'),
+                  low_stock_threshold: parseInt(e.target.value || '0', 10),
                 })
               }
             />
