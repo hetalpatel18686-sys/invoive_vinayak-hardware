@@ -6,11 +6,9 @@ import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 
 export default function NavBar() {
-  // Hide on /login
   const pathname = usePathname();
   if (pathname === '/login') return null;
 
-  // Brand
   const brandName = process.env.NEXT_PUBLIC_BRAND_NAME || 'Vinayak Hardware';
   const brandLogo = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '';
 
@@ -25,7 +23,6 @@ export default function NavBar() {
     window.location.replace('/login');
   };
 
-  // active link styling
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(href + '/');
 
@@ -37,7 +34,7 @@ export default function NavBar() {
   return (
     <header className="w-full bg-primary text-white">
       <nav className="mx-auto max-w-6xl flex items-center justify-between px-4 py-3">
-        {/* Brand (logo + name) */}
+        {/* Brand */}
         <div className="flex items-center gap-3">
           {brandLogo ? (
             <img
@@ -48,7 +45,7 @@ export default function NavBar() {
           ) : null}
           <span className="font-semibold">{brandName}</span>
 
-          {/* Main navigation links */}
+          {/* Links */}
           <div className="flex gap-6 text-sm font-medium ml-6">
             <Link className={linkClass('/customers')} href="/customers">Customers</Link>
             <Link className={linkClass('/items')} href="/items">Items</Link>
@@ -59,7 +56,7 @@ export default function NavBar() {
           </div>
         </div>
 
-        {/* Right side: user or sign in */}
+        {/* Right: auth */}
         <div className="text-sm">
           {email ? (
             <div className="flex items-center gap-4">
