@@ -1,14 +1,9 @@
+
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import Protected from '@/components/Protected';
-
-interface Uom {
-  id: string;
-  code: string;
-  name: string;
-}
 
 interface Row {
   id: string;
@@ -17,92 +12,42 @@ interface Row {
   stock_qty: number;
   unit_cost: number;
   low_stock_threshold: number | null;
-  uom_code: string; // may be '' if missing
-  uom_name: string; // may be '' if missing
 }
 
 export default function InventoryPage() {
   const [rows, setRows] = useState<Row[]>([]);
-  const [uoms, setUoms] = useState<Uom[]>([]);
-  const [q, setQ] = useState('');               // search query
-  const [uomFilter, setUomFilter] = useState(''); // filter by UoM code
-  const [showOnlyLow, setShowOnlyLow] = useState(false); // low-stock toggle
+  const [q, setQ] = useState('');
   const [loading, setLoading] = useState(true);
-  const [lastError, setLastError] = useState<string>('');
+  const [errorText, setErrorText] = useState<string>('');
 
   const load = async () => {
     setLoading(true);
-    setLastError('');
-
+    setErrorText('');
     try {
-      // 1) Try items WITH UoM join
       const { data, error } = await supabase
         .from('items')
-        .select(`
-          id, sku, name, stock_qty, unit_cost, low_stock_threshold,
-          uom:units_of_measure ( code, name )
-        `)
+        .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold')
         .order('sku', { ascending: true });
 
       if (error) throw error;
-
-      // Log raw rows to help us see shape
-      // Open DevTools → Console to see this.
       // eslint-disable-next-line no-console
-      console.log('Inventory items (joined):', data);
-
-      // Normalize UoM shape (array vs object)
-      const normalized: Row[] = (data ?? []).map((d: any) => {
-        const u = Array.isArray(d.uom) ? (d.uom[0] ?? null) : d.uom ?? null;
-        return {
+      console.log('Inventory items:', data);
+      setRows(
+        (data ?? []).map((d: any) => ({
           id: d.id,
           sku: d.sku,
           name: d.name,
           stock_qty: Number(d.stock_qty ?? 0),
           unit_cost: Number(d.unit_cost ?? 0),
           low_stock_threshold: d.low_stock_threshold ?? null,
-          uom_code: u?.code ?? '',
-          uom_name: u?.name ?? '',
-        };
-      });
-
-      setRows(normalized);
+        }))
+      );
     } catch (e: any) {
-      // 2) If join fails (e.g., RLS on units_of_measure), fall back to items only
-      setLastError(`Join failed: ${e?.message || String(e)}. Falling back to items only.`);
-      const { data: itemsOnly, error: e2 } = await supabase
-        .from('items')
-        .select(`id, sku, name, stock_qty, unit_cost, low_stock_threshold`)
-        .order('sku', { ascending: true });
-
-      if (e2) {
-        setLastError(`Items fetch failed: ${e2.message}`);
-        setRows([]);
-      } else {
-        // eslint-disable-next-line no-console
-        console.log('Inventory items (no join):', itemsOnly);
-        const normalized: Row[] = (itemsOnly ?? []).map((d: any) => ({
-          id: d.id,
-          sku: d.sku,
-          name: d.name,
-          stock_qty: Number(d.stock_qty ?? 0),
-          unit_cost: Number(d.unit_cost ?? 0),
-          low_stock_threshold: d.low_stock_threshold ?? null,
-          uom_code: '',
-          uom_name: '',
-        }));
-        setRows(normalized);
-      }
+      setErrorText(e?.message || String(e));
+      setRows([]);
+    } finally {
+      setLoading(false);
     }
-
-    // 3) Load UoMs for filter dropdown (best-effort)
-    const { data: uomData, error: uomErr } = await supabase
-      .from('units_of_measure')
-      .select('id, code, name')
-      .order('code', { ascending: true });
-    if (!uomErr) setUoms((uomData as Uom[]) ?? []);
-
-    setLoading(false);
   };
 
   useEffect(() => {
@@ -112,19 +57,13 @@ export default function InventoryPage() {
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();
     return rows.filter((r) => {
-      const matchTerm =
+      return (
         !term ||
         r.sku.toLowerCase().includes(term) ||
-        (r.name ?? '').toLowerCase().includes(term);
-      const matchUom = !uomFilter || r.uom_code === uomFilter;
-      const isLow =
-        r.low_stock_threshold != null &&
-        r.low_stock_threshold > 0 &&
-        r.stock_qty <= r.low_stock_threshold;
-
-      return matchTerm && matchUom && (!showOnlyLow || isLow);
+        (r.name ?? '').toLowerCase().includes(term)
+      );
     });
-  }, [rows, q, uomFilter, showOnlyLow]);
+  }, [rows, q]);
 
   const totals = useMemo(() => {
     let qty = 0;
@@ -137,184 +76,31 @@ export default function InventoryPage() {
     return { qty: round2(qty), value: round2(value) };
   }, [filtered]);
 
-  const exportCsv = () => {
-    const header = [
-      'SKU',
-      'Item',
-      'UoM',
-      'Qty',
-      'Avg Unit Cost',
-      'Total Value',
-      'Low Stock Threshold',
-    ];
-    const lines = filtered.map((r) => {
-      const total = r.stock_qty * r.unit_cost;
-      return [
-        r.sku,
-        r.name?.replaceAll('"', '""') ?? '',
-        r.uom_code,
-        String(r.stock_qty),
-        r.unit_cost.toFixed(2),
-        total.toFixed(2),
-        r.low_stock_threshold != null ? String(r.low_stock_threshold) : '',
-      ]
-        .map((v) => `"${v}"`)
-        .join(',');
-    });
-    const csv = [header.join(','), ...lines].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    const date = new Date().toISOString().slice(0, 10);
-    a.download = `inventory_${date}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const printLowStock = () => {
-    const low = filtered.filter((r) => {
-      return (
-        r.low_stock_threshold != null &&
-        r.low_stock_threshold > 0 &&
-        r.stock_qty <= r.low_stock_threshold
-      );
-    });
-
-    const html = `
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Low-Stock Report</title>
-    <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 16px; }
-      h1 { font-size: 18px; margin: 0 0 12px; }
-      table { width: 100%; border-collapse: collapse; }
-      th, td { border: 1px solid #ddd; padding: 6px 8px; font-size: 12px; }
-      th { background: #f5f5f5; text-align: left; }
-    </style>
-  </head>
-  <body>
-    <h1>Low-Stock Report</h1>
-    <table>
-      <thead>
-        <tr>
-          <th>SKU</th>
-          <th>Item</th>
-          <th>UoM</th>
-          <th>Qty</th>
-          <th>Minimum</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${low
-          .map(
-            (r) => `
-          <tr>
-            <td>${r.sku}</td>
-            <td>${(r.name ?? '').replace(/</g, '&lt;')}</td>
-            <td>${r.uom_code || '-'}</td>
-            <td>${r.stock_qty}</td>
-            <td>${r.low_stock_threshold ?? ''}</td>
-          </tr>`
-          )
-          .join('')}
-      </tbody>
-    </table>
-    <script>
-      window.print();
-      setTimeout(() => window.close(), 500);
-    </script>
-  </body>
-</html>`.trim();
-
-    const w = window.open('', '_blank', 'width=900,height=700');
-    if (!w) return;
-    w.document.open();
-    w.document.write(html);
-    w.document.close();
-  };
-
   return (
     <Protected>
-      {/* DEBUG BAR */}
       <div className="mb-2 text-xs text-gray-600">
-        <span>Items fetched: <b>{rows.length}</b></span>
-        {lastError ? <span className="ml-3 text-red-600">Error: {lastError}</span> : null}
-        <button
-          className="ml-3 underline"
-          onClick={() => { /* eslint-disable no-console */ console.log('Rows normalized:', rows); }}
-        >
-          Log rows
-        </button>
-        <button
-          className="ml-3 underline"
-          onClick={() => load()}
-        >
-          Reload
-        </button>
+        Items fetched: <b>{rows.length}</b>
+        {errorText ? <span className="ml-3 text-red-600">Error: {errorText}</span> : null}
+        <button className="ml-3 underline" onClick={() => load()}>Reload</button>
       </div>
 
       <div className="card">
-        <h1 className="text-xl font-semibold mb-4">Inventory</h1>
+        <h1 className="text-xl font-semibold mb-4">Inventory (items only)</h1>
 
-        {/* Filters / Actions */}
-        <div className="mb-3 grid md:grid-cols-5 gap-2">
+        <div className="mb-3 grid md:grid-cols-3 gap-2">
           <input
             className="input"
             placeholder="Search SKU or Name…"
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
-
-          <select
-            className="input"
-            value={uomFilter}
-            onChange={(e) => setUomFilter(e.target.value)}
-          >
-            <option value="">All Units</option>
-            {uoms.map((u) => (
-              <option key={u.id} value={u.code}>
-                {u.code} — {u.name}
-              </option>
-            ))}
-          </select>
-
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={showOnlyLow}
-              onChange={(e) => setShowOnlyLow(e.target.checked)}
-            />
-            Low stock only
-          </label>
-
-          <button type="button" className="btn" onClick={exportCsv}>
-            Export CSV
-          </button>
-
-          <button
-            type="button"
-            className="btn"
-            onClick={printLowStock}
-            title="Print items where Qty ≤ Minimum threshold"
-          >
-            Print Low-Stock
-          </button>
         </div>
 
-        {/* Table */}
         {loading ? (
           <p>Loading…</p>
         ) : rows.length === 0 ? (
           <div className="p-4 text-sm text-gray-700">
-            No items found. Tips:
-            <ul className="list-disc ml-6 mt-2">
-              <li>Add an item on <b>Items</b> page (with price/UoM).</li>
-              <li>Or check RLS policies for <code>items</code> table to allow <b>SELECT</b> for your user.</li>
-              <li>Open browser Console for <b>Inventory items</b> logs and any errors.</li>
-            </ul>
+            No items found. If you do see rows in Supabase Table Editor, we likely have a configuration issue (see next steps).
           </div>
         ) : (
           <div className="overflow-auto">
@@ -323,9 +109,7 @@ export default function InventoryPage() {
                 <tr>
                   <th>SKU</th>
                   <th>Item</th>
-                  <th>UoM</th>
                   <th className="text-right">Qty</th>
-                  <th className="text-right">Minimum</th>
                   <th className="text-right">Avg Unit Cost</th>
                   <th className="text-right">Total Value (₹)</th>
                 </tr>
@@ -333,19 +117,11 @@ export default function InventoryPage() {
               <tbody>
                 {filtered.map((r) => {
                   const total = r.stock_qty * r.unit_cost;
-                  const isLow =
-                    r.low_stock_threshold != null &&
-                    r.low_stock_threshold > 0 &&
-                    r.stock_qty <= r.low_stock_threshold;
                   return (
-                    <tr key={r.id} className={isLow ? 'bg-red-50' : ''}>
+                    <tr key={r.id}>
                       <td>{r.sku}</td>
                       <td>{r.name}</td>
-                      <td>{r.uom_code || '-'}</td>
                       <td className="text-right">{r.stock_qty}</td>
-                      <td className="text-right">
-                        {r.low_stock_threshold != null ? r.low_stock_threshold : '—'}
-                      </td>
                       <td className="text-right">₹ {r.unit_cost.toFixed(2)}</td>
                       <td className="text-right">₹ {total.toFixed(2)}</td>
                     </tr>
@@ -354,11 +130,8 @@ export default function InventoryPage() {
               </tbody>
               <tfoot>
                 <tr className="font-semibold">
-                  <td colSpan={3} className="text-right">
-                    Totals:
-                  </td>
+                  <td colSpan={2} className="text-right">Totals:</td>
                   <td className="text-right">{totals.qty}</td>
-                  <td className="text-right">—</td>
                   <td className="text-right">—</td>
                   <td className="text-right">₹ {totals.value.toFixed(2)}</td>
                 </tr>
