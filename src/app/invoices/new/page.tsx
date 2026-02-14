@@ -8,6 +8,7 @@ import Protected from '@/components/Protected';
 
 type DocType = 'sale' | 'return';
 
+/* ------------ Types ------------- */
 interface Customer {
   id: string;
   first_name: string;
@@ -25,19 +26,25 @@ interface Item {
   name: string;
   unit_price: number;
   tax_rate: number;
+  uom?: {
+    code: string;
+    name: string;
+  } | null;
 }
 
 interface Row {
   id: string;
   item_id: string;
-  base_price: number;   // base price from DB
-  margin_pct: number;   // margin (screen only, print-hidden)
-  qty: number;
-  unit_price: number;   // computed price (base + margin%)
-  tax_rate: number;
   description?: string;
+  uom_code?: string;   // auto from item.uom.code (read-only in UI)
+  base_price: number;  // base price from DB
+  margin_pct: number;  // % added to base (optional)
+  qty: number;
+  unit_price: number;  // (auto) base + margin%  | user can override
+  tax_rate: number;
 }
 
+/* ------------ Page ------------- */
 export default function NewInvoice() {
   // --- Branding (env first; fallback) ---
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
@@ -55,7 +62,7 @@ export default function NewInvoice() {
   // --- Customer by phone ---
   const [customerPhone, setCustomerPhone] = useState('');
   const [customerId, setCustomerId] = useState<string>('');
-  const [customerName, setCustomerName] = useState<string>('');     // NEW: First + Last
+  const [customerName, setCustomerName] = useState<string>(''); // First + Last
   const [customerAddress1Line, setCustomerAddress1Line] = useState<string>('');
   const [showCreateCustomer, setShowCreateCustomer] = useState(false);
 
@@ -81,23 +88,32 @@ export default function NewInvoice() {
   // Load items and start with one line
   useEffect(() => {
     (async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('items')
-        .select('id,name,unit_price,tax_rate')
+        .select(`
+          id, name, unit_price, tax_rate,
+          uom:units_of_measure ( code, name )
+        `)
         .eq('is_active', true)
         .order('name');
+
+      if (error) {
+        console.error(error);
+        alert(error.message);
+      }
 
       setItems((data as Item[]) ?? []);
       setRows([
         {
           id: crypto.randomUUID(),
           item_id: '',
+          description: '',
+          uom_code: '',
           base_price: 0,
           margin_pct: 0,
           qty: 1,
           unit_price: 0,
           tax_rate: 0,
-          description: '',
         },
       ]);
     })();
@@ -117,7 +133,7 @@ export default function NewInvoice() {
     return Math.round((n + Number.EPSILON) * 100) / 100;
   }
 
-  // Lookup customer
+  /* -------- Customer Lookup -------- */
   const lookupCustomerByPhone = async () => {
     const phone = (customerPhone || '').trim();
     if (!phone) {
@@ -154,13 +170,12 @@ export default function NewInvoice() {
     } else {
       const c = data[0] as Customer;
       setCustomerId(c.id);
-      setCustomerName(fullName(c));                                // NEW
+      setCustomerName(fullName(c));
       setCustomerAddress1Line(oneLineAddress(c));
       setShowCreateCustomer(false);
     }
   };
 
-  // Create customer
   const createCustomer = async () => {
     if (!newCust.first_name || !newCust.last_name) {
       alert('Please enter first and last name for the customer');
@@ -180,59 +195,108 @@ export default function NewInvoice() {
     const c = data as Customer;
     setCustomerId(c.id);
     setCustomerPhone(c.phone || newCust.phone);
-    setCustomerName(fullName(c));                                   // NEW
+    setCustomerName(fullName(c));
     setCustomerAddress1Line(oneLineAddress(c));
     setShowCreateCustomer(false);
   };
 
-  // Change item on a row (dropdown) — your original behavior
+  /* -------- Row setters -------- */
+
+  // When user picks an item: auto-fill price, tax, description, UoM (popup automatically)
   const setItem = (rowId: string, itemId: string) => {
     const it = items.find((x) => x.id === itemId);
-    setRows(
-      rows.map((r) =>
+    setRows((prev) =>
+      prev.map((r) =>
         r.id === rowId
           ? {
               ...r,
               item_id: itemId,
+              description: it?.name || '',
               base_price: it?.unit_price || 0,
               margin_pct: r.margin_pct || 0,
-              unit_price: it?.unit_price || 0,     // auto price
+              // Auto price = base (you can still edit later)
+              unit_price: it?.unit_price || 0,
               tax_rate: it?.tax_rate || 0,
-              description: it?.name || '',
+              uom_code: it?.uom?.code ?? '', // <-- auto show Unit of Measure
             }
           : r
       )
     );
   };
 
-  // Margin %
+  // Optional: allow setting Margin% which recalculates unit_price (base + margin%)
   const setMargin = (rowId: string, m: number) => {
-    setRows(
-      rows.map((r) =>
+    setRows((prev) =>
+      prev.map((r) =>
         r.id === rowId
           ? {
               ...r,
               margin_pct: m,
-              unit_price: round2(r.base_price * (1 + (m || 0) / 100)),
+              unit_price: round2((r.base_price || 0) * (1 + (m || 0) / 100)),
             }
           : r
       )
     );
   };
 
-  // Totals
+  const setQty = (rowId: string, qty: number) => {
+    setRows((prev) =>
+      prev.map((r) => (r.id === rowId ? { ...r, qty: qty || 0 } : r))
+    );
+  };
+
+  const setUnitPrice = (rowId: string, price: number) => {
+    setRows((prev) =>
+      prev.map((r) => (r.id === rowId ? { ...r, unit_price: price || 0 } : r))
+    );
+  };
+
+  const setTaxRate = (rowId: string, rate: number) => {
+    setRows((prev) =>
+      prev.map((r) => (r.id === rowId ? { ...r, tax_rate: rate || 0 } : r))
+    );
+  };
+
+  const setDescription = (rowId: string, desc: string) => {
+    setRows((prev) =>
+      prev.map((r) => (r.id === rowId ? { ...r, description: desc } : r))
+    );
+  };
+
+  const addRow = () => {
+    setRows((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        item_id: '',
+        description: '',
+        uom_code: '',
+        base_price: 0,
+        margin_pct: 0,
+        qty: 1,
+        unit_price: 0,
+        tax_rate: 0,
+      },
+    ]);
+  };
+
+  const removeRow = (rowId: string) => {
+    setRows((prev) => prev.filter((r) => r.id !== rowId));
+  };
+
+  /* -------- Totals -------- */
   const totals = useMemo(() => {
-    let subtotal = 0,
-      tax = 0;
+    let subtotal = 0;
+    let tax = 0;
     for (const r of rows) {
-      const line = r.qty * r.unit_price;
+      const line = (r.qty || 0) * (r.unit_price || 0);
       subtotal += line;
-      tax += line * (r.tax_rate / 100);
+      tax += line * ((r.tax_rate || 0) / 100);
     }
-    return { subtotal, tax, grand: subtotal + tax };
+    return { subtotal: round2(subtotal), tax: round2(tax), grand: round2(subtotal + tax) };
   }, [rows]);
 
-  // Save
+  /* -------- Save -------- */
   const save = async () => {
     if (!customerId) return alert('Please lookup or create the customer (by phone) first');
     if (rows.length === 0 || !rows[0].item_id) return alert('Add at least one line item');
@@ -264,7 +328,7 @@ export default function NewInvoice() {
         .single();
       if (e1) throw e1;
 
-      // lines
+      // lines (NOTE: not storing UoM yet — tell me if you want it saved to DB)
       const lineRows = rows.map((r) => ({
         invoice_id: inv.id,
         item_id: r.item_id,
@@ -283,23 +347,24 @@ export default function NewInvoice() {
         item_id: r.item_id,
         move_type: moveType,
         qty: r.qty,
-        ref: inv.invoice_no,
+        ref: (inv as any).invoice_no,
         reason: docType,
       }));
       const { error: e3 } = await supabase.from('stock_moves').insert(moves);
       if (e3) throw e3;
 
-      setInvoiceIdJustSaved(inv.id);
-      setInvoiceNoJustSaved(inv.invoice_no);
+      setInvoiceIdJustSaved((inv as any).id);
+      setInvoiceNoJustSaved((inv as any).invoice_no);
       alert('Saved invoice #' + invoiceNo);
     } catch (err: any) {
+      console.error(err);
       alert(err.message);
     } finally {
       setSaving(false);
     }
   };
 
-  // New invoice (reset page)
+  /* -------- Reset & Print -------- */
   function handleNewInvoice() {
     setIssuedAt(new Date().toISOString().slice(0, 10));
     setDocType('sale');
@@ -322,12 +387,13 @@ export default function NewInvoice() {
       {
         id: crypto.randomUUID(),
         item_id: '',
+        description: '',
+        uom_code: '',
         base_price: 0,
         margin_pct: 0,
         qty: 1,
         unit_price: 0,
         tax_rate: 0,
-        description: '',
       },
     ]);
     setNotes('');
@@ -336,13 +402,13 @@ export default function NewInvoice() {
     setInvoiceNoJustSaved(null);
   }
 
-  // Print invoice
   function openPrint() {
     if (invoiceIdJustSaved) {
       window.open(`/invoices/${invoiceIdJustSaved}`, '_blank');
     }
   }
 
+  /* ------------- UI ------------- */
   return (
     <Protected>
       {/* Header with brand + action buttons */}
@@ -408,3 +474,189 @@ export default function NewInvoice() {
             <input
               className="input"
               value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Optional notes"
+            />
+          </div>
+        </div>
+
+        {/* Customer by mobile number */}
+        <div className="card mb-4">
+          <div className="grid md:grid-cols-3 gap-3 items-end">
+            <div>
+              <label className="label">Customer Mobile</label>
+              <input
+                className="input"
+                placeholder="Enter mobile number"
+                value={customerPhone}
+                onChange={(e) => setCustomerPhone(e.target.value)}
+              />
+            </div>
+            <div>
+              <Button type="button" onClick={lookupCustomerByPhone}>
+                Lookup Customer
+              </Button>
+            </div>
+
+            <div className="text-sm">
+              <div className="font-semibold">Customer</div>
+              <div>{customerName || '—'}</div>
+              <div className="text-gray-600">{customerAddress1Line || '—'}</div>
+            </div>
+          </div>
+
+          {showCreateCustomer && (
+            <div className="mt-4 border-t pt-4">
+              <div className="grid md:grid-cols-3 gap-3">
+                <div>
+                  <label className="label">First name</label>
+                  <input
+                    className="input"
+                    value={newCust.first_name}
+                    onChange={(e) =>
+                      setNewCust({ ...newCust, first_name: e.target.value })
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="label">Last name</label>
+                  <input
+                    className="input"
+                    value={newCust.last_name}
+                    onChange={(e) =>
+                      setNewCust({ ...newCust, last_name: e.target.value })
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="label">Phone</label>
+                  <input
+                    className="input"
+                    value={newCust.phone}
+                    onChange={(e) => setNewCust({ ...newCust, phone: e.target.value })}
+                  />
+                </div>
+
+                <div className="md:col-span-3">
+                  <label className="label">Street</label>
+                  <input
+                    className="input"
+                    value={newCust.street_name}
+                    onChange={(e) =>
+                      setNewCust({ ...newCust, street_name: e.target.value })
+                    }
+                  />
+                </div>
+
+                <div>
+                  <label className="label">Village/Town</label>
+                  <input
+                    className="input"
+                    value={newCust.village_town}
+                    onChange={(e) =>
+                      setNewCust({ ...newCust, village_town: e.target.value })
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="label">City</label>
+                  <input
+                    className="input"
+                    value={newCust.city}
+                    onChange={(e) => setNewCust({ ...newCust, city: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label">State</label>
+                  <input
+                    className="input"
+                    value={newCust.state}
+                    onChange={(e) => setNewCust({ ...newCust, state: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label">PIN</label>
+                  <input
+                    className="input"
+                    value={newCust.postal_code}
+                    onChange={(e) =>
+                      setNewCust({ ...newCust, postal_code: e.target.value })
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="mt-3">
+                <Button type="button" onClick={createCustomer}>
+                  Create Customer
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Line items */}
+        <div className="overflow-auto">
+          <table className="table">
+            <thead>
+              <tr>
+                <th style={{ minWidth: 220 }}>Item</th>
+                <th>UoM</th>
+                <th style={{ minWidth: 90 }}>Qty</th>
+                <th style={{ minWidth: 120 }}>Margin %</th>
+                <th style={{ minWidth: 120 }}>Unit Price</th>
+                <th style={{ minWidth: 90 }}>Tax %</th>
+                <th style={{ minWidth: 120 }}>Line Total</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const lineTotal = round2((r.qty || 0) * (r.unit_price || 0));
+                return (
+                  <tr key={r.id}>
+                    {/* Item select */}
+                    <td>
+                      <select
+                        className="input"
+                        value={r.item_id}
+                        onChange={(e) => setItem(r.id, e.target.value)}
+                      >
+                        <option value="">Select item…</option>
+                        {items.map((it) => (
+                          <option key={it.id} value={it.id}>
+                            {it.name}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        className="input mt-2"
+                        placeholder="Description (optional)"
+                        value={r.description || ''}
+                        onChange={(e) => setDescription(r.id, e.target.value)}
+                      />
+                    </td>
+
+                    {/* UoM - auto popup (read-only) */}
+                    <td>
+                      <input
+                        className="input"
+                        value={r.uom_code || ''}
+                        readOnly
+                        placeholder="-"
+                      />
+                    </td>
+
+                    {/* Qty */}
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        step="1"
+                        value={r.qty}
+                        onChange={(e) => setQty(r.id, parseFloat(e.target.value || '0'))}
+                      />
+                    </td>
+
+                    {/* Margin % (optional) */}
