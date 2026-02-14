@@ -13,7 +13,7 @@ interface FoundItem {
   description?: string | null;
   stock_qty?: number;
   unit_cost?: number;
-  uom_code?: string; // <-- auto from units_of_measure
+  uom_code?: string; // auto from units_of_measure
 }
 
 export default function Stock() {
@@ -22,8 +22,8 @@ export default function Stock() {
   const [found, setFound] = useState<FoundItem | null>(null);
 
   const [moveType, setMoveType] = useState<MoveType>('receive');
-  const [qty, setQty] = useState<number>(0);
-  const [unitCost, setUnitCost] = useState<number>(0); // cost per UoM for Receive
+  const [qty, setQty] = useState<number>(0);       // for adjust: can be negative or positive
+  const [unitCost, setUnitCost] = useState<number>(0); // used only for receive (manual)
   const [ref, setRef] = useState('');
   const [reason, setReason] = useState('');
   const [history, setHistory] = useState<any[]>([]);
@@ -33,12 +33,12 @@ export default function Stock() {
     loadHistory();
   }, []);
 
-  // Load last 50 moves for the right-hand table
+  // Load last 50 moves for the right-hand table (with UoM, Unit Cost, Total Cost)
   const loadHistory = async () => {
     const h = await supabase
       .from('stock_moves')
       .select(`
-        created_at, move_type, qty, ref, uom_code, unit_cost,
+        created_at, move_type, qty, ref, uom_code, unit_cost, total_cost,
         item:items ( name, sku )
       `)
       .order('created_at', { ascending: false })
@@ -52,14 +52,14 @@ export default function Stock() {
         ref: r.ref,
         uom_code: r.uom_code,
         unit_cost: r.unit_cost,
-        // Supabase can return array or object depending on rel config; normalize:
+        total_cost: r.total_cost,
         item: Array.isArray(r.item) ? (r.item[0] ?? null) : r.item ?? null,
       })) ?? [];
 
     setHistory(rows);
   };
 
-  // Find item by SKU (also fetch UoM code, stock & cost)
+  // Find item by SKU (also fetch UoM code, stock & current avg unit_cost)
   const findBySku = async () => {
     setFound(null);
     const trimmed = sku.trim();
@@ -98,45 +98,65 @@ export default function Stock() {
       unit_cost: Number(row.unit_cost ?? 0),
       uom_code,
     });
+
+    // Reset entry fields when a new item is found
+    setQty(0);
+    setUnitCost(0);
+    setRef('');
+    setReason('');
   };
 
-  // Preview new average cost before saving (only for Receive)
-  const previewAvg = useMemo(() => {
-    if (!found || moveType !== 'receive' || qty <= 0) return null;
-    const oldQty = Number(found.stock_qty || 0);
-    const oldCost = Number(found.unit_cost || 0);
-    const newQty = oldQty + qty;
-    const avg =
-      newQty === 0 ? unitCost : ((oldQty * oldCost) + (qty * unitCost)) / newQty;
-    return {
-      oldQty,
-      oldCost,
-      newQty,
-      newAvg: Number.isFinite(avg) ? avg : 0,
-    };
-  }, [found, moveType, qty, unitCost]);
+  // For Issue/Return/Adjust, unit cost is auto = current avg
+  const autoUnitCost = found?.unit_cost ?? 0;
 
-  // Save stock move using found item id
+  // For total-cost preview, pick correct cost source
+  const costToUse = moveType === 'receive' ? unitCost : autoUnitCost;
+
+  // For Adjust: allow negative (lost) or positive (found).
+  const qtyLabel =
+    moveType === 'adjust'
+      ? 'Adjust Qty (use negative for lost, positive for found)'
+      : 'Qty';
+
+  // Preview: total cost and, for Receive, new average cost
+  const preview = useMemo(() => {
+    if (!found) return null;
+
+    const q = Number(qty || 0);
+    const unit = Number(costToUse || 0);
+    const total = q * unit;
+
+    if (moveType === 'receive' && q > 0) {
+      const oldQty = Number(found.stock_qty || 0);
+      const oldCost = Number(found.unit_cost || 0);
+      const newQty = oldQty + q;
+      const newAvg =
+        newQty === 0 ? unit : ((oldQty * oldCost) + (q * unit)) / newQty;
+      return { total, newAvg, oldQty, oldCost, newQty };
+    }
+
+    return { total };
+  }, [found, qty, costToUse, moveType]);
+
+  // Save stock move
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!found) {
       alert('Please find an item by SKU first');
       return;
     }
-    if (!qty || qty <= 0) {
-      alert('Quantity must be > 0');
-      return;
+
+    // Validate qty by move type
+    if (moveType === 'adjust') {
+      if (!qty || qty === 0) return alert('For adjust, delta cannot be 0');
+    } else {
+      if (!qty || qty <= 0) return alert('Quantity must be > 0');
     }
 
     setLoading(true);
     try {
       if (moveType === 'receive') {
-        // Moving-average receive via RPC
-        if (unitCost < 0) {
-          alert('Unit cost must be >= 0');
-          setLoading(false);
-          return;
-        }
+        if (unitCost < 0) return alert('Unit cost must be >= 0');
         const { error } = await supabase.rpc('receive_stock_avg', {
           p_item_id: found.id,
           p_qty: qty,
@@ -146,33 +166,42 @@ export default function Stock() {
           p_reason: reason || null,
         });
         if (error) throw error;
-      } else {
-        // For now, keep Adjust / Issue / Return as a simple move log.
-        // (If you want stock_qty updates here too, tell me and I’ll add them.)
-        const payload = {
-          item_id: found.id,
-          move_type: moveType,          // casted by PostgREST if enum
-          qty: Number(qty),
-          ref: ref || null,
-          reason: reason || null,
-          uom_code: found.uom_code || null,
-          unit_cost: null,
-          total_cost: null,
-        };
-        const { error } = await supabase.from('stock_moves').insert([payload]);
+      } else if (moveType === 'issue') {
+        const { error } = await supabase.rpc('issue_stock', {
+          p_item_id: found.id,
+          p_qty: qty,
+          p_ref: ref || null,
+          p_reason: reason || null,
+        });
+        if (error) throw error;
+      } else if (moveType === 'return') {
+        const { error } = await supabase.rpc('return_stock', {
+          p_item_id: found.id,
+          p_qty: qty,
+          p_ref: ref || null,
+          p_reason: reason || null,
+        });
+        if (error) throw error;
+      } else if (moveType === 'adjust') {
+        const { error } = await supabase.rpc('adjust_stock_delta', {
+          p_item_id: found.id,
+          p_delta: qty,              // can be negative (lost) or positive (found)
+          p_ref: ref || null,
+          p_reason: reason || null,
+        });
         if (error) throw error;
       }
 
-      // Clear quick-entry fields and refresh UI
+      // Clear / reload UI
+      await findBySku();
+      await loadHistory();
       setQty(0);
-      setUnitCost(0);
+      if (moveType === 'receive') setUnitCost(0);
       setRef('');
       setReason('');
-      await findBySku();   // refresh current item (qty / cost)
-      await loadHistory(); // refresh right table
       alert('Saved successfully.');
     } catch (err: any) {
-      alert(err.message);
+      alert(err.message || String(err));
     } finally {
       setLoading(false);
     }
@@ -182,7 +211,7 @@ export default function Stock() {
     <div className="grid md:grid-cols-3 gap-4">
       {/* LEFT: Entry form */}
       <div className="card">
-        <h2 className="font-semibold mb-3">Receive / Adjust</h2>
+        <h2 className="font-semibold mb-3">Receive / Adjust / Issue / Return</h2>
 
         <form onSubmit={submit} className="space-y-3">
           {/* SKU input + Find button */}
@@ -204,7 +233,7 @@ export default function Stock() {
             </Button>
           </div>
 
-          {/* Read-only item preview + UoM + current avg cost */}
+          {/* Read-only item preview + UoM + current stock & avg cost */}
           <div>
             <label className="label">Item</label>
             <input
@@ -220,11 +249,11 @@ export default function Stock() {
             <div className="text-xs text-gray-600 mt-1">
               {found ? (
                 <>
-                  UoM: <b>{found.uom_code || '-'}</b> • Stock: <b>{found.stock_qty ?? 0}</b> •
+                  UoM: <b>{found.uom_code || '-'}</b> • Current Qty: <b>{found.stock_qty ?? 0}</b> •
                   Avg Cost: <b>₹ {(found.unit_cost ?? 0).toFixed(2)}</b>
                 </>
               ) : (
-                <>UoM: — • Stock: — • Avg Cost: —</>
+                <>UoM: — • Current Qty: — • Avg Cost: —</>
               )}
             </div>
           </div>
@@ -239,26 +268,32 @@ export default function Stock() {
             >
               <option value="receive">Receive</option>
               <option value="adjust">Adjust</option>
-              <option value="return">Return</option>
               <option value="issue">Issue</option>
+              <option value="return">Return</option>
             </select>
           </div>
 
-          {/* Qty + Unit Cost (for Receive) */}
+          {/* Qty + Unit Cost (auto except Receive) */}
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <label className="label">Qty</label>
+              <label className="label">{qtyLabel}</label>
               <input
                 className="input"
                 type="number"
-                min={1}
+                step="1"
+                // For adjust we allow negatives; for others keep >=1
+                min={moveType === 'adjust' ? undefined : 1}
                 value={qty}
-                onChange={(e) =>
-                  setQty(Number.isNaN(parseInt(e.target.value)) ? 0 : parseInt(e.target.value))
-                }
+                onChange={(e) => {
+                  const v = e.target.value;
+                  const n = v === '' ? 0 : Number(v);
+                  setQty(Number.isFinite(n) ? n : 0);
+                }}
+                placeholder={moveType === 'adjust' ? 'e.g., -2 (lost) or 3 (found)' : 'e.g., 5'}
               />
             </div>
 
+            {/* Unit Cost field */}
             {moveType === 'receive' ? (
               <div>
                 <label className="label">Unit Cost (per {found?.uom_code || 'UoM'})</label>
@@ -273,19 +308,35 @@ export default function Stock() {
               </div>
             ) : (
               <div>
-                <label className="label">&nbsp;</label>
-                <input className="input" placeholder="(N/A)" readOnly />
+                <label className="label">Unit Cost (auto)</label>
+                <input
+                  className="input"
+                  value={autoUnitCost.toFixed(2)}
+                  readOnly
+                />
               </div>
             )}
           </div>
 
-          {/* Avg preview */}
-          {moveType === 'receive' && previewAvg && (
-            <div className="text-sm text-gray-700">
-              Current Qty: <b>{previewAvg.oldQty}</b>, Avg Cost: <b>₹ {previewAvg.oldCost.toFixed(2)}</b> →&nbsp;
-              New Qty: <b>{previewAvg.newQty}</b>, New Avg: <b>₹ {previewAvg.newAvg.toFixed(2)}</b>
+          {/* Preview: Total Cost and (for Receive) New Avg */}
+          <div className="text-sm text-gray-700">
+            <div>
+              Total Cost:&nbsp;
+              <b>
+                ₹ {Number(preview?.total ?? 0).toFixed(2)}
+              </b>
+              {moveType !== 'receive' && ' (auto: Qty × current Avg Cost)'}
             </div>
-          )}
+            {moveType === 'receive' && preview && typeof preview.newAvg === 'number' && (
+              <div>
+                New Avg Cost after Receive:&nbsp;
+                <b>₹ {preview.newAvg.toFixed(2)}</b>
+                <span className="text-xs text-gray-500">
+                  {' '}[old: {preview.oldQty} @ ₹{preview.oldCost.toFixed(2)} → new: {preview.newQty}]
+                </span>
+              </div>
+            )}
+          </div>
 
           {/* Ref & Reason */}
           <input
@@ -307,7 +358,7 @@ export default function Stock() {
         </form>
       </div>
 
-      {/* RIGHT: History */}
+      {/* RIGHT: History (now with UoM, Unit Cost, Total Cost) */}
       <div className="md:col-span-2 card">
         <h2 className="font-semibold mb-2">Recent Stock Movements</h2>
         <table className="table">
@@ -319,6 +370,7 @@ export default function Stock() {
               <th>Qty</th>
               <th>UoM</th>
               <th>Unit Cost</th>
+              <th>Total Cost</th>
               <th>Ref</th>
             </tr>
           </thead>
@@ -331,6 +383,7 @@ export default function Stock() {
                 <td>{h.qty}</td>
                 <td>{h.uom_code || '-'}</td>
                 <td>{h.unit_cost != null ? `₹ ${Number(h.unit_cost).toFixed(2)}` : '-'}</td>
+                <td>{h.total_cost != null ? `₹ ${Number(h.total_cost).toFixed(2)}` : '-'}</td>
                 <td>{h.ref}</td>
               </tr>
             ))}
