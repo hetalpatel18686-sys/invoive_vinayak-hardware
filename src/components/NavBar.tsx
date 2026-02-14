@@ -6,11 +6,11 @@ import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 
 export default function NavBar() {
-  // --- Hide NavBar on /login (and you can add /signup if you ever create it) ---
+  // Hide on /login
   const pathname = usePathname();
   if (pathname === '/login') return null;
 
-  // Brand from env (set in Vercel → Project → Settings → Environment Variables)
+  // Brand
   const brandName = process.env.NEXT_PUBLIC_BRAND_NAME || 'Vinayak Hardware';
   const brandLogo = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '';
 
@@ -22,19 +22,16 @@ export default function NavBar() {
 
   const signOut = async () => {
     await supabase.auth.signOut();
-    // Hard navigation so Back button won’t reveal cached pages
     window.location.replace('/login');
   };
 
-  // small helper for "active" link styling
+  // active link styling
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(href + '/');
 
   const linkClass = (href: string) =>
     `transition-colors ${
-      isActive(href)
-        ? 'text-white underline'
-        : 'text-white/90 hover:text-white'
+      isActive(href) ? 'text-white underline' : 'text-white/90 hover:text-white'
     }`;
 
   return (
@@ -57,7 +54,6 @@ export default function NavBar() {
             <Link className={linkClass('/items')} href="/items">Items</Link>
             <Link className={linkClass('/invoices/new')} href="/invoices/new">New Invoice</Link>
             <Link className={linkClass('/stock')} href="/stock">Stock</Link>
-            {/* ✅ NEW Inventory link */}
             <Link className={linkClass('/inventory')} href="/inventory">Inventory</Link>
             <Link className={linkClass('/reports')} href="/reports">Reports</Link>
           </div>
