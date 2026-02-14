@@ -26,6 +26,17 @@ export default function NavBar() {
     window.location.replace('/login');
   };
 
+  // small helper for "active" link styling
+  const isActive = (href: string) =>
+    pathname === href || pathname.startsWith(href + '/');
+
+  const linkClass = (href: string) =>
+    `transition-colors ${
+      isActive(href)
+        ? 'text-white underline'
+        : 'text-white/90 hover:text-white'
+    }`;
+
   return (
     <header className="w-full bg-primary text-white">
       <nav className="mx-auto max-w-6xl flex items-center justify-between px-4 py-3">
@@ -42,11 +53,13 @@ export default function NavBar() {
 
           {/* Main navigation links */}
           <div className="flex gap-6 text-sm font-medium ml-6">
-            <Link href="/customers">Customers</Link>
-            <Link href="/items">Items</Link>
-            <Link href="/invoices/new">New Invoice</Link>
-            <Link href="/stock">Stock</Link>
-            <Link href="/reports">Reports</Link>
+            <Link className={linkClass('/customers')} href="/customers">Customers</Link>
+            <Link className={linkClass('/items')} href="/items">Items</Link>
+            <Link className={linkClass('/invoices/new')} href="/invoices/new">New Invoice</Link>
+            <Link className={linkClass('/stock')} href="/stock">Stock</Link>
+            {/* ✅ NEW Inventory link */}
+            <Link className={linkClass('/inventory')} href="/inventory">Inventory</Link>
+            <Link className={linkClass('/reports')} href="/reports">Reports</Link>
           </div>
         </div>
 
