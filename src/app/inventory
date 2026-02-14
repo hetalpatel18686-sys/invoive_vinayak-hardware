@@ -1,0 +1,318 @@
+'use client';
+
+import { useEffect, useMemo, useState } from 'react';
+import { supabase } from '@/lib/supabaseClient';
+import Protected from '@/components/Protected';
+
+interface Uom {
+  id: string;
+  code: string;
+  name: string;
+}
+
+interface Row {
+  id: string;
+  sku: string;
+  name: string;
+  stock_qty: number;
+  unit_cost: number;
+  low_stock_threshold: number | null;
+  uom_code: string; // normalized from relation ('' if missing)
+  uom_name: string; // normalized ('' if missing)
+}
+
+export default function InventoryPage() {
+  const [rows, setRows] = useState<Row[]>([]);
+  const [uoms, setUoms] = useState<Uom[]>([]);
+  const [q, setQ] = useState('');               // search query
+  const [uomFilter, setUomFilter] = useState(''); // filter by UoM code
+  const [showOnlyLow, setShowOnlyLow] = useState(false); // low-stock toggle
+  const [loading, setLoading] = useState(true);
+
+  // Load items + UoMs
+  const load = async () => {
+    setLoading(true);
+
+    // Items with UoM (normalize array/object shapes)
+    const { data, error } = await supabase
+      .from('items')
+      .select(`
+        id, sku, name, stock_qty, unit_cost, low_stock_threshold,
+        uom:units_of_measure ( code, name )
+      `)
+      .order('sku', { ascending: true });
+
+    if (error) {
+      alert(error.message);
+      setLoading(false);
+      return;
+    }
+
+    const normalized: Row[] = (data ?? []).map((d: any) => {
+      const u = Array.isArray(d.uom) ? (d.uom[0] ?? null) : d.uom ?? null;
+      return {
+        id: d.id,
+        sku: d.sku,
+        name: d.name,
+        stock_qty: Number(d.stock_qty ?? 0),
+        unit_cost: Number(d.unit_cost ?? 0),
+        low_stock_threshold: d.low_stock_threshold ?? null,
+        uom_code: u?.code ?? '',
+        uom_name: u?.name ?? '',
+      };
+    });
+
+    setRows(normalized);
+
+    // UoMs for filter dropdown
+    const { data: uomData, error: uomErr } = await supabase
+      .from('units_of_measure')
+      .select('id, code, name')
+      .order('code', { ascending: true });
+
+    if (!uomErr) setUoms((uomData as Uom[]) ?? []);
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  // Filtered rows
+  const filtered = useMemo(() => {
+    const term = q.trim().toLowerCase();
+    return rows.filter((r) => {
+      const matchTerm =
+        !term ||
+        r.sku.toLowerCase().includes(term) ||
+        (r.name ?? '').toLowerCase().includes(term);
+      const matchUom = !uomFilter || r.uom_code === uomFilter;
+      const isLow =
+        r.low_stock_threshold != null &&
+        r.low_stock_threshold > 0 &&
+        r.stock_qty <= r.low_stock_threshold;
+
+      return matchTerm && matchUom && (!showOnlyLow || isLow);
+    });
+  }, [rows, q, uomFilter, showOnlyLow]);
+
+  // Totals over filtered rows
+  const totals = useMemo(() => {
+    let qty = 0;
+    let value = 0;
+    for (const r of filtered) {
+      qty += r.stock_qty;
+      value += r.stock_qty * r.unit_cost;
+    }
+    const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+    return { qty: round2(qty), value: round2(value) };
+  }, [filtered]);
+
+  // CSV export (filtered)
+  const exportCsv = () => {
+    const header = [
+      'SKU',
+      'Item',
+      'UoM',
+      'Qty',
+      'Avg Unit Cost',
+      'Total Value',
+      'Low Stock Threshold',
+    ];
+    const lines = filtered.map((r) => {
+      const total = r.stock_qty * r.unit_cost;
+      return [
+        r.sku,
+        r.name?.replaceAll('"', '""') ?? '',
+        r.uom_code,
+        String(r.stock_qty),
+        r.unit_cost.toFixed(2),
+        total.toFixed(2),
+        r.low_stock_threshold != null ? String(r.low_stock_threshold) : '',
+      ]
+        .map((v) => `"${v}"`)
+        .join(',');
+    });
+    const csv = [header.join(','), ...lines].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const date = new Date().toISOString().slice(0, 10);
+    a.download = `inventory_${date}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Print Low-Stock Report (opens a simple print window)
+  const printLowStock = () => {
+    const low = filtered.filter((r) => {
+      return (
+        r.low_stock_threshold != null &&
+        r.low_stock_threshold > 0 &&
+        r.stock_qty <= r.low_stock_threshold
+      );
+    });
+
+    const html = `
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Low-Stock Report</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 16px; }
+      h1 { font-size: 18px; margin: 0 0 12px; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border: 1px solid #ddd; padding: 6px 8px; font-size: 12px; }
+      th { background: #f5f5f5; text-align: left; }
+    </style>
+  </head>
+  <body>
+    <h1>Low-Stock Report</h1>
+    <table>
+      <thead>
+        <tr>
+          <th>SKU</th>
+          <th>Item</th>
+          <th>UoM</th>
+          <th>Qty</th>
+          <th>Minimum</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${low
+          .map(
+            (r) => `
+          <tr>
+            <td>${r.sku}</td>
+            <td>${(r.name ?? '').replace(/</g, '&lt;')}</td>
+            <td>${r.uom_code || '-'}</td>
+            <td>${r.stock_qty}</td>
+            <td>${r.low_stock_threshold ?? ''}</td>
+          </tr>`
+          )
+          .join('')}
+      </tbody>
+    </table>
+    <script>
+      window.print();
+      setTimeout(() => window.close(), 500);
+    </script>
+  </body>
+</html>`.trim();
+
+    const w = window.open('', '_blank', 'width=900,height=700');
+    if (!w) return;
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+  };
+
+  return (
+    <Protected>
+      <div className="card">
+        <h1 className="text-xl font-semibold mb-4">Inventory</h1>
+
+        {/* Filters / Actions */}
+        <div className="mb-3 grid md:grid-cols-5 gap-2">
+          <input
+            className="input"
+            placeholder="Search SKU or Name…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+
+          <select
+            className="input"
+            value={uomFilter}
+            onChange={(e) => setUomFilter(e.target.value)}
+          >
+            <option value="">All Units</option>
+            {uoms.map((u) => (
+              <option key={u.id} value={u.code}>
+                {u.code} — {u.name}
+              </option>
+            ))}
+          </select>
+
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={showOnlyLow}
+              onChange={(e) => setShowOnlyLow(e.target.checked)}
+            />
+            Low stock only
+          </label>
+
+          <button type="button" className="btn" onClick={exportCsv}>
+            Export CSV
+          </button>
+
+          <button
+            type="button"
+            className="btn"
+            onClick={printLowStock}
+            title="Print items where Qty ≤ Minimum threshold"
+          >
+            Print Low-Stock
+          </button>
+        </div>
+
+        {/* Table */}
+        {loading ? (
+          <p>Loading…</p>
+        ) : (
+          <div className="overflow-auto">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>SKU</th>
+                  <th>Item</th>
+                  <th>UoM</th>
+                  <th className="text-right">Qty</th>
+                  <th className="text-right">Minimum</th>
+                  <th className="text-right">Avg Unit Cost</th>
+                  <th className="text-right">Total Value (₹)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((r) => {
+                  const total = r.stock_qty * r.unit_cost;
+                  const isLow =
+                    r.low_stock_threshold != null &&
+                    r.low_stock_threshold > 0 &&
+                    r.stock_qty <= r.low_stock_threshold;
+                  return (
+                    <tr key={r.id} className={isLow ? 'bg-red-50' : ''}>
+                      <td>{r.sku}</td>
+                      <td>{r.name}</td>
+                      <td>{r.uom_code || '-'}</td>
+                      <td className="text-right">{r.stock_qty}</td>
+                      <td className="text-right">
+                        {r.low_stock_threshold != null ? r.low_stock_threshold : '—'}
+                      </td>
+                      <td className="text-right">₹ {r.unit_cost.toFixed(2)}</td>
+                      <td className="text-right">₹ {total.toFixed(2)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr className="font-semibold">
+                  <td colSpan={3} className="text-right">
+                    Totals:
+                  </td>
+                  <td className="text-right">{totals.qty}</td>
+                  <td className="text-right">—</td>
+                  <td className="text-right">—</td>
+                  <td className="text-right">₹ {totals.value.toFixed(2)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+      </div>
+    </Protected>
+  );
+}
