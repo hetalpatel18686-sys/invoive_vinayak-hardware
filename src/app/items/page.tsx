@@ -6,6 +6,13 @@ import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 import Protected from '@/components/Protected';
 
+/** ---------- Types ---------- */
+interface Uom {
+  id: string;
+  code: string; // e.g. 'EA', 'BOX'
+  name: string; // e.g. 'Each', 'Box'
+}
+
 interface Item {
   id: string;
   sku: string;
@@ -16,11 +23,17 @@ interface Item {
   tax_rate: number;
   stock_qty: number;
   low_stock_threshold: number | null;
+
+  // New: link to units_of_measure
+  uom_id?: string | null;
 }
 
+/** ---------- Page ---------- */
 export default function Items() {
   const [items, setItems] = useState<Item[]>([]);
+  const [uoms, setUoms] = useState<Uom[]>([]);
   const [loading, setLoading] = useState(true);
+
   const [form, setForm] = useState({
     sku: '',
     name: '',
@@ -29,16 +42,36 @@ export default function Items() {
     unit_price: 0,
     tax_rate: 0,
     low_stock_threshold: 0,
+    uom_id: '' as string | '',
   });
 
+  // Quick map so we can find UoM code by id efficiently
+  const uomMap = useMemo(() => {
+    const m = new Map<string, Uom>();
+    for (const u of uoms) m.set(u.id, u);
+    return m;
+  }, [uoms]);
+
+  /** Load items + UoMs */
   const load = async () => {
     setLoading(true);
-    const { data, error } = await supabase
+
+    // Load items
+    const { data: itemsData, error: itemsError } = await supabase
       .from('items')
       .select('*')
       .order('created_at', { ascending: false });
 
-    if (!error) setItems((data as Item[]) ?? []);
+    if (!itemsError) setItems((itemsData as Item[]) ?? []);
+
+    // Load UoMs (for dropdown)
+    const { data: uomsData, error: uomsError } = await supabase
+      .from('units_of_measure')
+      .select('id, code, name')
+      .order('code', { ascending: true });
+
+    if (!uomsError) setUoms((uomsData as Uom[]) ?? []);
+
     setLoading(false);
   };
 
@@ -46,11 +79,28 @@ export default function Items() {
     load();
   }, []);
 
+  /** Add a new item */
   const add = async (e: React.FormEvent) => {
     e.preventDefault();
-    const { error } = await supabase.from('items').insert([{ ...form }]);
-    if (error) alert(error.message);
-    else {
+
+    const payload = {
+      sku: form.sku.trim(),
+      name: form.name.trim(),
+      description: form.description?.trim() || null,
+      unit_cost: Number(form.unit_cost || 0),
+      unit_price: Number(form.unit_price || 0),
+      tax_rate: Number(form.tax_rate || 0),
+      low_stock_threshold: Number.isFinite(form.low_stock_threshold)
+        ? Number(form.low_stock_threshold)
+        : 0,
+      uom_id: form.uom_id || null, // allow empty selection
+    };
+
+    const { error } = await supabase.from('items').insert([payload]);
+    if (error) {
+      alert(error.message);
+    } else {
+      // Reset and reload
       setForm({
         sku: '',
         name: '',
@@ -59,18 +109,11 @@ export default function Items() {
         unit_price: 0,
         tax_rate: 0,
         low_stock_threshold: 0,
+        uom_id: '',
       });
       load();
     }
   };
-
-  const marginPreview = useMemo(() => {
-    const cost = Number(form.unit_cost || 0),
-      price = Number(form.unit_price || 0);
-    const margin = price - cost;
-    const pct = price > 0 ? (margin / price) * 100 : 0;
-    return { margin, pct };
-  }, [form.unit_cost, form.unit_price]);
 
   return (
     <Protected>
@@ -86,6 +129,7 @@ export default function Items() {
                 <tr>
                   <th>SKU</th>
                   <th>Name</th>
+                  <th>UoM</th>
                   <th>Price</th>
                   <th>Cost</th>
                   <th>Margin</th>
@@ -101,10 +145,13 @@ export default function Items() {
                     it.low_stock_threshold > 0 &&
                     it.stock_qty <= it.low_stock_threshold;
 
+                  const uom = it.uom_id ? uomMap.get(it.uom_id) : undefined;
+
                   return (
                     <tr key={it.id} className={low ? 'bg-orange-50' : ''}>
                       <td>{it.sku}</td>
                       <td>{it.name}</td>
+                      <td>{uom?.code ?? '-'}</td>
                       <td>${it.unit_price.toFixed(2)}</td>
                       <td>${it.unit_cost.toFixed(2)}</td>
                       <td>
@@ -143,13 +190,14 @@ export default function Items() {
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
             />
+
             <div className="grid grid-cols-3 gap-2">
               <input
                 className="input"
                 type="number"
                 step="0.01"
                 placeholder="Cost"
-                value={form.unit_cost}
+                value={Number.isFinite(form.unit_cost) ? form.unit_cost : 0}
                 onChange={(e) =>
                   setForm({ ...form, unit_cost: parseFloat(e.target.value || '0') })
                 }
@@ -159,7 +207,7 @@ export default function Items() {
                 type="number"
                 step="0.01"
                 placeholder="Price"
-                value={form.unit_price}
+                value={Number.isFinite(form.unit_price) ? form.unit_price : 0}
                 onChange={(e) =>
                   setForm({ ...form, unit_price: parseFloat(e.target.value || '0') })
                 }
@@ -169,23 +217,38 @@ export default function Items() {
                 type="number"
                 step="0.01"
                 placeholder="Tax %"
-                value={form.tax_rate}
+                value={Number.isFinite(form.tax_rate) ? form.tax_rate : 0}
                 onChange={(e) =>
                   setForm({ ...form, tax_rate: parseFloat(e.target.value || '0') })
                 }
               />
             </div>
 
-            <p className="text-sm text-gray-600">
-              Profit preview: ${marginPreview.margin.toFixed(2)} (
-              {marginPreview.pct.toFixed(1)}%)
-            </p>
+            {/* NEW: UoM selection */}
+            <select
+              className="input"
+              value={form.uom_id}
+              onChange={(e) => setForm({ ...form, uom_id: e.target.value })}
+            >
+              <option value="">Select Unit of Measure (optional)</option>
+              {uoms.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.code} — {u.name}
+                </option>
+              ))}
+            </select>
+
+            {/* REMOVED: Profit preview */}
 
             <input
               className="input"
               type="number"
               placeholder="Low stock threshold"
-              value={form.low_stock_threshold}
+              value={
+                Number.isFinite(form.low_stock_threshold)
+                  ? form.low_stock_threshold
+                  : 0
+              }
               onChange={(e) =>
                 setForm({
                   ...form,
