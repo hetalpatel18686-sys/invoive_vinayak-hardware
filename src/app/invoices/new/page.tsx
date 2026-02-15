@@ -1,9 +1,6 @@
 // src/app/invoices/new/page.tsx
 'use client';
 
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
-
 import React, {
   useEffect,
   useMemo,
@@ -699,8 +696,8 @@ function NewInvoicePageBody() {
       if (error) throw error;
 
       setShowPayModal(false);
-      await refreshPayments(invoiceIdJustSaved);
-
+      await refreshPayments(inv
+      );
       // Open printable receipt
       if (data?.id) {
         const url = `${window.location.origin}/receipts/${data.id}`;
@@ -1262,3 +1259,4 @@ function NewInvoicePageBody() {
     </Protected>
   );
 }
+``
