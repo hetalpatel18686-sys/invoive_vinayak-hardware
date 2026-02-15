@@ -1,4 +1,4 @@
-// app/invoices/new/page.tsx
+// src/app/invoices/new/page.tsx
 'use client';
 
 export const dynamic = 'force-dynamic';
@@ -50,7 +50,6 @@ function round2(n: number) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 function ceilRupee(n: number) {
-  // Round up to next rupee (e.g., 10.01 -> 11)
   return Math.ceil(Number(n || 0));
 }
 function safeUomCode(u: ItemDb['uom']): string {
@@ -99,7 +98,6 @@ class StorageBus {
       } catch (e) { console.error('StorageBus.on parse error', e); }
     };
     window.addEventListener('storage', handler);
-    // initial snapshot
     try {
       const raw = localStorage.getItem(this.key);
       if (raw) { const env = JSON.parse(raw); fn(env?.payload); }
@@ -152,6 +150,10 @@ export default function NewInvoicePage() {
   const brandAddress = process.env.NEXT_PUBLIC_BRAND_ADDRESS  || 'Bilimora, Gandevi, Navsari, Gujarat, 396321';
   const brandPhone   = process.env.NEXT_PUBLIC_BRAND_PHONE    || '+91 7046826808';
 
+  // Default UPI (your requested value), read-only in UI
+  const defaultUpiId =
+    process.env.NEXT_PUBLIC_UPI_ID || 'patelkb308@okaxis';
+
   // Header
   const [issuedAt, setIssuedAt] = useState<string>(() => new Date().toISOString().slice(0,10));
   const [docType, setDocType] = useState<DocType>('sale');
@@ -197,9 +199,9 @@ export default function NewInvoicePage() {
   const [cardLast4, setCardLast4] = useState('');
   const [cardAuth, setCardAuth] = useState('');
   const [cardTxn, setCardTxn] = useState('');
-  const [qrImageUrl, setQrImageUrl] = useState(''); // can be dataURL OR hosted URL
+  const [qrImageUrl, setQrImageUrl] = useState(''); // dataURL only (auto-generated)
   const [qrTxn, setQrTxn] = useState('');
-  const [upiId, setUpiId] = useState('');
+  const [upiId] = useState(defaultUpiId);           // read-only in UI
 
   // Auto-QR controls
   const [generatingQR, setGeneratingQR] = useState(false);
@@ -330,7 +332,7 @@ export default function NewInvoicePage() {
       if (r.id !== rowId) return r;
       const base = Number(rec.unit_cost || 0);
       const calc = (base) * (1 + (r.margin_pct || 0) / 100);
-      const unit = ceilRupee(calc); // ✅ round up to next rupee
+      const unit = ceilRupee(calc);
       return {
         ...r,
         sku_input: rec.sku,
@@ -344,7 +346,7 @@ export default function NewInvoicePage() {
     }));
   };
 
-  // ----- row setters (respect rounding rule)
+  // ----- row setters
   const setSkuInput = (rowId: string, text: string) =>
     setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text } : r));
 
@@ -355,7 +357,7 @@ export default function NewInvoicePage() {
     setRows(prev => prev.map(r => {
       if (r.id !== rowId) return r;
       const calc = (r.base_cost || 0) * (1 + (m || 0) / 100);
-      const unit = ceilRupee(calc); // ✅ round up
+      const unit = ceilRupee(calc);
       return { ...r, margin_pct: m || 0, unit_price: unit };
     }));
 
@@ -366,7 +368,7 @@ export default function NewInvoicePage() {
     setRows(prev => prev.map(r => r.id === rowId ? { ...r, qty: qty || 0 } : r));
 
   const setUnitPrice = (rowId: string, price: number) =>
-    setRows(prev => prev.map(r => r.id === rowId ? { ...r, unit_price: ceilRupee(price) } : r)); // ✅ round up
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, unit_price: ceilRupee(price) } : r));
 
   const setReturnQty = (rowId: string, ret: number) =>
     setRows(prev => prev.map(r => {
@@ -603,29 +605,11 @@ export default function NewInvoicePage() {
     window.open(url.toString(), '_blank', 'noopener,noreferrer');
   };
 
-  // ----- payments
-  const openPayModal = async () => {
-    if (!invoiceIdJustSaved) {
-      alert('Please save the invoice/return first, then record payment.');
-      return;
-    }
-    const direction = docType === 'return' ? 'out' : 'in';
-    setPayDirection(direction);
-    setPayMethod('cash');
-    const baseAmount = invoiceGrandTotalAtSave ?? totals.grand;
-    setPayAmount(Number(baseAmount || 0));
-    setPayReference('');
-    setCardHolder(''); setCardLast4(''); setCardAuth(''); setCardTxn('');
-    setQrImageUrl(''); setQrTxn(''); setUpiId('');
-    await refreshPayments(invoiceIdJustSaved);
-    setShowPayModal(true);
-  };
-
-  // Build UPI deep link
+  // ===== Auto-generate QR (for read-only UPI) =====
   const buildUpiUri = (upi: string, amount: number, note: string, payeeName: string) => {
     if (!upi) return '';
     const params = new URLSearchParams();
-    params.set('pa', upi);            // payee address
+    params.set('pa', upi);            // payee address (UPI ID)
     if (payeeName) params.set('pn', payeeName);
     if (amount > 0) params.set('am', round2(amount).toFixed(2));
     params.set('cu', 'INR');
@@ -633,22 +617,39 @@ export default function NewInvoicePage() {
     return `upi://pay?${params.toString()}`;
   };
 
-  const generateQr = async () => {
-    try {
-      if (!upiId) { alert('Enter UPI ID to auto-generate QR'); return; }
-      setGeneratingQR(true);
-      const { toDataURL } = await import('qrcode'); // dynamic import
-      const upi = buildUpiUri(upiId.trim(), payAmount || 0, payReference || (invoiceNoJustSaved ?? 'Payment'), brandName);
-      const dataUrl = await toDataURL(upi, { margin: 1, scale: 8 });
-      setQrImageUrl(dataUrl);
-    } catch (e: any) {
-      console.error(e);
-      alert(e?.message || 'Failed to generate QR');
-    } finally {
-      setGeneratingQR(false);
-    }
-  };
+  useEffect(() => {
+    if (payMethod !== 'qr') return;
+    if (!upiId) return;
 
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setGeneratingQR(true);
+        // dynamic import only on client
+        const QR: any = await import('qrcode');
+        const upi = buildUpiUri(
+          upiId.trim(),
+          payAmount || 0,
+          payReference || (invoiceNoJustSaved ?? 'Payment'),
+          brandName
+        );
+        const dataUrl = await QR.toDataURL(upi, { margin: 1, scale: 8 });
+        if (!cancelled) setQrImageUrl(dataUrl);
+      } catch (e: any) {
+        if (!cancelled) {
+          console.error(e);
+          alert(e?.message || 'Failed to generate QR');
+        }
+      } finally {
+        if (!cancelled) setGeneratingQR(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [payMethod, upiId, payAmount, payReference, invoiceNoJustSaved, brandName]);
+
+  // ----- confirm payment
   const confirmPayment = async () => {
     try {
       if (!invoiceIdJustSaved) return alert('No saved invoice to attach payment.');
@@ -661,7 +662,7 @@ export default function NewInvoicePage() {
         meta.card_auth  = cardAuth  || null;
         meta.card_txn   = cardTxn   || null;
       } else if (payMethod === 'qr') {
-        meta.qr_image_url = qrImageUrl || null; // may be dataURL (auto) or hosted image (manual)
+        meta.qr_image_url = qrImageUrl || null; // dataURL (auto)
         meta.qr_txn       = qrTxn || null;
         meta.upi_id       = upiId || null;
       }
@@ -681,7 +682,7 @@ export default function NewInvoicePage() {
       setShowPayModal(false);
       await refreshPayments(invoiceIdJustSaved);
 
-      // Open printable receipt (requires page at app/receipts/[paymentId]/page.tsx)
+      // Open printable receipt
       if (data?.id) {
         const url = `${window.location.origin}/receipts/${data.id}`;
         window.open(url, '_blank', 'noopener,noreferrer');
@@ -1109,7 +1110,24 @@ export default function NewInvoicePage() {
                 {saving ? 'Saving…' : isReturn ? 'Save Return' : 'Save Invoice'}
               </Button>
               <Button type="button" onClick={openCustomerPrint} className="bg-gray-700 hover:bg-gray-800">Print</Button>
-              <Button type="button" onClick={openPayModal} className="bg-green-600 hover:bg-green-700" disabled={!invoiceIdJustSaved} title={!invoiceIdJustSaved ? 'Save first to record payments' : ''}>
+              <Button
+                type="button"
+                onClick={() => {
+                  if (!invoiceIdJustSaved) { alert('Please save the invoice/return first, then record payment.'); return; }
+                  const direction = docType === 'return' ? 'out' : 'in';
+                  setPayDirection(direction);
+                  setPayMethod('cash');
+                  const baseAmount = invoiceGrandTotalAtSave ?? totals.grand;
+                  setPayAmount(Number(baseAmount || 0));
+                  setPayReference('');
+                  setCardHolder(''); setCardLast4(''); setCardAuth(''); setCardTxn('');
+                  setQrImageUrl(''); setQrTxn('');
+                  setShowPayModal(true);
+                }}
+                className="bg-green-600 hover:bg-green-700"
+                disabled={!invoiceIdJustSaved}
+                title={!invoiceIdJustSaved ? 'Save first to record payments' : ''}
+              >
                 Pay
               </Button>
               {invoiceNoJustSaved && <div className="text-sm text-gray-600 self-center">Saved #{invoiceNoJustSaved}</div>}
@@ -1150,35 +1168,30 @@ export default function NewInvoicePage() {
               </div>
             )}
 
-            {/* QR meta + auto QR */}
+            {/* QR meta — auto QR (UPI read-only) */}
             {payMethod === 'qr' && (
               <div className="mb-3 grid grid-cols-1 gap-3">
                 <div className="text-sm font-semibold text-gray-800">Scan‑to‑Pay</div>
 
                 <div>
-                  <label className="label">UPI ID</label>
-                  <input className="input" value={upiId} onChange={(e)=>setUpiId(e.target.value)} placeholder="e.g. myshop@upi" />
+                  <label className="label">UPI ID (read‑only)</label>
+                  <input
+                    className="input"
+                    value={upiId}
+                    readOnly
+                  />
                 </div>
 
-                <div className="flex gap-2">
-                  <Button type="button" onClick={generateQr} disabled={generatingQR}>
-                    {generatingQR ? 'Generating…' : 'Generate QR from UPI + Amount'}
-                  </Button>
-                  <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={() => setQrImageUrl('')}>
-                    Clear
-                  </Button>
-                </div>
-
-                <div>
-                  <label className="label">QR Image URL (optional)</label>
-                  <input className="input" value={qrImageUrl} onChange={(e)=>setQrImageUrl(e.target.value)} placeholder="Paste hosted image URL OR leave empty if auto-generated" />
-                  {qrImageUrl && (
-                    <div className="mt-2 border rounded p-2 flex flex-col items-center">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={qrImageUrl} alt="QR" className="max-h-40 object-contain" />
-                      {upiId && <div className="mt-2 text-xs text-gray-700">UPI ID: <b>{upiId}</b></div>}
+                <div className="mt-2 border rounded p-2 flex flex-col items-center">
+                  {!qrImageUrl ? (
+                    <div className="text-sm text-gray-600">
+                      {generatingQR ? 'Generating QR…' : 'QR will appear here'}
                     </div>
+                  ) : (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={qrImageUrl} alt="QR" className="max-h-40 object-contain" />
                   )}
+                  {upiId && <div className="mt-2 text-xs text-gray-700">UPI ID: <b>{upiId}</b></div>}
                 </div>
 
                 <div><label className="label">Txn ID (optional)</label><input className="input" value={qrTxn} onChange={(e)=>setQrTxn(e.target.value)} /></div>
@@ -1209,13 +1222,16 @@ export default function NewInvoicePage() {
                 Full Amount
               </button>
               {invoiceIdJustSaved && (
-                <button type="button" className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm"
+                <button
+                  type="button"
+                  className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm"
                   onClick={() => {
                     const remaining = isReturn
                       ? (invoiceGrandTotalAtSave ?? totals.grand) - paidOut + paidIn
                       : (invoiceGrandTotalAtSave ?? totals.grand) - paidIn + paidOut;
                     setPayAmount(round2(Math.max(0, remaining)));
-                  }}>
+                  }}
+                >
                   Remaining
                 </button>
               )}
