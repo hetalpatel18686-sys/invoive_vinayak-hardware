@@ -150,8 +150,8 @@ export default function NewInvoicePage() {
   const brandAddress = process.env.NEXT_PUBLIC_BRAND_ADDRESS  || 'Bilimora, Gandevi, Navsari, Gujarat, 396321';
   const brandPhone   = process.env.NEXT_PUBLIC_BRAND_PHONE    || '+91 7046826808';
 
-  // Default UPI (your requested value), read-only in UI
-  const defaultUpiId =
+  // Default UPI (read-only in UI). You can also set NEXT_PUBLIC_UPI_ID in Vercel.
+  const upiId =
     process.env.NEXT_PUBLIC_UPI_ID || 'patelkb308@okaxis';
 
   // Header
@@ -199,11 +199,8 @@ export default function NewInvoicePage() {
   const [cardLast4, setCardLast4] = useState('');
   const [cardAuth, setCardAuth] = useState('');
   const [cardTxn, setCardTxn] = useState('');
-  const [qrImageUrl, setQrImageUrl] = useState(''); // dataURL only (auto-generated)
+  const [qrImageUrl, setQrImageUrl] = useState(''); // dataURL (auto-generated)
   const [qrTxn, setQrTxn] = useState('');
-  const [upiId] = useState(defaultUpiId);           // read-only in UI
-
-  // Auto-QR controls
   const [generatingQR, setGeneratingQR] = useState(false);
 
   useEffect(() => { setRows([makeEmptyRow()]); }, []);
@@ -605,7 +602,7 @@ export default function NewInvoicePage() {
     window.open(url.toString(), '_blank', 'noopener,noreferrer');
   };
 
-  // ===== Auto-generate QR (for read-only UPI) =====
+  // ===== Auto-generate QR (UPI read-only) =====
   const buildUpiUri = (upi: string, amount: number, note: string, payeeName: string) => {
     if (!upi) return '';
     const params = new URLSearchParams();
@@ -627,7 +624,8 @@ export default function NewInvoicePage() {
       try {
         setGeneratingQR(true);
         // dynamic import only on client
-        const QR: any = await import('qrcode');
+        // @ts-ignore - types are provided but this keeps TS calm in all setups
+        const QR = await import('qrcode');
         const upi = buildUpiUri(
           upiId.trim(),
           payAmount || 0,
