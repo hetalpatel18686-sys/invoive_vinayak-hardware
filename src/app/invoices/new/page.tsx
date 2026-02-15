@@ -112,7 +112,7 @@ export default function NewInvoicePage() {
     return off;
   }, [isCustomerView]);
 
-  // ✅ FIX: Auto-print effect moved to TOP-LEVEL (no hooks inside conditional render)
+  // ✅ Auto-print (top-level; no conditional hooks)
   useEffect(() => {
     if (!isCustomerView || !autoPrint) return;
     const t = setTimeout(() => {
@@ -156,14 +156,23 @@ export default function NewInvoicePage() {
   const [saving, setSaving] = useState(false);
   const [invoiceIdJustSaved, setInvoiceIdJustSaved] = useState<string | null>(null);
   const [invoiceNoJustSaved, setInvoiceNoJustSaved] = useState<string | null>(null);
+  const [invoiceGrandTotalAtSave, setInvoiceGrandTotalAtSave] = useState<number | null>(null);
   const savingRef = useRef(false);
 
   // Return: list invoices for a customer + original totals
   const [customerInvoices, setCustomerInvoices] = useState<{ id: string; invoice_no: string; issued_at?: string | null; grand_total?: number | null }[]>([]);
   const [originalGrandTotal, setOriginalGrandTotal] = useState<number>(0);
 
-  // Pay modal
+  // Payments state
+  const [payments, setPayments] = useState<any[]>([]);
+  const [paymentsLoading, setPaymentsLoading] = useState(false);
+
+  // Pay modal state
   const [showPayModal, setShowPayModal] = useState(false);
+  const [payMethod, setPayMethod] = useState<'cash'|'card'|'qr'|'other'>('cash');
+  const [payAmount, setPayAmount] = useState<number>(0);
+  const [payReference, setPayReference] = useState<string>('');
+  const [payDirection, setPayDirection] = useState<'in'|'out'>('in');
 
   useEffect(() => { setRows([makeEmptyRow()]); }, []);
   function makeEmptyRow(): Row {
@@ -182,6 +191,25 @@ export default function NewInvoicePage() {
       return_qty: 0,
     };
   }
+
+  // -------- Helpers: load payments for an invoice --------
+  const refreshPayments = async (invoiceId: string) => {
+    try {
+      setPaymentsLoading(true);
+      const { data, error } = await supabase
+        .from('payments')
+        .select('id, method, direction, amount, reference, created_at')
+        .eq('invoice_id', invoiceId)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      setPayments(data || []);
+    } catch (err) {
+      console.error(err);
+      // silent; UI still works
+    } finally {
+      setPaymentsLoading(false);
+    }
+  };
 
   // -------- Customer lookup & create --------
   const lookupCustomerByPhone = async () => {
@@ -205,7 +233,6 @@ export default function NewInvoicePage() {
       setCustomerAddress1Line(oneLineAddress(c));
       setShowCreateCustomer(false);
 
-      // If returning, load this customer's invoices for selection
       if (docType === 'return') {
         const { data: invs } = await supabase
           .from('invoices')
@@ -516,6 +543,10 @@ export default function NewInvoicePage() {
 
       setInvoiceIdJustSaved(invId);
       setInvoiceNoJustSaved(invoiceNo);
+      setInvoiceGrandTotalAtSave(totals.grand);
+      // Load payments list (empty initially)
+      await refreshPayments(invId);
+
       alert(`${docType === 'return' ? 'Saved return #' : 'Saved invoice #'}${invoiceNo}`);
     } catch (err: any) {
       console.error(err);
@@ -538,8 +569,10 @@ export default function NewInvoicePage() {
     setSaving(false);
     setInvoiceIdJustSaved(null);
     setInvoiceNoJustSaved(null);
+    setInvoiceGrandTotalAtSave(null);
     setCustomerInvoices([]);
     setOriginalGrandTotal(0);
+    setPayments([]);
   };
 
   // -------- Open Customer Screen --------
@@ -555,6 +588,49 @@ export default function NewInvoicePage() {
     url.searchParams.set('display', 'customer');
     url.searchParams.set('autoprint', '1');
     window.open(url.toString(), '_blank', 'noopener,noreferrer');
+  };
+
+  // -------- Open Pay modal (ensure invoice is saved) --------
+  const openPayModal = async () => {
+    if (!invoiceIdJustSaved) {
+      alert('Please save the invoice/return first, then record payment.');
+      return;
+    }
+    // Defaults
+    const direction = docType === 'return' ? 'out' : 'in';
+    setPayDirection(direction);
+    setPayMethod('cash');
+    const baseAmount = invoiceGrandTotalAtSave ?? totals.grand;
+    setPayAmount(Number(baseAmount || 0));
+    setPayReference('');
+    // Refresh payments summary before showing
+    await refreshPayments(invoiceIdJustSaved);
+    setShowPayModal(true);
+  };
+
+  // -------- Confirm Payment --------
+  const confirmPayment = async () => {
+    try {
+      if (!invoiceIdJustSaved) return alert('No saved invoice to attach payment.');
+      if (!payAmount || payAmount <= 0) return alert('Enter a positive amount.');
+
+      const payload = {
+        invoice_id: invoiceIdJustSaved,
+        method: payMethod,
+        direction: payDirection, // 'in' for sale, 'out' for refund/return
+        amount: round2(payAmount),
+        reference: payReference || null,
+      };
+
+      const { error } = await supabase.from('payments').insert([payload]);
+      if (error) throw error;
+
+      setShowPayModal(false);
+      await refreshPayments(invoiceIdJustSaved);
+    } catch (err: any) {
+      console.error(err);
+      alert(err?.message || String(err));
+    }
   };
 
   // =======================
@@ -665,6 +741,27 @@ export default function NewInvoicePage() {
   // User Screen (editor)
   // =======================
   const isReturn = docType === 'return';
+
+  // Payment aggregates (from fetched payments list)
+  const paidIn  = useMemo(() => round2((payments || []).filter(p => p.direction === 'in').reduce((s, p) => s + Number(p.amount || 0), 0)), [payments]);
+  const paidOut = useMemo(() => round2((payments || []).filter(p => p.direction === 'out').reduce((s, p) => s + Number(p.amount || 0), 0)), [payments]);
+  const netPaid = useMemo(() => round2(paidIn - paidOut), [paidIn, paidOut]);
+
+  // Balance depends on doc type and saved grand total
+  const grandAtSave = invoiceGrandTotalAtSave ?? totals.grand;
+  const balance = useMemo(() => {
+    if (!invoiceIdJustSaved) {
+      // Before save, show provisional guidance
+      return isReturn ? round2(grandAtSave) : round2(grandAtSave);
+    }
+    // After save, compute with fetched payments
+    if (isReturn) {
+      // Money due back to customer
+      return round2(grandAtSave - paidOut + paidIn); // refund remaining
+    }
+    // Sale: amount customer still owes
+    return round2(grandAtSave - paidIn + paidOut);
+  }, [invoiceIdJustSaved, isReturn, grandAtSave, paidIn, paidOut]);
 
   return (
     <Protected>
@@ -1095,8 +1192,8 @@ export default function NewInvoicePage() {
         </div>
 
         {/* Totals + Save + Pay */}
-        <div className="mt-6 grid md:grid-cols-3 gap-4">
-          <div className="md:col-span-2">
+        <div className="mt-6 grid lg:grid-cols-3 gap-4">
+          <div className="lg:col-span-2 space-y-4">
             {isReturn && (
               <div className="card">
                 <div className="flex justify-between">
@@ -1110,6 +1207,66 @@ export default function NewInvoicePage() {
                 <div className="flex justify-between font-semibold">
                   <div>Remaining After Return</div>
                   <div>₹ {(Number(originalGrandTotal || 0) - totals.grand).toFixed(2)}</div>
+                </div>
+              </div>
+            )}
+
+            {/* Payments summary (after invoice saved) */}
+            {invoiceIdJustSaved && (
+              <div className="card">
+                <div className="mb-2 font-semibold">Payments</div>
+                {paymentsLoading ? (
+                  <div className="text-sm text-gray-600">Loading payments…</div>
+                ) : payments.length === 0 ? (
+                  <div className="text-sm text-gray-600">No payments yet.</div>
+                ) : (
+                  <div className="overflow-auto">
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>When</th>
+                          <th>Method</th>
+                          <th>Direction</th>
+                          <th>Reference</th>
+                          <th className="text-right">Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {payments.map(p => (
+                          <tr key={p.id}>
+                            <td>{new Date(p.created_at).toLocaleString()}</td>
+                            <td className="capitalize">{p.method}</td>
+                            <td className="uppercase">{p.direction}</td>
+                            <td>{p.reference || '—'}</td>
+                            <td className="text-right">₹ {Number(p.amount || 0).toFixed(2)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                <div className="mt-3 grid sm:grid-cols-2 gap-2">
+                  <div className="card">
+                    <div className="flex justify-between">
+                      <div>Paid In</div>
+                      <div>₹ {paidIn.toFixed(2)}</div>
+                    </div>
+                    <div className="flex justify-between">
+                      <div>Refunded (Out)</div>
+                      <div>₹ {paidOut.toFixed(2)}</div>
+                    </div>
+                    <div className="flex justify-between font-semibold">
+                      <div>Net Paid</div>
+                      <div>₹ {netPaid.toFixed(2)}</div>
+                    </div>
+                  </div>
+                  <div className="card">
+                    <div className="flex justify-between font-semibold">
+                      <div>{isReturn ? 'Refund Remaining' : 'Balance Due'}</div>
+                      <div>₹ {balance.toFixed(2)}</div>
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
@@ -1136,7 +1293,13 @@ export default function NewInvoicePage() {
               <Button type="button" onClick={openCustomerPrint} className="bg-gray-700 hover:bg-gray-800">
                 Print
               </Button>
-              <Button type="button" onClick={() => setShowPayModal(true)} className="bg-green-600 hover:bg-green-700">
+              <Button
+                type="button"
+                onClick={openPayModal}
+                className="bg-green-600 hover:bg-green-700"
+                disabled={!invoiceIdJustSaved}
+                title={!invoiceIdJustSaved ? 'Save first to record payments' : ''}
+              >
                 Pay
               </Button>
               {invoiceNoJustSaved && (
@@ -1147,29 +1310,105 @@ export default function NewInvoicePage() {
         </div>
       </div>
 
-      {/* ---- Simple Pay Modal (placeholder for your cash/card/QR logic) ---- */}
+      {/* ---- Pay Modal ---- */}
       {showPayModal && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
           <div className="bg-white rounded shadow-lg p-4 w-full max-w-md">
-            <div className="text-lg font-semibold mb-2">Select Payment Method</div>
-            <div className="grid grid-cols-3 gap-2 mb-4">
-              <Button type="button" onClick={() => { setShowPayModal(false); alert('Cash selected (hook your flow)'); }}>
-                Cash
-              </Button>
-              <Button type="button" onClick={() => { setShowPayModal(false); alert('Card selected (hook your flow)'); }}>
-                Card
-              </Button>
-              <Button type="button" onClick={() => { setShowPayModal(false); alert('QR selected (hook your flow)'); }}>
-                QR Code
-              </Button>
+            <div className="text-lg font-semibold mb-2">{isReturn ? 'Refund' : 'Receive Payment'}</div>
+
+            <div className="mb-3">
+              <label className="label">Method</label>
+              <div className="grid grid-cols-4 gap-2">
+                {(['cash','card','qr','other'] as const).map(m => (
+                  <button
+                    key={m}
+                    type="button"
+                    className={`px-3 py-2 rounded border ${payMethod===m ? 'bg-orange-600 text-white' : 'bg-white hover:bg-gray-50'}`}
+                    onClick={() => setPayMethod(m)}
+                  >
+                    {m.toUpperCase()}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="text-right">
+
+            <div className="mb-3 grid grid-cols-2 gap-3">
+              <div>
+                <label className="label">{isReturn ? 'Refund Amount' : 'Amount Received'}</label>
+                <input
+                  className="input"
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  value={payAmount}
+                  onChange={(e) => setPayAmount(parseFloat(e.target.value || '0'))}
+                />
+              </div>
+              <div>
+                <label className="label">Direction</label>
+                <select
+                  className="input"
+                  value={payDirection}
+                  onChange={(e) => setPayDirection(e.target.value as 'in'|'out')}
+                >
+                  <option value="in">IN (receive)</option>
+                  <option value="out">OUT (refund)</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="mb-3">
+              <label className="label">Reference (txn no / note)</label>
+              <input
+                className="input"
+                value={payReference}
+                onChange={(e) => setPayReference(e.target.value)}
+                placeholder="Optional"
+              />
+            </div>
+
+            <div className="flex items-center gap-2 mb-3">
               <button
                 type="button"
-                className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300"
+                className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm"
+                onClick={() => {
+                  const base = invoiceGrandTotalAtSave ?? totals.grand;
+                  setPayAmount(Number(base || 0));
+                }}
+              >
+                Full Amount
+              </button>
+              {invoiceIdJustSaved && (
+                <button
+                  type="button"
+                  className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm"
+                  onClick={() => {
+                    // Quick-fill: remaining balance/refund
+                    const remaining = isReturn
+                      ? (invoiceGrandTotalAtSave ?? totals.grand) - paidOut + paidIn
+                      : (invoiceGrandTotalAtSave ?? totals.grand) - paidIn + paidOut;
+                    setPayAmount(round2(Math.max(0, remaining)));
+                  }}
+                >
+                  Remaining
+                </button>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="px-3 py-2 rounded bg-gray-200 hover:bg-gray-300"
                 onClick={() => setShowPayModal(false)}
               >
-                Close
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="px-3 py-2 rounded bg-green-600 hover:bg-green-700 text-white"
+                onClick={confirmPayment}
+              >
+                Confirm
               </button>
             </div>
           </div>
