@@ -26,29 +26,32 @@ interface ItemDb {
   id: string;
   sku: string;
   name: string;
-  unit_cost: number; // avg cost from stock (current)
+  unit_cost: number;
   tax_rate: number;
   uom: { code?: string }[] | { code?: string } | null;
 }
 
 interface Row {
   id: string;
-  sku_input: string;   // typed/scanned SKU (sale mode)
+  sku_input: string;
   item_id: string;
   description: string;
   uom_code: string;
-  base_cost: number;   // from items.unit_cost (used in sale/margin calc)
-  qty: number;         // Qty for SALE (or original sold qty in RETURN view)
-  margin_pct: number;  // editable only in sale mode
+  base_cost: number;
+  qty: number;
+  margin_pct: number;
   tax_rate: number;
-  unit_price: number;  // editable in sale mode (issued price in return mode)
-  // --- Return-only helpers ---
-  issued_margin_pct?: number; // read-only, from invoice_items.margin_pct_at_sale
-  return_qty?: number;        // editable only in return mode
+  unit_price: number;
+  issued_margin_pct?: number;
+  return_qty?: number;
 }
 
 function round2(n: number) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+function ceilRupee(n: number) {
+  // Round up to next rupee (e.g., 10.01 -> 11)
+  return Math.ceil(Number(n || 0));
 }
 function safeUomCode(u: ItemDb['uom']): string {
   if (Array.isArray(u)) return u[0]?.code ?? '';
@@ -75,50 +78,37 @@ function oneLineAddress(c: Partial<Customer>) {
     .join(', ');
 }
 
-/** ---------- Live mirror via localStorage (rock-solid across browsers) ---------- */
+/** ---------- Live mirror via localStorage (rock-solid) ---------- */
 class StorageBus {
   key: string;
-  constructor(key = 'invoice-live-payload') {
-    this.key = key;
-  }
-  /** Write payload with time to localStorage + fire a storage-like event in same tab */
+  constructor(key = 'invoice-live-payload') { this.key = key; }
   post(payload: any) {
     try {
       const envelope = { ts: Date.now(), payload };
       const json = JSON.stringify(envelope);
       localStorage.setItem(this.key, json);
       window.dispatchEvent(new StorageEvent('storage', { key: this.key, newValue: json }));
-    } catch (e) {
-      console.error('StorageBus.post error', e);
-    }
+    } catch (e) { console.error('StorageBus.post error', e); }
   }
-  /** Subscribe to changes, emit current snapshot immediately if present */
   on(fn: (payload: any) => void) {
     const handler = (ev: StorageEvent) => {
       try {
         if (ev.key !== this.key || !ev.newValue) return;
         const env = JSON.parse(ev.newValue);
         fn(env?.payload);
-      } catch (e) {
-        console.error('StorageBus.on parse error', e);
-      }
+      } catch (e) { console.error('StorageBus.on parse error', e); }
     };
     window.addEventListener('storage', handler);
-    // initial
+    // initial snapshot
     try {
       const raw = localStorage.getItem(this.key);
-      if (raw) {
-        const env = JSON.parse(raw);
-        fn(env?.payload);
-      }
-    } catch (e) {
-      console.error('StorageBus initial load error', e);
-    }
+      if (raw) { const env = JSON.parse(raw); fn(env?.payload); }
+    } catch (e) { console.error('StorageBus initial load error', e); }
     return () => window.removeEventListener('storage', handler);
   }
 }
 const live = new StorageBus('invoice-live-payload');
-/** --------------------------------------------------------------------------- */
+/** --------------------------------------------------------------- */
 
 export default function NewInvoicePage() {
   // Determine view + autoprint from URL
@@ -132,27 +122,22 @@ export default function NewInvoicePage() {
     }
   }, []);
 
-  // Customer view listener (top-level)
+  // Customer view – listen for live payload
   const [liveState, setLiveState] = useState<any>(null);
   const [hasLiveData, setHasLiveData] = useState(false);
   useEffect(() => {
     if (!isCustomerView) return;
     const off = live.on((payload) => {
-      if (payload) {
-        setLiveState(payload);
-        setHasLiveData(true);
-      }
+      if (payload) { setLiveState(payload); setHasLiveData(true); }
     });
     return off;
   }, [isCustomerView]);
 
-  // Auto-print after first payload (or timeout fallback)
+  // Auto-print after first payload (or fallback)
   useEffect(() => {
     if (!isCustomerView || !autoPrint) return;
     let printed = false;
-    const maybePrint = () => {
-      if (!printed) { printed = true; window.print(); }
-    };
+    const maybePrint = () => { if (!printed) { printed = true; window.print(); } };
     if (hasLiveData) {
       const t = setTimeout(maybePrint, 100);
       return () => clearTimeout(t);
@@ -180,14 +165,8 @@ export default function NewInvoicePage() {
   const [showCreateCustomer, setShowCreateCustomer] = useState(false);
 
   const [newCust, setNewCust] = useState({
-    first_name: '',
-    last_name: '',
-    phone: '',
-    street_name: '',
-    village_town: '',
-    city: '',
-    state: '',
-    postal_code: '',
+    first_name: '', last_name: '', phone: '',
+    street_name: '', village_town: '', city: '', state: '', postal_code: '',
   });
 
   // Rows + state
@@ -199,7 +178,7 @@ export default function NewInvoicePage() {
   const [invoiceGrandTotalAtSave, setInvoiceGrandTotalAtSave] = useState<number | null>(null);
   const savingRef = useRef(false);
 
-  // Return: list invoices for a customer + original totals
+  // Return helpers
   const [customerInvoices, setCustomerInvoices] = useState<{ id: string; invoice_no: string; issued_at?: string | null; grand_total?: number | null }[]>([]);
   const [originalGrandTotal, setOriginalGrandTotal] = useState<number>(0);
 
@@ -207,20 +186,23 @@ export default function NewInvoicePage() {
   const [payments, setPayments] = useState<any[]>([]);
   const [paymentsLoading, setPaymentsLoading] = useState(false);
 
-  // Pay modal state + meta
+  // Pay modal + meta
   const [showPayModal, setShowPayModal] = useState(false);
   const [payMethod, setPayMethod] = useState<'cash'|'card'|'qr'|'other'>('cash');
   const [payAmount, setPayAmount] = useState<number>(0);
   const [payReference, setPayReference] = useState<string>('');
   const [payDirection, setPayDirection] = useState<'in'|'out'>('in');
-  // meta for Card/QR
+  // Card/QR meta
   const [cardHolder, setCardHolder] = useState('');
   const [cardLast4, setCardLast4] = useState('');
   const [cardAuth, setCardAuth] = useState('');
   const [cardTxn, setCardTxn] = useState('');
-  const [qrImageUrl, setQrImageUrl] = useState('');
+  const [qrImageUrl, setQrImageUrl] = useState(''); // can be dataURL OR hosted URL
   const [qrTxn, setQrTxn] = useState('');
   const [upiId, setUpiId] = useState('');
+
+  // Auto-QR controls
+  const [generatingQR, setGeneratingQR] = useState(false);
 
   useEffect(() => { setRows([makeEmptyRow()]); }, []);
   function makeEmptyRow(): Row {
@@ -259,12 +241,12 @@ export default function NewInvoicePage() {
     totals,
   });
 
-  /** Always post a snapshot before opening customer/print */
+  /** always post snapshot before open */
   const postLiveSnapshot = () => {
     try { live.post(buildLivePayload()); } catch {}
   };
 
-  // -------- Helpers: load payments for an invoice --------
+  // ----- payments load
   const refreshPayments = async (invoiceId: string) => {
     try {
       setPaymentsLoading(true);
@@ -276,14 +258,11 @@ export default function NewInvoicePage() {
         .order('created_at', { ascending: false });
       if (error) throw error;
       setPayments(data || []);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setPaymentsLoading(false);
-    }
+    } catch (err) { console.error(err); }
+    finally { setPaymentsLoading(false); }
   };
 
-  // -------- Customer lookup & create --------
+  // ----- customer lookup/create
   const lookupCustomerByPhone = async () => {
     const phone = (customerPhone || '').trim();
     if (!phone) return alert('Please enter a mobile number');
@@ -333,7 +312,7 @@ export default function NewInvoicePage() {
     setShowCreateCustomer(false);
   };
 
-  // -------- Item by SKU (sale mode) --------
+  // ----- set item by SKU (sale)
   const setItemBySku = async (rowId: string, skuRaw: string) => {
     const sku = (skuRaw || '').trim();
     if (!sku) return;
@@ -350,7 +329,8 @@ export default function NewInvoicePage() {
     setRows(prev => prev.map(r => {
       if (r.id !== rowId) return r;
       const base = Number(rec.unit_cost || 0);
-      const unit = round2(base * (1 + (r.margin_pct || 0) / 100));
+      const calc = (base) * (1 + (r.margin_pct || 0) / 100);
+      const unit = ceilRupee(calc); // ✅ round up to next rupee
       return {
         ...r,
         sku_input: rec.sku,
@@ -364,7 +344,7 @@ export default function NewInvoicePage() {
     }));
   };
 
-  // -------- Row setters --------
+  // ----- row setters (respect rounding rule)
   const setSkuInput = (rowId: string, text: string) =>
     setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text } : r));
 
@@ -374,7 +354,8 @@ export default function NewInvoicePage() {
   const setMargin = (rowId: string, m: number) =>
     setRows(prev => prev.map(r => {
       if (r.id !== rowId) return r;
-      const unit = round2((r.base_cost || 0) * (1 + (m || 0) / 100));
+      const calc = (r.base_cost || 0) * (1 + (m || 0) / 100);
+      const unit = ceilRupee(calc); // ✅ round up
       return { ...r, margin_pct: m || 0, unit_price: unit };
     }));
 
@@ -385,7 +366,7 @@ export default function NewInvoicePage() {
     setRows(prev => prev.map(r => r.id === rowId ? { ...r, qty: qty || 0 } : r));
 
   const setUnitPrice = (rowId: string, price: number) =>
-    setRows(prev => prev.map(r => r.id === rowId ? { ...r, unit_price: price || 0 } : r));
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, unit_price: ceilRupee(price) } : r)); // ✅ round up
 
   const setReturnQty = (rowId: string, ret: number) =>
     setRows(prev => prev.map(r => {
@@ -397,12 +378,11 @@ export default function NewInvoicePage() {
   const addRow = () => setRows(prev => [...prev, makeEmptyRow()]);
   const removeRow = (rowId: string) => setRows(prev => prev.filter(r => r.id !== rowId));
 
-  // -------- Return: load by invoice no (exact issued values) --------
+  // ----- Return: load items by invoice no
   const loadItemsFromInvoiceNo = async () => {
     const invNo = (originalInvoiceNo || '').trim();
     if (!invNo) return alert('Please enter the original invoice no');
 
-    // A) Get invoice
     const { data: invs, error: e1 } = await supabase
       .from('invoices')
       .select('id, invoice_no, issued_at, subtotal, tax_total, grand_total')
@@ -414,7 +394,6 @@ export default function NewInvoicePage() {
 
     setOriginalGrandTotal(Number(inv.grand_total || 0));
 
-    // B) Lines with issued fields
     const { data: lines, error: e2 } = await supabase
       .from('invoice_items')
       .select('item_id, description, qty, unit_price, tax_rate, base_cost_at_sale, margin_pct_at_sale')
@@ -426,7 +405,6 @@ export default function NewInvoicePage() {
       return;
     }
 
-    // C) Items for display
     const itemIds = Array.from(new Set(lines.map((ln: any) => ln.item_id).filter(Boolean)));
     const { data: items, error: e3 } = await supabase
       .from('items')
@@ -437,7 +415,6 @@ export default function NewInvoicePage() {
     const byId = new Map<string, any>();
     (items ?? []).forEach((it: any) => byId.set(it.id, it));
 
-    // D) UoM
     let uomMap = new Map<any, string>();
     try {
       const uomIds = Array.from(new Set((items ?? []).map(it => it?.uom_id).filter(Boolean)));
@@ -450,7 +427,6 @@ export default function NewInvoicePage() {
       }
     } catch {}
 
-    // E) Compose rows
     const prefilled: Row[] = (lines ?? []).map((ln: any) => {
       const it = byId.get(ln.item_id) || {};
       const uom_code = (it?.uom_id && uomMap.get(it.uom_id)) || '';
@@ -482,10 +458,9 @@ export default function NewInvoicePage() {
     setRows(prefilled.length > 0 ? prefilled : [makeEmptyRow()]);
   };
 
-  // -------- Totals (sale vs return) --------
+  // ----- totals
   const totals = useMemo(() => {
     let subtotal = 0, tax = 0;
-
     for (const r of rows) {
       const qtyForCalc = docType === 'return' ? Number(r.return_qty || 0) : Number(r.qty || 0);
       const line = qtyForCalc * Number(r.unit_price || 0);
@@ -495,13 +470,13 @@ export default function NewInvoicePage() {
     return { subtotal: round2(subtotal), tax: round2(tax), grand: round2(subtotal + tax) };
   }, [rows, docType]);
 
-  // -------- Live mirror to Customer Screen (editor side) --------
+  // ----- mirror to customer screen
   useEffect(() => {
-    if (isCustomerView) return; // customer listens only
+    if (isCustomerView) return;
     live.post(buildLivePayload());
   }, [isCustomerView, rows, totals, brandName, brandLogo, brandAddress, brandPhone, docType, issuedAt, customerName, customerAddress1Line]);
 
-  // -------- Save --------
+  // ----- save invoice/return
   const savingLatch = () => {
     if (savingRef.current || saving) return true;
     savingRef.current = true; setSaving(true);
@@ -511,7 +486,6 @@ export default function NewInvoicePage() {
 
   const save = async () => {
     if (savingLatch()) return;
-
     if (!customerId) { saveDone(); return alert('Please lookup or create the customer (by phone) first'); }
 
     const hasLine = docType === 'return'
@@ -521,12 +495,10 @@ export default function NewInvoicePage() {
     if (!hasLine) { saveDone(); return alert('Add at least one line item'); }
 
     try {
-      // next invoice no (fallback)
       let invoiceNo = '';
       const { data: nextNo, error: eNo } = await supabase.rpc('next_invoice_no');
       invoiceNo = !eNo && nextNo ? String(nextNo) : 'INV-' + Date.now();
 
-      // invoice
       const { data: inv, error: e1 } = await supabase
         .from('invoices')
         .insert([{
@@ -545,7 +517,6 @@ export default function NewInvoicePage() {
       if (e1) throw e1;
       const invId = (inv as any).id as string;
 
-      // invoice lines
       const lineRows =
         (docType === 'return'
           ? rows.filter(r => r.item_id && Number(r.return_qty || 0) > 0)
@@ -575,7 +546,6 @@ export default function NewInvoicePage() {
       const { error: e2 } = await supabase.from('invoice_items').insert(lineRows);
       if (e2) throw e2;
 
-      // stock moves (idempotent)
       const moveRpc = docType === 'sale' ? 'issue_stock' : 'return_stock';
       for (const r of rows) {
         const qtyToMove = docType === 'return' ? Number(r.return_qty || 0) : Number(r.qty || 0);
@@ -583,11 +553,7 @@ export default function NewInvoicePage() {
         let client_tx_id = '';
         try { client_tx_id = crypto.randomUUID(); } catch { client_tx_id = makeId(); }
         const { error } = await supabase.rpc(moveRpc, {
-          p_item_id: r.item_id,
-          p_qty: qtyToMove,
-          p_ref: invoiceNo,
-          p_reason: docType,
-          p_client_tx_id: client_tx_id,
+          p_item_id: r.item_id, p_qty: qtyToMove, p_ref: invoiceNo, p_reason: docType, p_client_tx_id: client_tx_id,
         });
         if (error) throw error;
       }
@@ -596,17 +562,14 @@ export default function NewInvoicePage() {
       setInvoiceNoJustSaved(invoiceNo);
       setInvoiceGrandTotalAtSave(totals.grand);
       await refreshPayments(invId);
-
       alert(`${docType === 'return' ? 'Saved return #' : 'Saved invoice #'}${invoiceNo}`);
     } catch (err: any) {
       console.error(err);
       alert(err?.message || String(err));
-    } finally {
-      saveDone();
-    }
+    } finally { saveDone(); }
   };
 
-  // -------- Reset --------
+  // ----- reset
   const handleNewInvoice = () => {
     setIssuedAt(new Date().toISOString().slice(0, 10));
     setDocType('sale');
@@ -625,7 +588,7 @@ export default function NewInvoicePage() {
     setPayments([]);
   };
 
-  // -------- Open Customer Screen (and print) --------
+  // ----- open customer views
   const openCustomerScreen = () => {
     postLiveSnapshot();
     const url = new URL(window.location.href);
@@ -640,7 +603,7 @@ export default function NewInvoicePage() {
     window.open(url.toString(), '_blank', 'noopener,noreferrer');
   };
 
-  // -------- Payments --------
+  // ----- payments
   const openPayModal = async () => {
     if (!invoiceIdJustSaved) {
       alert('Please save the invoice/return first, then record payment.');
@@ -658,6 +621,34 @@ export default function NewInvoicePage() {
     setShowPayModal(true);
   };
 
+  // Build UPI deep link
+  const buildUpiUri = (upi: string, amount: number, note: string, payeeName: string) => {
+    if (!upi) return '';
+    const params = new URLSearchParams();
+    params.set('pa', upi);            // payee address
+    if (payeeName) params.set('pn', payeeName);
+    if (amount > 0) params.set('am', round2(amount).toFixed(2));
+    params.set('cu', 'INR');
+    if (note) params.set('tn', note);
+    return `upi://pay?${params.toString()}`;
+  };
+
+  const generateQr = async () => {
+    try {
+      if (!upiId) { alert('Enter UPI ID to auto-generate QR'); return; }
+      setGeneratingQR(true);
+      const { toDataURL } = await import('qrcode'); // dynamic import
+      const upi = buildUpiUri(upiId.trim(), payAmount || 0, payReference || (invoiceNoJustSaved ?? 'Payment'), brandName);
+      const dataUrl = await toDataURL(upi, { margin: 1, scale: 8 });
+      setQrImageUrl(dataUrl);
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.message || 'Failed to generate QR');
+    } finally {
+      setGeneratingQR(false);
+    }
+  };
+
   const confirmPayment = async () => {
     try {
       if (!invoiceIdJustSaved) return alert('No saved invoice to attach payment.');
@@ -670,7 +661,7 @@ export default function NewInvoicePage() {
         meta.card_auth  = cardAuth  || null;
         meta.card_txn   = cardTxn   || null;
       } else if (payMethod === 'qr') {
-        meta.qr_image_url = qrImageUrl || null;
+        meta.qr_image_url = qrImageUrl || null; // may be dataURL (auto) or hosted image (manual)
         meta.qr_txn       = qrTxn || null;
         meta.upi_id       = upiId || null;
       }
@@ -678,7 +669,7 @@ export default function NewInvoicePage() {
       const payload = {
         invoice_id: invoiceIdJustSaved,
         method: payMethod,
-        direction: payDirection, // 'in' for sale, 'out' for refund/return
+        direction: payDirection,
         amount: round2(payAmount),
         reference: payReference || null,
         meta,
@@ -690,9 +681,9 @@ export default function NewInvoicePage() {
       setShowPayModal(false);
       await refreshPayments(invoiceIdJustSaved);
 
-      // Open printable receipt in a new tab
+      // Open printable receipt (requires page at app/receipts/[paymentId]/page.tsx)
       if (data?.id) {
-        const url = `/receipts/${data.id}`;
+        const url = `${window.location.origin}/receipts/${data.id}`;
         window.open(url, '_blank', 'noopener,noreferrer');
       }
     } catch (err: any) {
@@ -715,7 +706,6 @@ export default function NewInvoicePage() {
     return (
       <div className="p-4 print:p-0">
         <style>{`
-          /* PRINT ONLY THE INVOICE AREA, HIDE APP NAV/HEADER */
           @media print {
             @page { margin: 8mm; }
             body * { visibility: hidden !important; }
@@ -733,7 +723,6 @@ export default function NewInvoicePage() {
         </div>
 
         <div className="card print-area">
-          {/* Header */}
           <div className="flex items-center gap-4 mb-4">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={brand.logo} alt="logo" className="h-14 w-14 rounded bg-white object-contain" />
@@ -811,7 +800,6 @@ export default function NewInvoicePage() {
   // =======================
   const isReturn = docType === 'return';
 
-  // Payment aggregates
   const paidIn  = useMemo(() => round2((payments || []).filter(p => p.direction === 'in').reduce((s, p) => s + Number(p.amount || 0), 0)), [payments]);
   const paidOut = useMemo(() => round2((payments || []).filter(p => p.direction === 'out').reduce((s, p) => s + Number(p.amount || 0), 0)), [payments]);
   const netPaid = useMemo(() => round2(paidIn - paidOut), [paidIn, paidOut]);
@@ -819,13 +807,13 @@ export default function NewInvoicePage() {
   const grandAtSave = invoiceGrandTotalAtSave ?? totals.grand;
   const balance = useMemo(() => {
     if (!invoiceIdJustSaved) return round2(grandAtSave);
-    if (isReturn) return round2(grandAtSave - paidOut + paidIn); // refund remaining
-    return round2(grandAtSave - paidIn + paidOut);               // balance due
+    if (isReturn) return round2(grandAtSave - paidOut + paidIn);
+    return round2(grandAtSave - paidIn + paidOut);
   }, [invoiceIdJustSaved, isReturn, grandAtSave, paidIn, paidOut]);
 
   return (
     <Protected>
-      {/* Header with brand + action buttons */}
+      {/* Header */}
       <div className="card mb-4">
         <div className="flex items-center gap-4">
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -835,7 +823,6 @@ export default function NewInvoicePage() {
             <div className="text-sm text-gray-700">{brandAddress}</div>
             <div className="text-sm text-gray-700">Phone: {brandPhone}</div>
           </div>
-
           <div className="ml-auto flex gap-2">
             <Button type="button" onClick={openCustomerScreen}>Open Customer Screen</Button>
             <Button type="button" onClick={openCustomerPrint} className="bg-gray-700 hover:bg-gray-800">Print</Button>
@@ -849,7 +836,7 @@ export default function NewInvoicePage() {
       <div className="card">
         <h1 className="text-xl font-semibold mb-4">New {isReturn ? 'Return' : 'Invoice'}</h1>
 
-        {/* Top: type/date/notes */}
+        {/* Top */}
         <div className="grid md:grid-cols-3 gap-3 mb-4">
           <div>
             <label className="label">Type</label>
@@ -883,7 +870,7 @@ export default function NewInvoicePage() {
           </div>
         </div>
 
-        {/* Return: invoice picker + load items */}
+        {/* Return helpers */}
         {isReturn && (
           <div className="card mb-4">
             <div className="grid md:grid-cols-3 gap-3 items-end">
@@ -896,9 +883,7 @@ export default function NewInvoicePage() {
                   onChange={(e) => setOriginalInvoiceNo(e.target.value)}
                 />
               </div>
-              <div>
-                <Button type="button" onClick={loadItemsFromInvoiceNo}>Load Items</Button>
-              </div>
+              <div><Button type="button" onClick={loadItemsFromInvoiceNo}>Load Items</Button></div>
               <div className="text-sm text-gray-600">Loads items from original invoice. Enter <b>Return Qty</b> only.</div>
             </div>
 
@@ -915,25 +900,20 @@ export default function NewInvoicePage() {
                     ))}
                   </select>
                 </div>
-                <div>
-                  <Button type="button" onClick={loadItemsFromInvoiceNo}>Load Selected</Button>
-                </div>
+                <div><Button type="button" onClick={loadItemsFromInvoiceNo}>Load Selected</Button></div>
               </div>
             )}
           </div>
         )}
 
-        {/* Customer by mobile number */}
+        {/* Customer */}
         <div className="card mb-4">
           <div className="grid md:grid-cols-3 gap-3 items-end">
             <div>
               <label className="label">Customer Mobile</label>
               <input className="input" placeholder="Enter mobile number" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} />
             </div>
-            <div>
-              <Button type="button" onClick={lookupCustomerByPhone}>Lookup Customer</Button>
-            </div>
-
+            <div><Button type="button" onClick={lookupCustomerByPhone}>Lookup Customer</Button></div>
             <div className="text-sm">
               <div className="font-semibold">Customer</div>
               <div>{customerName || '—'}</div>
@@ -1003,10 +983,7 @@ export default function NewInvoicePage() {
                           value={r.sku_input}
                           onChange={(e) => setSkuInput(r.id, e.target.value)}
                           onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              setItemBySku(r.id, r.sku_input);
-                            }
+                            if (e.key === 'Enter') { e.preventDefault(); setItemBySku(r.id, r.sku_input); }
                           }}
                         />
                       </td>
@@ -1071,7 +1048,6 @@ export default function NewInvoicePage() {
               </div>
             )}
 
-            {/* Payments summary (after save) */}
             {invoiceIdJustSaved && (
               <div className="card">
                 <div className="mb-2 font-semibold">Payments</div>
@@ -1164,7 +1140,7 @@ export default function NewInvoicePage() {
               </div>
             </div>
 
-            {/* Dynamic meta fields */}
+            {/* Card meta */}
             {payMethod === 'card' && (
               <div className="mb-3 grid grid-cols-2 gap-3">
                 <div><label className="label">Card Holder</label><input className="input" value={cardHolder} onChange={(e)=>setCardHolder(e.target.value)} /></div>
@@ -1174,12 +1150,28 @@ export default function NewInvoicePage() {
               </div>
             )}
 
+            {/* QR meta + auto QR */}
             {payMethod === 'qr' && (
               <div className="mb-3 grid grid-cols-1 gap-3">
                 <div className="text-sm font-semibold text-gray-800">Scan‑to‑Pay</div>
+
                 <div>
-                  <label className="label">QR Image URL</label>
-                  <input className="input" value={qrImageUrl} onChange={(e)=>setQrImageUrl(e.target.value)} placeholder="https://.../qr.png" />
+                  <label className="label">UPI ID</label>
+                  <input className="input" value={upiId} onChange={(e)=>setUpiId(e.target.value)} placeholder="e.g. myshop@upi" />
+                </div>
+
+                <div className="flex gap-2">
+                  <Button type="button" onClick={generateQr} disabled={generatingQR}>
+                    {generatingQR ? 'Generating…' : 'Generate QR from UPI + Amount'}
+                  </Button>
+                  <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={() => setQrImageUrl('')}>
+                    Clear
+                  </Button>
+                </div>
+
+                <div>
+                  <label className="label">QR Image URL (optional)</label>
+                  <input className="input" value={qrImageUrl} onChange={(e)=>setQrImageUrl(e.target.value)} placeholder="Paste hosted image URL OR leave empty if auto-generated" />
                   {qrImageUrl && (
                     <div className="mt-2 border rounded p-2 flex flex-col items-center">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -1188,7 +1180,7 @@ export default function NewInvoicePage() {
                     </div>
                   )}
                 </div>
-                <div><label className="label">UPI ID (optional)</label><input className="input" value={upiId} onChange={(e)=>setUpiId(e.target.value)} placeholder="e.g. myshop@upi" /></div>
+
                 <div><label className="label">Txn ID (optional)</label><input className="input" value={qrTxn} onChange={(e)=>setQrTxn(e.target.value)} /></div>
               </div>
             )}
@@ -1217,16 +1209,13 @@ export default function NewInvoicePage() {
                 Full Amount
               </button>
               {invoiceIdJustSaved && (
-                <button
-                  type="button"
-                  className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm"
+                <button type="button" className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm"
                   onClick={() => {
                     const remaining = isReturn
                       ? (invoiceGrandTotalAtSave ?? totals.grand) - paidOut + paidIn
                       : (invoiceGrandTotalAtSave ?? totals.grand) - paidIn + paidOut;
                     setPayAmount(round2(Math.max(0, remaining)));
-                  }}
-                >
+                  }}>
                   Remaining
                 </button>
               )}
