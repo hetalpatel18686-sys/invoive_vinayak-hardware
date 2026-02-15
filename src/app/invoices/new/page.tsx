@@ -1,14 +1,9 @@
 // src/app/invoices/new/page.tsx
 'use client';
 
-import React, {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  Suspense,
-} from 'react';
-import { useSearchParams } from 'next/navigation';
+export const dynamic = 'force-dynamic';
+
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 import Protected from '@/components/Protected';
@@ -103,7 +98,6 @@ class StorageBus {
       } catch (e) { console.error('StorageBus.on parse error', e); }
     };
     window.addEventListener('storage', handler);
-    // initial snapshot
     try {
       const raw = localStorage.getItem(this.key);
       if (raw) { const env = JSON.parse(raw); fn(env?.payload); }
@@ -114,28 +108,17 @@ class StorageBus {
 const live = new StorageBus('invoice-live-payload');
 /** --------------------------------------------------------------- */
 
-/**
- * Wrapper page: Suspense boundary is required for useSearchParams on Next.js 16.
- */
-export default function Page() {
-  return (
-    <Suspense fallback={<div className="p-4">Loading…</div>}>
-      <NewInvoicePageBody />
-    </Suspense>
-  );
-}
-
-/**
- * The actual page body that uses useSearchParams and all the logic.
- */
-function NewInvoicePageBody() {
-  // ===== Determine view + autoprint (SSR-safe + inside Suspense) =====
-  const sp = useSearchParams();
-  const isCustomerView = sp.get('display') === 'customer';
-  const autoPrint =
-    sp.get('autoprint') === '1' ||
-    sp.get('_print') === '1' ||
-    sp.get('print') === '1';
+export default function NewInvoicePage() {
+  // Determine view + autoprint from URL
+  const [isCustomerView, setIsCustomerView] = useState(false);
+  const [autoPrint, setAutoPrint] = useState(false);
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const sp = new URLSearchParams(window.location.search);
+      setIsCustomerView(sp.get('display') === 'customer');
+      setAutoPrint(sp.get('autoprint') === '1' || sp.get('_print') === '1' || sp.get('print') === '1');
+    }
+  }, []);
 
   // Customer view – listen for live payload
   const [liveState, setLiveState] = useState<any>(null);
@@ -168,7 +151,8 @@ function NewInvoicePageBody() {
   const brandPhone   = process.env.NEXT_PUBLIC_BRAND_PHONE    || '+91 7046826808';
 
   // Default UPI (read-only in UI). You can also set NEXT_PUBLIC_UPI_ID in Vercel.
-  const upiId = process.env.NEXT_PUBLIC_UPI_ID || 'patelkb308@okaxis';
+  const upiId =
+    process.env.NEXT_PUBLIC_UPI_ID || 'patelkb308@okaxis';
 
   // Header
   const [issuedAt, setIssuedAt] = useState<string>(() => new Date().toISOString().slice(0,10));
@@ -603,21 +587,19 @@ function NewInvoicePageBody() {
     setPayments([]);
   };
 
-  // ----- open customer views (safe URLs)
+  // ----- open customer views
   const openCustomerScreen = () => {
     postLiveSnapshot();
     const url = new URL(window.location.href);
     url.searchParams.set('display', 'customer');
-    const final = url.pathname + '?' + url.searchParams.toString();
-    window.open(final, '_blank', 'noopener,noreferrer');
+    window.open(url.toString(), '_blank', 'noopener,noreferrer');
   };
   const openCustomerPrint = () => {
     postLiveSnapshot();
     const url = new URL(window.location.href);
     url.searchParams.set('display', 'customer');
     url.searchParams.set('autoprint', '1');
-    const final = url.pathname + '?' + url.searchParams.toString();
-    window.open(final, '_blank', 'noopener,noreferrer');
+    window.open(url.toString(), '_blank', 'noopener,noreferrer');
   };
 
   // ===== Auto-generate QR (UPI read-only) =====
@@ -641,16 +623,16 @@ function NewInvoicePageBody() {
     (async () => {
       try {
         setGeneratingQR(true);
-        const mod: any = await import('qrcode');
-        const toDataURL = mod?.toDataURL || mod?.default?.toDataURL;
-        if (!toDataURL) throw new Error('QR library not loaded');
+        // dynamic import only on client
+        // @ts-ignore - types are provided but this keeps TS calm in all setups
+        const QR = await import('qrcode');
         const upi = buildUpiUri(
           upiId.trim(),
           payAmount || 0,
           payReference || (invoiceNoJustSaved ?? 'Payment'),
           brandName
         );
-        const dataUrl = await toDataURL(upi, { margin: 1, scale: 8 });
+        const dataUrl = await QR.toDataURL(upi, { margin: 1, scale: 8 });
         if (!cancelled) setQrImageUrl(dataUrl);
       } catch (e: any) {
         if (!cancelled) {
@@ -696,8 +678,8 @@ function NewInvoicePageBody() {
       if (error) throw error;
 
       setShowPayModal(false);
-      await refreshPayments(inv
-      );
+      await refreshPayments(invoiceIdJustSaved);
+
       // Open printable receipt
       if (data?.id) {
         const url = `${window.location.origin}/receipts/${data.id}`;
@@ -1191,7 +1173,11 @@ function NewInvoicePageBody() {
 
                 <div>
                   <label className="label">UPI ID (read‑only)</label>
-                  <input className="input" value={upiId} readOnly />
+                  <input
+                    className="input"
+                    value={upiId}
+                    readOnly
+                  />
                 </div>
 
                 <div className="mt-2 border rounded p-2 flex flex-col items-center">
@@ -1259,4 +1245,3 @@ function NewInvoicePageBody() {
     </Protected>
   );
 }
-``
