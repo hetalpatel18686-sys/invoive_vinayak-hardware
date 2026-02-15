@@ -25,22 +25,25 @@ interface ItemDb {
   id: string;
   sku: string;
   name: string;
-  unit_cost: number; // avg cost from stock
+  unit_cost: number; // avg cost from stock (current)
   tax_rate: number;
   uom: { code?: string }[] | { code?: string } | null;
 }
 
 interface Row {
   id: string;
-  sku_input: string;  // typed/scanned SKU
+  sku_input: string;   // typed/scanned SKU (sale mode)
   item_id: string;
   description: string;
   uom_code: string;
-  base_cost: number;  // from items.unit_cost
-  qty: number;
-  margin_pct: number;
+  base_cost: number;   // from items.unit_cost (used in sale/margin calc)
+  qty: number;         // Qty for SALE (or original sold qty in RETURN view)
+  margin_pct: number;  // editable only in sale mode
   tax_rate: number;
-  unit_price: number; // editable (cost + margin%)
+  unit_price: number;  // editable in sale mode (issued price in return mode)
+  // --- Return-only helpers ---
+  issued_margin_pct?: number; // read-only, from invoice_items.margin_pct_at_sale
+  return_qty?: number;        // editable only in return mode
 }
 
 function round2(n: number) {
@@ -88,12 +91,14 @@ class LiveChannel {
 const live = new LiveChannel('invoice-live');
 
 export default function NewInvoicePage() {
-  // Determine view from URL (no useSearchParams)
+  // Determine view + autoprint from URL
   const [isCustomerView, setIsCustomerView] = useState(false);
+  const [autoPrint, setAutoPrint] = useState(false);
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const sp = new URLSearchParams(window.location.search);
       setIsCustomerView(sp.get('display') === 'customer');
+      setAutoPrint(sp.get('autoprint') === '1' || sp.get('_print') === '1' || sp.get('print') === '1');
     }
   }, []);
 
@@ -144,6 +149,13 @@ export default function NewInvoicePage() {
   const [invoiceNoJustSaved, setInvoiceNoJustSaved] = useState<string | null>(null);
   const savingRef = useRef(false);
 
+  // Return: list invoices for a customer + original totals
+  const [customerInvoices, setCustomerInvoices] = useState<{ id: string; invoice_no: string; issued_at?: string | null; grand_total?: number | null }[]>([]);
+  const [originalGrandTotal, setOriginalGrandTotal] = useState<number>(0);
+
+  // Pay modal
+  const [showPayModal, setShowPayModal] = useState(false);
+
   useEffect(() => { setRows([makeEmptyRow()]); }, []);
   function makeEmptyRow(): Row {
     return {
@@ -157,6 +169,8 @@ export default function NewInvoicePage() {
       margin_pct: 0,
       tax_rate: 0,
       unit_price: 0,
+      issued_margin_pct: 0,
+      return_qty: 0,
     };
   }
 
@@ -174,12 +188,24 @@ export default function NewInvoicePage() {
       setNewCust({ first_name: '', last_name: '', phone, street_name: '', village_town: '', city: '', state: '', postal_code: '' });
       setShowCreateCustomer(true);
       setCustomerId(''); setCustomerName(''); setCustomerAddress1Line('');
+      setCustomerInvoices([]);
     } else {
       const c = data[0] as Customer;
       setCustomerId(c.id);
       setCustomerName(fullName(c));
       setCustomerAddress1Line(oneLineAddress(c));
       setShowCreateCustomer(false);
+
+      // If returning, load this customer's invoices for selection
+      if (docType === 'return') {
+        const { data: invs } = await supabase
+          .from('invoices')
+          .select('id, invoice_no, issued_at, grand_total')
+          .eq('customer_id', c.id)
+          .order('issued_at', { ascending: false })
+          .limit(100);
+        setCustomerInvoices(invs ?? []);
+      }
     }
   };
 
@@ -199,7 +225,7 @@ export default function NewInvoicePage() {
     setShowCreateCustomer(false);
   };
 
-  // -------- Item by SKU (type/scan then Enter) --------
+  // -------- Item by SKU (type/scan then Enter) — SALE mode only --------
   const setItemBySku = async (rowId: string, skuRaw: string) => {
     const sku = (skuRaw || '').trim();
     if (!sku) return;
@@ -231,38 +257,59 @@ export default function NewInvoicePage() {
   };
 
   // -------- Row setters --------
-  const setSkuInput = (rowId: string, text: string) => setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text } : r));
-  const setDescription = (rowId: string, desc: string) => setRows(prev => prev.map(r => r.id === rowId ? { ...r, description: desc } : r));
-  const setMargin = (rowId: string, m: number) => setRows(prev => prev.map(r => {
-    if (r.id !== rowId) return r;
-    const unit = round2((r.base_cost || 0) * (1 + (m || 0) / 100));
-    return { ...r, margin_pct: m || 0, unit_price: unit };
-  }));
-  const setTaxRate = (rowId: string, rate: number) => setRows(prev => prev.map(r => r.id === rowId ? { ...r, tax_rate: rate || 0 } : r));
-  const setQty = (rowId: string, qty: number) => setRows(prev => prev.map(r => r.id === rowId ? { ...r, qty: qty || 0 } : r));
-  const setUnitPrice = (rowId: string, price: number) => setRows(prev => prev.map(r => r.id === rowId ? { ...r, unit_price: price || 0 } : r));
+  const setSkuInput = (rowId: string, text: string) =>
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text } : r));
+
+  const setDescription = (rowId: string, desc: string) =>
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, description: desc } : r));
+
+  const setMargin = (rowId: string, m: number) =>
+    setRows(prev => prev.map(r => {
+      if (r.id !== rowId) return r;
+      const unit = round2((r.base_cost || 0) * (1 + (m || 0) / 100));
+      return { ...r, margin_pct: m || 0, unit_price: unit };
+    }));
+
+  const setTaxRate = (rowId: string, rate: number) =>
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, tax_rate: rate || 0 } : r));
+
+  const setQty = (rowId: string, qty: number) =>
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, qty: qty || 0 } : r));
+
+  const setUnitPrice = (rowId: string, price: number) =>
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, unit_price: price || 0 } : r));
+
+  const setReturnQty = (rowId: string, ret: number) =>
+    setRows(prev => prev.map(r => {
+      if (r.id !== rowId) return r;
+      const clamped = Math.max(0, Math.min(Number(r.qty || 0), ret || 0));
+      return { ...r, return_qty: clamped };
+    }));
+
   const addRow = () => setRows(prev => [...prev, makeEmptyRow()]);
   const removeRow = (rowId: string) => setRows(prev => prev.filter(r => r.id !== rowId));
 
-  // -------- Return: load by invoice no (NO nested select; same UI) --------
+  // -------- Return: load by invoice no (composed fetches; uses exact issued values) --------
   const loadItemsFromInvoiceNo = async () => {
     const invNo = (originalInvoiceNo || '').trim();
     if (!invNo) return alert('Please enter the original invoice no');
 
-    // A) Get the invoice by number
+    // A) Get the invoice by number (also read totals)
     const { data: invs, error: e1 } = await supabase
       .from('invoices')
-      .select('id, invoice_no')
+      .select('id, invoice_no, issued_at, subtotal, tax_total, grand_total')
       .eq('invoice_no', invNo)
       .limit(1);
     if (e1) return alert(e1.message);
     const inv = (invs ?? [])[0];
     if (!inv) return alert('Invoice not found');
 
-    // B) Get invoice lines (flat)
+    setOriginalGrandTotal(Number(inv.grand_total || 0));
+
+    // B) Get invoice lines (include issued fields if present)
     const { data: lines, error: e2 } = await supabase
       .from('invoice_items')
-      .select('item_id, description, qty, unit_price, tax_rate')
+      .select('item_id, description, qty, unit_price, tax_rate, base_cost_at_sale, margin_pct_at_sale')
       .eq('invoice_id', inv.id);
     if (e2) return alert(e2.message);
 
@@ -271,23 +318,21 @@ export default function NewInvoicePage() {
       return;
     }
 
-    // C) Fetch items for line item_ids (flat)
+    // C) Fetch items for display details (flat)
     const itemIds = Array.from(new Set(lines.map((ln: any) => ln.item_id).filter(Boolean)));
     const { data: items, error: e3 } = await supabase
       .from('items')
-      .select('id, sku, name, unit_cost, tax_rate, uom_id') // include uom_id if present
+      .select('id, sku, name, unit_cost, tax_rate, uom_id')
       .in('id', itemIds);
     if (e3) return alert(e3.message);
 
     const byId = new Map<string, any>();
     (items ?? []).forEach((it: any) => byId.set(it.id, it));
 
-    // D) OPTIONAL: try to fetch UoM codes if we have uom_id (ignore errors gracefully)
+    // D) OPTIONAL: UoM codes if uom_id exists
     let uomMap = new Map<any, string>();
     try {
-      const uomIds = Array.from(
-        new Set((items ?? []).map(it => it?.uom_id).filter(Boolean))
-      );
+      const uomIds = Array.from(new Set((items ?? []).map(it => it?.uom_id).filter(Boolean)));
       if (uomIds.length > 0) {
         const { data: uoms } = await supabase
           .from('units_of_measure')
@@ -295,43 +340,53 @@ export default function NewInvoicePage() {
           .in('id', uomIds);
         (uoms ?? []).forEach((u: any) => uomMap.set(u.id, u.code));
       }
-    } catch { /* ignore if table/name not present */ }
+    } catch { /* ignore */ }
 
-    // E) Compose UI rows — SAME interface as before
+    // E) Compose UI rows — original values read-only + Return Qty
     const prefilled: Row[] = (lines ?? []).map((ln: any) => {
       const it = byId.get(ln.item_id) || {};
-      const base = Number(it.unit_cost || 0);
-      const uom_code =
-        (it.uom_id && uomMap.get(it.uom_id)) || // from optional fetch
-        ''; // fallback if not available
+      const uom_code = (it?.uom_id && uomMap.get(it.uom_id)) || '';
+
+      // exact issued margin% if stored; else best-effort estimate
+      let issued_margin_pct = 0;
+      if (typeof ln.margin_pct_at_sale === 'number') {
+        issued_margin_pct = Number(ln.margin_pct_at_sale) || 0;
+      } else {
+        const baseNow = Number(it.unit_cost || 0);
+        issued_margin_pct = baseNow > 0 ? round2(((Number(ln.unit_price || 0) - baseNow) / baseNow) * 100) : 0;
+      }
 
       return {
         id: makeId(),
-        sku_input: it.sku || '',
+        sku_input: it?.sku || '',
         item_id: ln.item_id,
-        description: ln.description || it.name || '',
+        description: ln.description || it?.name || '',
         uom_code,
-        base_cost: base,
-        qty: 1, // default for return
-        margin_pct: 0,
-        tax_rate: Number(ln.tax_rate ?? it.tax_rate ?? 0),
-        unit_price: Number(ln.unit_price || 0),
+        base_cost: Number(ln.base_cost_at_sale ?? it?.unit_cost ?? 0), // store exact when available
+        qty: Number(ln.qty || 0),                  // original sold qty (read-only in return mode)
+        margin_pct: 0,                             // not used in return mode
+        tax_rate: Number(ln.tax_rate || it?.tax_rate || 0),
+        unit_price: Number(ln.unit_price || 0),    // issued price (exact)
+        issued_margin_pct,
+        return_qty: 0,                             // user will enter
       };
     });
 
     setRows(prefilled.length > 0 ? prefilled : [makeEmptyRow()]);
   };
 
-  // -------- Totals --------
+  // -------- Totals (sale vs return) --------
   const totals = useMemo(() => {
     let subtotal = 0, tax = 0;
+
     for (const r of rows) {
-      const line = (r.qty || 0) * (r.unit_price || 0);
+      const qtyForCalc = docType === 'return' ? Number(r.return_qty || 0) : Number(r.qty || 0);
+      const line = qtyForCalc * Number(r.unit_price || 0);
       subtotal += line;
-      tax += line * ((r.tax_rate || 0) / 100);
+      tax += line * ((Number(r.tax_rate || 0)) / 100);
     }
     return { subtotal: round2(subtotal), tax: round2(tax), grand: round2(subtotal + tax) };
-  }, [rows]);
+  }, [rows, docType]);
 
   // -------- Live mirror to Customer Screen --------
   useEffect(() => {
@@ -339,15 +394,18 @@ export default function NewInvoicePage() {
     const payload = {
       brand: { name: brandName, logo: brandLogo, address: brandAddress, phone: brandPhone },
       header: { docType, issuedAt, customerName, customerAddress1Line },
-      lines: rows.map(r => ({
-        sku: r.sku_input,
-        description: r.description,
-        uom_code: r.uom_code,
-        qty: r.qty,
-        unit_price: r.unit_price,
-        tax_rate: r.tax_rate,
-        line_total: round2(r.qty * r.unit_price),
-      })),
+      lines: rows.map(r => {
+        const qtyForCalc = docType === 'return' ? Number(r.return_qty || 0) : Number(r.qty || 0);
+        return {
+          sku: r.sku_input,
+          description: r.description,
+          uom_code: r.uom_code,
+          qty: qtyForCalc,
+          unit_price: r.unit_price,
+          tax_rate: r.tax_rate,
+          line_total: round2(qtyForCalc * r.unit_price),
+        };
+      }),
       totals,
     };
     live.post({ type: 'invoice-update', payload });
@@ -363,8 +421,14 @@ export default function NewInvoicePage() {
 
   const save = async () => {
     if (savingLatch()) return;
+
     if (!customerId) { saveDone(); return alert('Please lookup or create the customer (by phone) first'); }
-    const hasLine = rows.some(r => r.item_id && r.qty > 0);
+
+    // Validate lines depending on doc type
+    const hasLine = docType === 'return'
+      ? rows.some(r => r.item_id && Number(r.return_qty || 0) > 0)
+      : rows.some(r => r.item_id && Number(r.qty || 0) > 0);
+
     if (!hasLine) { saveDone(); return alert('Add at least one line item'); }
 
     try {
@@ -393,17 +457,33 @@ export default function NewInvoicePage() {
       const invId = (inv as any).id as string;
 
       // invoice lines
-      const lineRows = rows
-        .filter(r => r.item_id && r.qty > 0)
-        .map(r => ({
-          invoice_id: invId,
-          item_id: r.item_id,
-          description: r.description,
-          qty: r.qty,
-          unit_price: r.unit_price,
-          tax_rate: r.tax_rate,
-          line_total: round2(r.qty * r.unit_price),
-        }));
+      const lineRows =
+        (docType === 'return'
+          ? rows.filter(r => r.item_id && Number(r.return_qty || 0) > 0)
+              .map(r => ({
+                invoice_id: invId,
+                item_id: r.item_id,
+                description: r.description,
+                qty: Number(r.return_qty || 0),      // save return qty
+                unit_price: r.unit_price,            // issued price is used for refund calc
+                tax_rate: r.tax_rate,
+                line_total: round2(Number(r.return_qty || 0) * r.unit_price),
+              }))
+          : rows.filter(r => r.item_id && Number(r.qty || 0) > 0)
+              .map(r => ({
+                invoice_id: invId,
+                item_id: r.item_id,
+                description: r.description,
+                qty: Number(r.qty || 0),              // sale qty
+                unit_price: r.unit_price,
+                tax_rate: r.tax_rate,
+                line_total: round2(Number(r.qty || 0) * r.unit_price),
+                // NEW: persist exact values for future returns
+                base_cost_at_sale: r.base_cost,
+                margin_pct_at_sale: r.margin_pct,
+              }))
+        );
+
       const { error: e2 } = await supabase.from('invoice_items').insert(lineRows);
       if (e2) throw e2;
 
@@ -411,12 +491,13 @@ export default function NewInvoicePage() {
       const moveRpc = docType === 'sale' ? 'issue_stock' : 'return_stock';
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
-        if (!r.item_id || !r.qty) continue;
+        const qtyToMove = docType === 'return' ? Number(r.return_qty || 0) : Number(r.qty || 0);
+        if (!r.item_id || !qtyToMove) continue;
         let client_tx_id = '';
         try { client_tx_id = crypto.randomUUID(); } catch { client_tx_id = makeId(); }
         const { error } = await supabase.rpc(moveRpc, {
           p_item_id: r.item_id,
-          p_qty: r.qty,
+          p_qty: qtyToMove,
           p_ref: invoiceNo,
           p_reason: docType,
           p_client_tx_id: client_tx_id,
@@ -426,10 +507,9 @@ export default function NewInvoicePage() {
 
       setInvoiceIdJustSaved(invId);
       setInvoiceNoJustSaved(invoiceNo);
-      alert('Saved invoice #' + invoiceNo);
+      alert(`${docType === 'return' ? 'Saved return #' : 'Saved invoice #'}${invoiceNo}`);
     } catch (err: any) {
       console.error(err);
-      // If you see: "Could not find the table 'public.invoice'" → rename to invoices (plural)
       alert(err?.message || String(err));
     } finally {
       saveDone();
@@ -449,12 +529,22 @@ export default function NewInvoicePage() {
     setSaving(false);
     setInvoiceIdJustSaved(null);
     setInvoiceNoJustSaved(null);
+    setCustomerInvoices([]);
+    setOriginalGrandTotal(0);
   };
 
   // -------- Open Customer Screen --------
   const openCustomerScreen = () => {
     const url = new URL(window.location.href);
     url.searchParams.set('display', 'customer');
+    window.open(url.toString(), '_blank', 'noopener,noreferrer');
+  };
+
+  // -------- Open Customer Screen and auto-print --------
+  const openCustomerPrint = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('display', 'customer');
+    url.searchParams.set('autoprint', '1');
     window.open(url.toString(), '_blank', 'noopener,noreferrer');
   };
 
@@ -467,24 +557,37 @@ export default function NewInvoicePage() {
     const liveLines: any[] = liveState?.lines ?? [];
     const liveTotals = liveState?.totals ?? { subtotal: 0, tax: 0, grand: 0 };
 
+    useEffect(() => {
+      if (autoPrint) {
+        // Wait a tick to ensure DOM paints
+        const t = setTimeout(() => window.print(), 200);
+        return () => clearTimeout(t);
+      }
+    }, [autoPrint]);
+
     const onPrint = () => window.print();
 
     return (
       <div className="p-4 print:p-0">
         <style>{`
+          /* PRINT ONLY THE INVOICE AREA, HIDE APP NAV/HEADER */
           @media print {
             @page { margin: 8mm; }
-            .no-print { display: none !important; }
+            body * { visibility: hidden !important; }
+            .print-area, .print-area * { visibility: visible !important; }
+            .print-area { position: absolute; left: 0; top: 0; width: 100%; }
+            header, nav, .no-print, .app-header, .app-nav, [data-app-header] { display: none !important; }
             .card { box-shadow: none !important; border: 0 !important; }
             body { background: #fff !important; }
           }
         `}</style>
 
-        <div className="no-print mb-3">
+        <div className="no-print mb-3 flex gap-2">
           <Button type="button" onClick={onPrint}>Print</Button>
+          <Button type="button" onClick={() => window.close()} className="bg-gray-700 hover:bg-gray-800">Close</Button>
         </div>
 
-        <div className="card">
+        <div className="card print-area">
           {/* Header */}
           <div className="flex items-center gap-4 mb-4">
             <img src={brand.logo} alt="logo" className="h-14 w-14 rounded bg-white object-contain" />
@@ -506,7 +609,7 @@ export default function NewInvoicePage() {
             <div className="text-sm text-gray-700">{header.customerAddress1Line || '—'}</div>
           </div>
 
-          {/* Lines (NO margin/cost columns) */}
+          {/* Lines */}
           <div className="overflow-auto">
             <table className="table">
               <thead>
@@ -560,6 +663,8 @@ export default function NewInvoicePage() {
   // =======================
   // User Screen (editor)
   // =======================
+  const isReturn = docType === 'return';
+
   return (
     <Protected>
       {/* Header with brand + action buttons */}
@@ -576,21 +681,38 @@ export default function NewInvoicePage() {
             <Button type="button" onClick={openCustomerScreen}>
               Open Customer Screen
             </Button>
+            <Button type="button" onClick={openCustomerPrint} className="bg-gray-700 hover:bg-gray-800">
+              Print
+            </Button>
             <Button type="button" onClick={handleNewInvoice} className="bg-gray-700 hover:bg-gray-800">
-              New Invoice
+              New {isReturn ? 'Return' : 'Invoice'}
             </Button>
           </div>
         </div>
       </div>
 
       <div className="card">
-        <h1 className="text-xl font-semibold mb-4">New Invoice</h1>
+        <h1 className="text-xl font-semibold mb-4">New {isReturn ? 'Return' : 'Invoice'}</h1>
 
         {/* Top: type/date/notes */}
         <div className="grid md:grid-cols-3 gap-3 mb-4">
           <div>
             <label className="label">Type</label>
-            <select className="input" value={docType} onChange={(e) => setDocType(e.target.value as DocType)}>
+            <select
+              className="input"
+              value={docType}
+              onChange={(e) => {
+                const v = e.target.value as DocType;
+                setDocType(v);
+                // reset return-specific states when switching modes
+                if (v === 'sale') {
+                  setOriginalInvoiceNo('');
+                  setCustomerInvoices([]);
+                  setOriginalGrandTotal(0);
+                  setRows([makeEmptyRow()]);
+                }
+              }}
+            >
               <option value="sale">Sale</option>
               <option value="return">Return</option>
             </select>
@@ -607,8 +729,8 @@ export default function NewInvoicePage() {
           </div>
         </div>
 
-        {/* Return: original invoice number */}
-        {docType === 'return' && (
+        {/* Return: invoice picker + load items */}
+        {isReturn && (
           <div className="card mb-4">
             <div className="grid md:grid-cols-3 gap-3 items-end">
               <div>
@@ -624,9 +746,35 @@ export default function NewInvoicePage() {
                 <Button type="button" onClick={loadItemsFromInvoiceNo}>Load Items</Button>
               </div>
               <div className="text-sm text-gray-600">
-                Loads items from original invoice. Adjust quantities for return.
+                Loads items from original invoice. Enter <b>Return Qty</b> only.
               </div>
             </div>
+
+            {/* List customer's invoices when a mobile number is looked up */}
+            {customerInvoices.length > 0 && (
+              <div className="mt-4 grid md:grid-cols-3 gap-3 items-end">
+                <div className="md:col-span-2">
+                  <label className="label">Select Customer Invoice</label>
+                  <select
+                    className="input"
+                    value={originalInvoiceNo}
+                    onChange={(e) => setOriginalInvoiceNo(e.target.value)}
+                  >
+                    <option value="">-- Choose invoice --</option>
+                    {customerInvoices.map(inv => (
+                      <option key={inv.id} value={inv.invoice_no}>
+                        {inv.invoice_no} {inv.issued_at ? `• ${inv.issued_at}` : ''} {typeof inv.grand_total === 'number' ? `• ₹ ${inv.grand_total?.toFixed(2)}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <Button type="button" onClick={loadItemsFromInvoiceNo}>
+                    Load Selected
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -731,139 +879,241 @@ export default function NewInvoicePage() {
           )}
         </div>
 
-        {/* Line items — EXACT order requested */}
+        {/* Line items */}
         <div className="overflow-auto">
           <table className="table">
             <thead>
-              <tr>
-                <th style={{ minWidth: 160 }}>Item (SKU)</th>
-                <th style={{ minWidth: 220 }}>Description</th>
-                <th style={{ minWidth: 80 }}>UoM</th>
-                <th style={{ minWidth: 110 }}>Current Cost</th>
-                <th style={{ minWidth: 80 }}>Qty</th>
-                <th style={{ minWidth: 110 }}>Margin %</th>
-                <th style={{ minWidth: 80 }}>Tax %</th>
-                <th style={{ minWidth: 120 }}>Unit Price</th>
-                <th style={{ minWidth: 120 }}>Line Total</th>
-                <th></th>
-              </tr>
+              {!isReturn ? (
+                <tr>
+                  <th style={{ minWidth: 160 }}>Item (SKU)</th>
+                  <th style={{ minWidth: 220 }}>Description</th>
+                  <th style={{ minWidth: 80 }}>UoM</th>
+                  <th style={{ minWidth: 110 }}>Current Cost</th>
+                  <th style={{ minWidth: 80 }}>Qty</th>
+                  <th style={{ minWidth: 110 }}>Margin %</th>
+                  <th style={{ minWidth: 80 }}>Tax %</th>
+                  <th style={{ minWidth: 120 }}>Unit Price</th>
+                  <th style={{ minWidth: 120 }}>Line Total</th>
+                  <th></th>
+                </tr>
+              ) : (
+                <tr>
+                  <th style={{ minWidth: 120 }}>SKU</th>
+                  <th style={{ minWidth: 220 }}>Description</th>
+                  <th style={{ minWidth: 80 }}>UoM</th>
+                  <th className="text-right" style={{ minWidth: 90 }}>Qty (Sold)</th>
+                  {/* Unit Price hidden in return mode (per request) */}
+                  <th className="text-right" style={{ minWidth: 80 }}>Tax %</th>
+                  <th className="text-right" style={{ minWidth: 120 }}>Line Total</th>
+                  <th className="text-right" style={{ minWidth: 110 }}>Return Qty</th>
+                  <th className="text-right" style={{ minWidth: 130 }}>Return Amount</th>
+                  <th className="text-right" style={{ minWidth: 130 }}>Remaining</th>
+                </tr>
+              )}
             </thead>
+
             <tbody>
               {rows.map((r) => {
-                const lineTotal = round2((r.qty || 0) * (r.unit_price || 0));
+                if (!isReturn) {
+                  // SALE MODE ROW
+                  const lineTotal = round2((r.qty || 0) * (r.unit_price || 0));
+                  return (
+                    <tr key={r.id}>
+                      {/* Item (SKU) — type/scan then Enter */}
+                      <td>
+                        <input
+                          className="input"
+                          placeholder="Type/Scan SKU, then Enter"
+                          value={r.sku_input}
+                          onChange={(e) => setSkuInput(r.id, e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              setItemBySku(r.id, r.sku_input);
+                            }
+                          }}
+                        />
+                      </td>
+
+                      {/* Description */}
+                      <td>
+                        <input
+                          className="input"
+                          placeholder="Description"
+                          value={r.description}
+                          onChange={(e) => setDescription(r.id, e.target.value)}
+                        />
+                      </td>
+
+                      {/* UoM (readonly) */}
+                      <td>
+                        <input className="input" value={r.uom_code || ''} readOnly placeholder="-" />
+                      </td>
+
+                      {/* Current Cost (readonly) */}
+                      <td>
+                        <input className="input" value={r.base_cost.toFixed(2)} readOnly />
+                      </td>
+
+                      {/* Qty */}
+                      <td>
+                        <input
+                          className="input"
+                          type="number"
+                          min={0}
+                          step="1"
+                          value={r.qty}
+                          onChange={(e) => setQty(r.id, parseFloat(e.target.value || '0'))}
+                        />
+                      </td>
+
+                      {/* Margin % */}
+                      <td>
+                        <input
+                          className="input"
+                          type="number"
+                          step="0.01"
+                          value={r.margin_pct}
+                          onChange={(e) => setMargin(r.id, parseFloat(e.target.value || '0'))}
+                        />
+                      </td>
+
+                      {/* Tax % */}
+                      <td>
+                        <input
+                          className="input"
+                          type="number"
+                          step="0.01"
+                          value={r.tax_rate}
+                          onChange={(e) => setTaxRate(r.id, parseFloat(e.target.value || '0'))}
+                        />
+                      </td>
+
+                      {/* Unit Price (editable) */}
+                      <td>
+                        <input
+                          className="input"
+                          type="number"
+                          step="0.01"
+                          value={r.unit_price}
+                          onChange={(e) => setUnitPrice(r.id, parseFloat(e.target.value || '0'))}
+                        />
+                      </td>
+
+                      {/* Line Total */}
+                      <td>₹ {lineTotal.toFixed(2)}</td>
+
+                      {/* Remove */}
+                      <td>
+                        <button
+                          type="button"
+                          className="text-red-600 hover:underline"
+                          onClick={() => removeRow(r.id)}
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                }
+
+                // RETURN MODE ROW
+                const soldLineTotal = round2(Number(r.qty || 0) * Number(r.unit_price || 0)); // exact issued line total
+                const retQty = Number(r.return_qty || 0);
+                const returnAmount = round2(retQty * Number(r.unit_price || 0)); // based on issued unit price
+                const remaining = round2(soldLineTotal - returnAmount);
+
                 return (
                   <tr key={r.id}>
-                    {/* Item (SKU) — type/scan then Enter */}
                     <td>
-                      <input
-                        className="input"
-                        placeholder="Type/Scan SKU, then Enter"
-                        value={r.sku_input}
-                        onChange={(e) => setSkuInput(r.id, e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            setItemBySku(r.id, r.sku_input);
-                          }
-                        }}
-                      />
+                      <input className="input" value={r.sku_input} readOnly />
                     </td>
 
-                    {/* Description */}
                     <td>
-                      <input
-                        className="input"
-                        placeholder="Description"
-                        value={r.description}
-                        onChange={(e) => setDescription(r.id, e.target.value)}
-                      />
+                      <input className="input" value={r.description} readOnly />
+                      {/* exact issued margin shown (read-only) */}
+                      <div className="text-xs text-gray-600 mt-1">
+                        Issued Margin: {Number(r.issued_margin_pct ?? 0).toFixed(2)}%
+                      </div>
                     </td>
 
-                    {/* UoM (readonly) */}
                     <td>
                       <input className="input" value={r.uom_code || ''} readOnly placeholder="-" />
                     </td>
 
-                    {/* Current Cost (readonly) */}
-                    <td>
-                      <input className="input" value={r.base_cost.toFixed(2)} readOnly />
+                    <td className="text-right">
+                      <input className="input text-right" value={r.qty} readOnly />
                     </td>
 
-                    {/* Qty */}
-                    <td>
+                    {/* Unit Price hidden in return mode per request */}
+
+                    <td className="text-right">
+                      <input className="input text-right" value={Number(r.tax_rate).toFixed(2)} readOnly />
+                    </td>
+
+                    <td className="text-right">
+                      ₹ {soldLineTotal.toFixed(2)}
+                    </td>
+
+                    <td className="text-right">
                       <input
-                        className="input"
+                        className="input text-right"
                         type="number"
                         min={0}
+                        max={r.qty}
                         step="1"
-                        value={r.qty}
-                        onChange={(e) => setQty(r.id, parseFloat(e.target.value || '0'))}
+                        value={retQty}
+                        onChange={(e) => setReturnQty(r.id, parseFloat(e.target.value || '0'))}
                       />
                     </td>
 
-                    {/* Margin % */}
-                    <td>
-                      <input
-                        className="input"
-                        type="number"
-                        step="0.01"
-                        value={r.margin_pct}
-                        onChange={(e) => setMargin(r.id, parseFloat(e.target.value || '0'))}
-                      />
-                    </td>
+                    <td className="text-right">₹ {returnAmount.toFixed(2)}</td>
 
-                    {/* Tax % */}
-                    <td>
-                      <input
-                        className="input"
-                        type="number"
-                        step="0.01"
-                        value={r.tax_rate}
-                        onChange={(e) => setTaxRate(r.id, parseFloat(e.target.value || '0'))}
-                      />
-                    </td>
-
-                    {/* Unit Price (editable) */}
-                    <td>
-                      <input
-                        className="input"
-                        type="number"
-                        step="0.01"
-                        value={r.unit_price}
-                        onChange={(e) => setUnitPrice(r.id, parseFloat(e.target.value || '0'))}
-                      />
-                    </td>
-
-                    {/* Line Total */}
-                    <td>₹ {lineTotal.toFixed(2)}</td>
-
-                    {/* Remove */}
-                    <td>
-                      <button
-                        type="button"
-                        className="text-red-600 hover:underline"
-                        onClick={() => removeRow(r.id)}
-                      >
-                        Remove
-                      </button>
-                    </td>
+                    <td className="text-right">₹ {remaining.toFixed(2)}</td>
                   </tr>
                 );
               })}
             </tbody>
+
             <tfoot>
-              <tr>
-                <td colSpan={10}>
-                  <Button type="button" onClick={addRow}>+ Add Line</Button>
-                </td>
-              </tr>
+              {!isReturn ? (
+                <tr>
+                  <td colSpan={10}>
+                    <Button type="button" onClick={addRow}>+ Add Line</Button>
+                  </td>
+                </tr>
+              ) : (
+                <tr>
+                  <td colSpan={10} className="text-sm text-gray-600">
+                    All item details are read-only in Return mode. Enter <b>Return Qty</b> only.
+                  </td>
+                </tr>
+              )}
             </tfoot>
           </table>
         </div>
 
-        {/* Totals + Save */}
+        {/* Totals + Save + Pay */}
         <div className="mt-6 grid md:grid-cols-3 gap-4">
-          <div className="md:col-span-2"></div>
+          <div className="md:col-span-2">
+            {isReturn && (
+              <div className="card">
+                <div className="flex justify-between">
+                  <div>Original Invoice Total</div>
+                  <div>₹ {Number(originalGrandTotal || 0).toFixed(2)}</div>
+                </div>
+                <div className="flex justify-between">
+                  <div>Return Total (this document)</div>
+                  <div>₹ {totals.grand.toFixed(2)}</div>
+                </div>
+                <div className="flex justify-between font-semibold">
+                  <div>Remaining After Return</div>
+                  <div>₹ {(Number(originalGrandTotal || 0) - totals.grand).toFixed(2)}</div>
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="card">
             <div className="flex justify-between">
               <div>Subtotal</div>
@@ -878,9 +1128,15 @@ export default function NewInvoicePage() {
               <div>₹ {totals.grand.toFixed(2)}</div>
             </div>
 
-            <div className="mt-4 flex gap-2">
+            <div className="mt-4 flex gap-2 flex-wrap">
               <Button type="button" onClick={save} disabled={saving}>
-                {saving ? 'Saving…' : 'Save Invoice'}
+                {saving ? 'Saving…' : isReturn ? 'Save Return' : 'Save Invoice'}
+              </Button>
+              <Button type="button" onClick={openCustomerPrint} className="bg-gray-700 hover:bg-gray-800">
+                Print
+              </Button>
+              <Button type="button" onClick={() => setShowPayModal(true)} className="bg-green-600 hover:bg-green-700">
+                Pay
               </Button>
               {invoiceNoJustSaved && (
                 <div className="text-sm text-gray-600 self-center">Saved #{invoiceNoJustSaved}</div>
@@ -889,7 +1145,35 @@ export default function NewInvoicePage() {
           </div>
         </div>
       </div>
+
+      {/* ---- Simple Pay Modal (placeholder for your cash/card/QR logic) ---- */}
+      {showPayModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded shadow-lg p-4 w-full max-w-md">
+            <div className="text-lg font-semibold mb-2">Select Payment Method</div>
+            <div className="grid grid-cols-3 gap-2 mb-4">
+              <Button type="button" onClick={() => { setShowPayModal(false); alert('Cash selected (hook your flow)'); }}>
+                Cash
+              </Button>
+              <Button type="button" onClick={() => { setShowPayModal(false); alert('Card selected (hook your flow)'); }}>
+                Card
+              </Button>
+              <Button type="button" onClick={() => { setShowPayModal(false); alert('QR selected (hook your flow)'); }}>
+                QR Code
+              </Button>
+            </div>
+            <div className="text-right">
+              <button
+                type="button"
+                className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300"
+                onClick={() => setShowPayModal(false)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </Protected>
   );
 }
-``
