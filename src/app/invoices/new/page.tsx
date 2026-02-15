@@ -588,18 +588,28 @@ export default function NewInvoicePage() {
   };
 
   // ----- open customer views
+  // [FIXED] open using PATH + QUERY with popup fallback
   const openCustomerScreen = () => {
     postLiveSnapshot();
     const url = new URL(window.location.href);
     url.searchParams.set('display', 'customer');
-    window.open(url.toString(), '_blank', 'noopener,noreferrer');
+    const final = url.pathname + '?' + url.searchParams.toString();
+    const w = window.open(final, '_blank', 'noopener,noreferrer');
+    if (!w || w.closed || typeof w.closed === 'undefined') {
+      window.location.href = final;
+    }
   };
+  // [FIXED] open using PATH + QUERY with popup fallback (and autoprint)
   const openCustomerPrint = () => {
     postLiveSnapshot();
     const url = new URL(window.location.href);
     url.searchParams.set('display', 'customer');
     url.searchParams.set('autoprint', '1');
-    window.open(url.toString(), '_blank', 'noopener,noreferrer');
+    const final = url.pathname + '?' + url.searchParams.toString();
+    const w = window.open(final, '_blank', 'noopener,noreferrer');
+    if (!w || w.closed || typeof w.closed === 'undefined') {
+      window.location.href = final;
+    }
   };
 
   // ===== Auto-generate QR (UPI read-only) =====
