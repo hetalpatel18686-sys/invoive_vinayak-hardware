@@ -75,21 +75,50 @@ function oneLineAddress(c: Partial<Customer>) {
     .join(', ');
 }
 
-/** Live mirror channel (User → Customer tab) */
-class LiveChannel {
-  ch: BroadcastChannel | null = null;
-  constructor(name = 'invoice-live') {
-    try { this.ch = new BroadcastChannel(name); } catch { this.ch = null; }
+/** ---------- Live mirror via localStorage (rock-solid across browsers) ---------- */
+class StorageBus {
+  key: string;
+  constructor(key = 'invoice-live-payload') {
+    this.key = key;
   }
-  post(data: any) { try { this.ch?.postMessage(data); } catch {} }
-  on(fn: (data: any) => void) {
-    if (!this.ch) return () => {};
-    const handler = (ev: MessageEvent) => fn(ev.data);
-    this.ch.addEventListener('message', handler);
-    return () => this.ch?.removeEventListener('message', handler);
+  /** Write payload with time to localStorage + fire a storage-like event in same tab */
+  post(payload: any) {
+    try {
+      const envelope = { ts: Date.now(), payload };
+      const json = JSON.stringify(envelope);
+      localStorage.setItem(this.key, json);
+      window.dispatchEvent(new StorageEvent('storage', { key: this.key, newValue: json }));
+    } catch (e) {
+      console.error('StorageBus.post error', e);
+    }
+  }
+  /** Subscribe to changes, emit current snapshot immediately if present */
+  on(fn: (payload: any) => void) {
+    const handler = (ev: StorageEvent) => {
+      try {
+        if (ev.key !== this.key || !ev.newValue) return;
+        const env = JSON.parse(ev.newValue);
+        fn(env?.payload);
+      } catch (e) {
+        console.error('StorageBus.on parse error', e);
+      }
+    };
+    window.addEventListener('storage', handler);
+    // initial
+    try {
+      const raw = localStorage.getItem(this.key);
+      if (raw) {
+        const env = JSON.parse(raw);
+        fn(env?.payload);
+      }
+    } catch (e) {
+      console.error('StorageBus initial load error', e);
+    }
+    return () => window.removeEventListener('storage', handler);
   }
 }
-const live = new LiveChannel('invoice-live');
+const live = new StorageBus('invoice-live-payload');
+/** --------------------------------------------------------------------------- */
 
 export default function NewInvoicePage() {
   // Determine view + autoprint from URL
@@ -108,9 +137,9 @@ export default function NewInvoicePage() {
   const [hasLiveData, setHasLiveData] = useState(false);
   useEffect(() => {
     if (!isCustomerView) return;
-    const off = live.on((msg) => {
-      if (msg?.type === 'invoice-update') {
-        setLiveState(msg.payload);
+    const off = live.on((payload) => {
+      if (payload) {
+        setLiveState(payload);
         setHasLiveData(true);
       }
     });
@@ -184,7 +213,7 @@ export default function NewInvoicePage() {
   const [payAmount, setPayAmount] = useState<number>(0);
   const [payReference, setPayReference] = useState<string>('');
   const [payDirection, setPayDirection] = useState<'in'|'out'>('in');
-  // meta
+  // meta for Card/QR
   const [cardHolder, setCardHolder] = useState('');
   const [cardLast4, setCardLast4] = useState('');
   const [cardAuth, setCardAuth] = useState('');
@@ -211,7 +240,7 @@ export default function NewInvoicePage() {
     };
   }
 
-  // -------- Helpers: live payload snapshot (used before opening print tab)
+  /** Build live payload for mirror */
   const buildLivePayload = () => ({
     brand: { name: brandName, logo: brandLogo, address: brandAddress, phone: brandPhone },
     header: { docType, issuedAt, customerName, customerAddress1Line },
@@ -229,8 +258,10 @@ export default function NewInvoicePage() {
     }),
     totals,
   });
+
+  /** Always post a snapshot before opening customer/print */
   const postLiveSnapshot = () => {
-    try { live.post({ type: 'invoice-update', payload: buildLivePayload() }); } catch {}
+    try { live.post(buildLivePayload()); } catch {}
   };
 
   // -------- Helpers: load payments for an invoice --------
@@ -467,7 +498,7 @@ export default function NewInvoicePage() {
   // -------- Live mirror to Customer Screen (editor side) --------
   useEffect(() => {
     if (isCustomerView) return; // customer listens only
-    live.post({ type: 'invoice-update', payload: buildLivePayload() });
+    live.post(buildLivePayload());
   }, [isCustomerView, rows, totals, brandName, brandLogo, brandAddress, brandPhone, docType, issuedAt, customerName, customerAddress1Line]);
 
   // -------- Save --------
@@ -684,6 +715,7 @@ export default function NewInvoicePage() {
     return (
       <div className="p-4 print:p-0">
         <style>{`
+          /* PRINT ONLY THE INVOICE AREA, HIDE APP NAV/HEADER */
           @media print {
             @page { margin: 8mm; }
             body * { visibility: hidden !important; }
@@ -787,8 +819,8 @@ export default function NewInvoicePage() {
   const grandAtSave = invoiceGrandTotalAtSave ?? totals.grand;
   const balance = useMemo(() => {
     if (!invoiceIdJustSaved) return round2(grandAtSave);
-    if (isReturn) return round2(grandAtSave - paidOut + paidIn);
-    return round2(grandAtSave - paidIn + paidOut);
+    if (isReturn) return round2(grandAtSave - paidOut + paidIn); // refund remaining
+    return round2(grandAtSave - paidIn + paidOut);               // balance due
   }, [invoiceIdJustSaved, isReturn, grandAtSave, paidIn, paidOut]);
 
   return (
@@ -991,7 +1023,7 @@ export default function NewInvoicePage() {
                   );
                 }
 
-                // RETURN row
+                // Return row
                 const soldLineTotal = round2(Number(r.qty || 0) * Number(r.unit_price || 0));
                 const retQty = Number(r.return_qty || 0);
                 const returnAmount = round2(retQty * Number(r.unit_price || 0));
@@ -1144,17 +1176,19 @@ export default function NewInvoicePage() {
 
             {payMethod === 'qr' && (
               <div className="mb-3 grid grid-cols-1 gap-3">
+                <div className="text-sm font-semibold text-gray-800">Scan‑to‑Pay</div>
                 <div>
                   <label className="label">QR Image URL</label>
                   <input className="input" value={qrImageUrl} onChange={(e)=>setQrImageUrl(e.target.value)} placeholder="https://.../qr.png" />
                   {qrImageUrl && (
-                    <div className="mt-2 border rounded p-2 flex justify-center">
+                    <div className="mt-2 border rounded p-2 flex flex-col items-center">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img src={qrImageUrl} alt="QR" className="max-h-40 object-contain" />
+                      {upiId && <div className="mt-2 text-xs text-gray-700">UPI ID: <b>{upiId}</b></div>}
                     </div>
                   )}
                 </div>
-                <div><label className="label">UPI ID (optional)</label><input className="input" value={upiId} onChange={(e)=>setUpiId(e.target.value)} /></div>
+                <div><label className="label">UPI ID (optional)</label><input className="input" value={upiId} onChange={(e)=>setUpiId(e.target.value)} placeholder="e.g. myshop@upi" /></div>
                 <div><label className="label">Txn ID (optional)</label><input className="input" value={qrTxn} onChange={(e)=>setQrTxn(e.target.value)} /></div>
               </div>
             )}
