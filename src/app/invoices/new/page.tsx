@@ -586,19 +586,15 @@ const autoPrint =
   };
 
   // ----- open customer views
-  const openCustomerScreen = () => {
-    postLiveSnapshot();
-    const url = new URL(window.location.href);
-    url.searchParams.set('display', 'customer');
-    window.open(url.toString(), '_blank', 'noopener,noreferrer');
-  };
-  const openCustomerPrint = () => {
-    postLiveSnapshot();
-    const url = new URL(window.location.href);
-    url.searchParams.set('display', 'customer');
-    url.searchParams.set('autoprint', '1');
-    window.open(url.toString(), '_blank', 'noopener,noreferrer');
-  };
+const openCustomerScreen = () => {
+  postLiveSnapshot();
+  const url = new URL(window.location.href);
+  url.searchParams.set('display', 'customer');
+  const final = url.pathname + "?" + url.searchParams.toString();
+  window.open(final, "_blank", "noopener,noreferrer");
+};
+
+const openCustomerPrint = () => {
 
   // ===== Auto-generate QR (UPI read-only) =====
   const buildUpiUri = (upi: string, amount: number, note: string, payeeName: string) => {
