@@ -26,22 +26,22 @@ interface ItemDb {
   id: string;
   sku: string;
   name: string;
-  unit_cost: number;                       // avg cost from stock
+  unit_cost: number; // avg cost from stock
   tax_rate: number;
   uom: { code?: string }[] | { code?: string } | null;
 }
 
 interface Row {
   id: string;
-  sku_input: string;                       // typed/scanned SKU
+  sku_input: string;  // typed/scanned SKU
   item_id: string;
   description: string;
-  uom_code: string;                        // readonly from item
-  base_cost: number;                       // readonly from items.unit_cost (avg cost)
+  uom_code: string;
+  base_cost: number;  // from items.unit_cost
   qty: number;
-  margin_pct: number;                      // % → used to compute unit_price from cost
+  margin_pct: number;
   tax_rate: number;
-  unit_price: number;                      // editable (defaults from cost + margin%)
+  unit_price: number; // editable (cost + margin%)
 }
 
 function round2(n: number) {
@@ -58,7 +58,6 @@ function makeId(): string {
   } catch {}
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
     const r = (Math.random() * 16) | 0;
-    // eslint-disable-next-line no-mixed-operators
     const v = c === 'x' ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
@@ -73,19 +72,13 @@ function oneLineAddress(c: Partial<Customer>) {
     .join(', ');
 }
 
-/** A small, safe live channel to mirror rows to the Customer Screen */
+/** Simple channel to mirror live data to the customer tab */
 class LiveChannel {
   ch: BroadcastChannel | null = null;
   constructor(name = 'invoice-live') {
-    try {
-      this.ch = new BroadcastChannel(name);
-    } catch {
-      this.ch = null;
-    }
+    try { this.ch = new BroadcastChannel(name); } catch { this.ch = null; }
   }
-  post(data: any) {
-    try { this.ch?.postMessage(data); } catch {}
-  }
+  post(data: any) { try { this.ch?.postMessage(data); } catch {} }
   on(fn: (data: any) => void) {
     if (!this.ch) return () => {};
     const handler = (ev: MessageEvent) => fn(ev.data);
@@ -100,21 +93,18 @@ export default function NewInvoicePage() {
   const viewParam = (search.get('display') || 'user') as ViewMode;
   const isCustomerView = viewParam === 'customer';
 
-  // --- Branding ---
+  // Brand
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
   const brandLogo    = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png';
   const brandAddress = process.env.NEXT_PUBLIC_BRAND_ADDRESS  || 'Bilimora, Gandevi, Navsari, Gujarat, 396321';
   const brandPhone   = process.env.NEXT_PUBLIC_BRAND_PHONE    || '+91 7046826808';
 
-  // --- Header ---
-  const [issuedAt, setIssuedAt] = useState<string>(() => {
-    const d = new Date();
-    return d.toISOString().slice(0, 10);
-  });
+  // Header
+  const [issuedAt, setIssuedAt] = useState<string>(() => new Date().toISOString().slice(0,10));
   const [docType, setDocType] = useState<DocType>('sale');
   const [originalInvoiceNo, setOriginalInvoiceNo] = useState<string>('');
 
-  // --- Customer ---
+  // Customer
   const [customerPhone, setCustomerPhone] = useState('');
   const [customerId, setCustomerId] = useState<string>('');
   const [customerName, setCustomerName] = useState<string>('');
@@ -132,19 +122,15 @@ export default function NewInvoicePage() {
     postal_code: '',
   });
 
-  // --- Rows & state ---
+  // Rows + state
   const [rows, setRows] = useState<Row[]>([]);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [invoiceIdJustSaved, setInvoiceIdJustSaved] = useState<string | null>(null);
   const [invoiceNoJustSaved, setInvoiceNoJustSaved] = useState<string | null>(null);
-
-  // Double-save latch
   const savingRef = useRef(false);
 
-  useEffect(() => {
-    setRows([makeEmptyRow()]);
-  }, []);
+  useEffect(() => { setRows([makeEmptyRow()]); }, []);
 
   function makeEmptyRow(): Row {
     return {
@@ -161,33 +147,20 @@ export default function NewInvoicePage() {
     };
   }
 
-  // -------- Customer lookup --------
+  // -------- Customer lookup & create --------
   const lookupCustomerByPhone = async () => {
     const phone = (customerPhone || '').trim();
     if (!phone) return alert('Please enter a mobile number');
-
     const { data, error } = await supabase
       .from('customers')
       .select('id, first_name, last_name, phone, street_name, village_town, city, state, postal_code')
       .ilike('phone', phone);
-
     if (error) return alert(error.message);
 
     if (!data || data.length === 0) {
-      setNewCust({
-        first_name: '',
-        last_name: '',
-        phone,
-        street_name: '',
-        village_town: '',
-        city: '',
-        state: '',
-        postal_code: '',
-      });
+      setNewCust({ first_name: '', last_name: '', phone, street_name: '', village_town: '', city: '', state: '', postal_code: '' });
       setShowCreateCustomer(true);
-      setCustomerId('');
-      setCustomerName('');
-      setCustomerAddress1Line('');
+      setCustomerId(''); setCustomerName(''); setCustomerAddress1Line('');
     } else {
       const c = data[0] as Customer;
       setCustomerId(c.id);
@@ -198,16 +171,13 @@ export default function NewInvoicePage() {
   };
 
   const createCustomer = async () => {
-    if (!newCust.first_name || !newCust.last_name) {
-      return alert('Please enter first and last name');
-    }
+    if (!newCust.first_name || !newCust.last_name) return alert('Please enter first and last name');
     const { data, error } = await supabase
       .from('customers')
       .insert([newCust])
       .select('id, first_name, last_name, phone, street_name, village_town, city, state, postal_code')
       .single();
     if (error) return alert(error.message);
-
     const c = data as Customer;
     setCustomerId(c.id);
     setCustomerPhone(c.phone || newCust.phone);
@@ -220,63 +190,44 @@ export default function NewInvoicePage() {
   const setItemBySku = async (rowId: string, skuRaw: string) => {
     const sku = (skuRaw || '').trim();
     if (!sku) return;
-
     const { data, error } = await supabase
       .from('items')
       .select('id, sku, name, unit_cost, tax_rate, uom:units_of_measure ( code )')
       .ilike('sku', sku)
       .limit(1);
-
     if (error) return alert(error.message);
-
     const rec = (data ?? [])[0] as ItemDb | undefined;
     if (!rec) return alert(`No item found for SKU "${sku}"`);
 
     const uom_code = safeUomCode(rec.uom);
-    setRows(prev =>
-      prev.map(r => {
-        if (r.id !== rowId) return r;
-        const base = Number(rec.unit_cost || 0);
-        const unit = round2(base * (1 + (r.margin_pct || 0) / 100));
-        return {
-          ...r,
-          sku_input: rec.sku,
-          item_id: rec.id,
-          description: rec.name || '',
-          uom_code,
-          base_cost: base,
-          tax_rate: Number(rec.tax_rate || 0),
-          unit_price: unit,
-        };
-      })
-    );
+    setRows(prev => prev.map(r => {
+      if (r.id !== rowId) return r;
+      const base = Number(rec.unit_cost || 0);
+      const unit = round2(base * (1 + (r.margin_pct || 0) / 100));
+      return {
+        ...r,
+        sku_input: rec.sku,
+        item_id: rec.id,
+        description: rec.name || '',
+        uom_code,
+        base_cost: base,
+        tax_rate: Number(rec.tax_rate || 0),
+        unit_price: unit,
+      };
+    }));
   };
 
   // -------- Row setters --------
-  const setSkuInput = (rowId: string, text: string) =>
-    setRows(prev => prev.map(r => (r.id === rowId ? { ...r, sku_input: text } : r)));
-
-  const setDescription = (rowId: string, desc: string) =>
-    setRows(prev => prev.map(r => (r.id === rowId ? { ...r, description: desc } : r)));
-
-  const setMargin = (rowId: string, m: number) =>
-    setRows(prev =>
-      prev.map(r => {
-        if (r.id !== rowId) return r;
-        const unit = round2((r.base_cost || 0) * (1 + (m || 0) / 100));
-        return { ...r, margin_pct: m || 0, unit_price: unit };
-      })
-    );
-
-  const setTaxRate = (rowId: string, rate: number) =>
-    setRows(prev => prev.map(r => (r.id === rowId ? { ...r, tax_rate: rate || 0 } : r)));
-
-  const setQty = (rowId: string, qty: number) =>
-    setRows(prev => prev.map(r => (r.id === rowId ? { ...r, qty: qty || 0 } : r)));
-
-  const setUnitPrice = (rowId: string, price: number) =>
-    setRows(prev => prev.map(r => (r.id === rowId ? { ...r, unit_price: price || 0 } : r)));
-
+  const setSkuInput = (rowId: string, text: string) => setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text } : r));
+  const setDescription = (rowId: string, desc: string) => setRows(prev => prev.map(r => r.id === rowId ? { ...r, description: desc } : r));
+  const setMargin = (rowId: string, m: number) => setRows(prev => prev.map(r => {
+    if (r.id !== rowId) return r;
+    const unit = round2((r.base_cost || 0) * (1 + (m || 0) / 100));
+    return { ...r, margin_pct: m || 0, unit_price: unit };
+  }));
+  const setTaxRate = (rowId: string, rate: number) => setRows(prev => prev.map(r => r.id === rowId ? { ...r, tax_rate: rate || 0 } : r));
+  const setQty = (rowId: string, qty: number) => setRows(prev => prev.map(r => r.id === rowId ? { ...r, qty: qty || 0 } : r));
+  const setUnitPrice = (rowId: string, price: number) => setRows(prev => prev.map(r => r.id === rowId ? { ...r, unit_price: price || 0 } : r));
   const addRow = () => setRows(prev => [...prev, makeEmptyRow()]);
   const removeRow = (rowId: string) => setRows(prev => prev.filter(r => r.id !== rowId));
 
@@ -310,7 +261,7 @@ export default function NewInvoicePage() {
         description: ln.description || ln.items?.name || '',
         uom_code,
         base_cost: base,
-        qty: 1, // default to 1 to return; user can adjust
+        qty: 1, // default to 1 for return
         margin_pct: 0,
         tax_rate: Number(ln.tax_rate || ln.items?.tax_rate || 0),
         unit_price: Number(ln.unit_price || 0),
@@ -321,8 +272,7 @@ export default function NewInvoicePage() {
 
   // -------- Totals --------
   const totals = useMemo(() => {
-    let subtotal = 0;
-    let tax = 0;
+    let subtotal = 0, tax = 0;
     for (const r of rows) {
       const line = (r.qty || 0) * (r.unit_price || 0);
       subtotal += line;
@@ -331,9 +281,9 @@ export default function NewInvoicePage() {
     return { subtotal: round2(subtotal), tax: round2(tax), grand: round2(subtotal + tax) };
   }, [rows]);
 
-  // -------- Live mirror → Customer Screen --------
+  // -------- Live mirror to Customer Screen --------
   useEffect(() => {
-    if (isCustomerView) return; // customer only listens
+    if (isCustomerView) return; // customer listens only
     const payload = {
       brand: { name: brandName, logo: brandLogo, address: brandAddress, phone: brandPhone },
       header: { docType, issuedAt, customerName, customerAddress1Line },
@@ -361,14 +311,14 @@ export default function NewInvoicePage() {
     savingRef.current = true;
     setSaving(true);
     try {
-      // Next invoice number (fallback to timestamp)
+      // next invoice no (fallback)
       let invoiceNo = '';
       const { data: nextNo, error: eNo } = await supabase.rpc('next_invoice_no');
       invoiceNo = !eNo && nextNo ? String(nextNo) : 'INV-' + Date.now();
 
-      // Insert invoice
+      // invoice
       const { data: inv, error: e1 } = await supabase
-        .from('invoices') // PLURAL table name
+        .from('invoices')
         .insert([{
           invoice_no: invoiceNo,
           customer_id: customerId,
@@ -383,10 +333,9 @@ export default function NewInvoicePage() {
         .select()
         .single();
       if (e1) throw e1;
-
       const invId = (inv as any).id as string;
 
-      // Insert invoice lines
+      // invoice lines
       const lineRows = rows
         .filter(r => r.item_id && r.qty > 0)
         .map(r => ({
@@ -401,7 +350,7 @@ export default function NewInvoicePage() {
       const { error: e2 } = await supabase.from('invoice_items').insert(lineRows);
       if (e2) throw e2;
 
-      // Stock moves via idempotent RPCs
+      // stock moves (idempotent)
       const moveRpc = docType === 'sale' ? 'issue_stock' : 'return_stock';
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
@@ -422,6 +371,7 @@ export default function NewInvoicePage() {
       alert('Saved invoice #' + invoiceNo);
     } catch (err: any) {
       console.error(err);
+      // If you see: "Could not find the table 'public.invoice'" rename to invoices (plural)
       alert(err?.message || String(err));
     } finally {
       setSaving(false);
@@ -434,21 +384,9 @@ export default function NewInvoicePage() {
     setIssuedAt(new Date().toISOString().slice(0, 10));
     setDocType('sale');
     setOriginalInvoiceNo('');
-    setCustomerPhone('');
-    setCustomerId('');
-    setCustomerName('');
-    setCustomerAddress1Line('');
+    setCustomerPhone(''); setCustomerId(''); setCustomerName(''); setCustomerAddress1Line('');
     setShowCreateCustomer(false);
-    setNewCust({
-      first_name: '',
-      last_name: '',
-      phone: '',
-      street_name: '',
-      village_town: '',
-      city: '',
-      state: '',
-      postal_code: '',
-    });
+    setNewCust({ first_name: '', last_name: '', phone: '', street_name: '', village_town: '', city: '', state: '', postal_code: '' });
     setRows([makeEmptyRow()]);
     setNotes('');
     setSaving(false);
@@ -456,7 +394,7 @@ export default function NewInvoicePage() {
     setInvoiceNoJustSaved(null);
   };
 
-  // -------- Open Customer Screen --------
+  // -------- Open Customer Screen (live mirror) --------
   const openCustomerScreen = () => {
     const url = new URL(window.location.href);
     url.searchParams.set('display', 'customer');
@@ -467,12 +405,9 @@ export default function NewInvoicePage() {
   // Customer Screen only
   // =======================
   if (isCustomerView) {
-    // Listen live
     const [liveState, setLiveState] = useState<any>(null);
     useEffect(() => {
-      const off = live.on((msg) => {
-        if (msg?.type === 'invoice-update') setLiveState(msg.payload);
-      });
+      const off = live.on((msg) => { if (msg?.type === 'invoice-update') setLiveState(msg.payload); });
       return off;
     }, []);
 
@@ -485,7 +420,6 @@ export default function NewInvoicePage() {
 
     return (
       <div className="p-4 print:p-0">
-        {/* Print CSS: lean margins, no shadows */}
         <style>{`
           @media print {
             @page { margin: 8mm; }
@@ -521,7 +455,7 @@ export default function NewInvoicePage() {
             <div className="text-sm text-gray-700">{header.customerAddress1Line || '—'}</div>
           </div>
 
-          {/* Lines (Customer view: no margin/cost columns) */}
+          {/* Lines (NO margin/cost columns) */}
           <div className="overflow-auto">
             <table className="table">
               <thead>
@@ -639,7 +573,7 @@ export default function NewInvoicePage() {
                 <Button type="button" onClick={loadItemsFromInvoiceNo}>Load Items</Button>
               </div>
               <div className="text-sm text-gray-600">
-                Loads items from original invoice. Adjust quantities you’re returning.
+                Loads items from original invoice. Adjust quantities for return.
               </div>
             </div>
           </div>
@@ -673,41 +607,237 @@ export default function NewInvoicePage() {
               <div className="grid md:grid-cols-3 gap-3">
                 <div>
                   <label className="label">First name</label>
-                  <input className="input" value={newCust.first_name}
-                         onChange={(e) => setNewCust({ ...newCust, first_name: e.target.value })}/>
+                  <input
+                    className="input"
+                    value={newCust.first_name}
+                    onChange={(e) => setNewCust({ ...newCust, first_name: e.target.value })}
+                  />
                 </div>
                 <div>
                   <label className="label">Last name</label>
-                  <input className="input" value={newCust.last_name}
-                         onChange={(e) => setNewCust({ ...newCust, last_name: e.target.value })}/>
+                  <input
+                    className="input"
+                    value={newCust.last_name}
+                    onChange={(e) => setNewCust({ ...newCust, last_name: e.target.value })}
+                  />
                 </div>
                 <div>
                   <label className="label">Phone</label>
-                  <input className="input" value={newCust.phone}
-                         onChange={(e) => setNewCust({ ...newCust, phone: e.target.value })}/>
+                  <input
+                    className="input"
+                    value={newCust.phone}
+                    onChange={(e) => setNewCust({ ...newCust, phone: e.target.value })}
+                  />
                 </div>
 
                 <div className="md:col-span-3">
                   <label className="label">Street</label>
-                  <input className="input" value={newCust.street_name}
-                         onChange={(e) => setNewCust({ ...newCust, street_name: e.target.value })}/>
+                  <input
+                    className="input"
+                    value={newCust.street_name}
+                    onChange={(e) => setNewCust({ ...newCust, street_name: e.target.value })}
+                  />
                 </div>
 
                 <div>
                   <label className="label">Village/Town</label>
-                  <input className="input" value={newCust.village_town}
-                         onChange={(e) => setNewCust({ ...newCust, village_town: e.target.value })}/>
+                  <input
+                    className="input"
+                    value={newCust.village_town}
+                    onChange={(e) => setNewCust({ ...newCust, village_town: e.target.value })}
+                  />
                 </div>
                 <div>
                   <label className="label">City</label>
-                  <input className="input" value={newCust.city}
-                         onChange={(e) => setNewCust({ ...newCust, city: e.target.value })}/>
+                  <input
+                    className="input"
+                    value={newCust.city}
+                    onChange={(e) => setNewCust({ ...newCust, city: e.target.value })}
+                  />
                 </div>
                 <div>
                   <label className="label">State</label>
-                  <input className="input" value={newCust.state}
-                         onChange={(e) => setNewCust({ ...newCust, state: e.target.value })}/>
+                  <input
+                    className="input"
+                    value={newCust.state}
+                    onChange={(e) => setNewCust({ ...newCust, state: e.target.value })}
+                  />
                 </div>
                 <div>
                   <label className="label">PIN</label>
-                  <input className="input" value={newCust.postal_code}
+                  <input
+                    className="input"
+                    value={newCust.postal_code}
+                    onChange={(e) => setNewCust({ ...newCust, postal_code: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              <div className="mt-3">
+                <Button type="button" onClick={createCustomer}>Create Customer</Button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Line items — EXACT order you requested */}
+        <div className="overflow-auto">
+          <table className="table">
+            <thead>
+              <tr>
+                <th style={{ minWidth: 160 }}>Item (SKU)</th>
+                <th style={{ minWidth: 220 }}>Description</th>
+                <th style={{ minWidth: 80 }}>UoM</th>
+                <th style={{ minWidth: 110 }}>Current Cost</th>
+                <th style={{ minWidth: 80 }}>Qty</th>
+                <th style={{ minWidth: 110 }}>Margin %</th>
+                <th style={{ minWidth: 80 }}>Tax %</th>
+                <th style={{ minWidth: 120 }}>Unit Price</th>
+                <th style={{ minWidth: 120 }}>Line Total</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const lineTotal = round2((r.qty || 0) * (r.unit_price || 0));
+                return (
+                  <tr key={r.id}>
+                    {/* Item (SKU) — type/scan then Enter */}
+                    <td>
+                      <input
+                        className="input"
+                        placeholder="Type/Scan SKU, then Enter"
+                        value={r.sku_input}
+                        onChange={(e) => setSkuInput(r.id, e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            setItemBySku(r.id, r.sku_input);
+                          }
+                        }}
+                      />
+                    </td>
+
+                    {/* Description */}
+                    <td>
+                      <input
+                        className="input"
+                        placeholder="Description"
+                        value={r.description}
+                        onChange={(e) => setDescription(r.id, e.target.value)}
+                      />
+                    </td>
+
+                    {/* UoM (readonly) */}
+                    <td>
+                      <input className="input" value={r.uom_code || ''} readOnly placeholder="-" />
+                    </td>
+
+                    {/* Current Cost (readonly) */}
+                    <td>
+                      <input className="input" value={r.base_cost.toFixed(2)} readOnly />
+                    </td>
+
+                    {/* Qty */}
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        step="1"
+                        value={r.qty}
+                        onChange={(e) => setQty(r.id, parseFloat(e.target.value || '0'))}
+                      />
+                    </td>
+
+                    {/* Margin % */}
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.01"
+                        value={r.margin_pct}
+                        onChange={(e) => setMargin(r.id, parseFloat(e.target.value || '0'))}
+                      />
+                    </td>
+
+                    {/* Tax % */}
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.01"
+                        value={r.tax_rate}
+                        onChange={(e) => setTaxRate(r.id, parseFloat(e.target.value || '0'))}
+                      />
+                    </td>
+
+                    {/* Unit Price (editable) */}
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.01"
+                        value={r.unit_price}
+                        onChange={(e) => setUnitPrice(r.id, parseFloat(e.target.value || '0'))}
+                      />
+                    </td>
+
+                    {/* Line Total */}
+                    <td>₹ {lineTotal.toFixed(2)}</td>
+
+                    {/* Remove */}
+                    <td>
+                      <button
+                        type="button"
+                        className="text-red-600 hover:underline"
+                        onClick={() => removeRow(r.id)}
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={10}>
+                  <Button type="button" onClick={addRow}>+ Add Line</Button>
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+
+        {/* Totals + Save */}
+        <div className="mt-6 grid md:grid-cols-3 gap-4">
+          <div className="md:col-span-2"></div>
+          <div className="card">
+            <div className="flex justify-between">
+              <div>Subtotal</div>
+              <div>₹ {totals.subtotal.toFixed(2)}</div>
+            </div>
+            <div className="flex justify-between">
+              <div>Tax</div>
+              <div>₹ {totals.tax.toFixed(2)}</div>
+            </div>
+            <div className="flex justify-between font-semibold text-lg">
+              <div>Total</div>
+              <div>₹ {totals.grand.toFixed(2)}</div>
+            </div>
+
+            <div className="mt-4 flex gap-2">
+              <Button type="button" onClick={save} disabled={saving}>
+                {saving ? 'Saving…' : 'Save Invoice'}
+              </Button>
+              {invoiceNoJustSaved && (
+                <div className="text-sm text-gray-600 self-center">Saved #{invoiceNoJustSaved}</div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </Protected>
+  );
+}
