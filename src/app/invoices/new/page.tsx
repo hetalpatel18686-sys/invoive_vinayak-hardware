@@ -109,17 +109,15 @@ const live = new StorageBus('invoice-live-payload');
 /** --------------------------------------------------------------- */
 
 export default function NewInvoicePage() {
-  // Determine view + autoprint from URL
-  const [isCustomerView, setIsCustomerView] = useState(false);
-  const [autoPrint, setAutoPrint] = useState(false);
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const sp = new URLSearchParams(window.location.search);
-      setIsCustomerView(sp.get('display') === 'customer');
-      setAutoPrint(sp.get('autoprint') === '1' || sp.get('_print') === '1' || sp.get('print') === '1');
-    }
-  }, []);
+import { useSearchParams } from 'next/navigation';
 
+// Determine view + autoprint (SSR-safe, no hydration error)
+const sp = useSearchParams();
+const isCustomerView = sp.get('display') === 'customer';
+const autoPrint =
+  sp.get('autoprint') === '1' ||
+  sp.get('_print') === '1' ||
+  sp.get('print') === '1';
   // Customer view – listen for live payload
   const [liveState, setLiveState] = useState<any>(null);
   const [hasLiveData, setHasLiveData] = useState(false);
