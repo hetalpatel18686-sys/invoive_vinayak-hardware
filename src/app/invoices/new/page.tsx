@@ -97,6 +97,18 @@ export default function NewInvoicePage() {
     }
   }, []);
 
+  // ---------- FIX: hooks used by customer view must be top-level ----------
+  const [liveState, setLiveState] = useState<any>(null);
+  useEffect(() => {
+    // Listen only in the customer view
+    if (!isCustomerView) return;
+    const off = live.on((msg) => {
+      if (msg?.type === 'invoice-update') setLiveState(msg.payload);
+    });
+    return off;
+  }, [isCustomerView]);
+  // -----------------------------------------------------------------------
+
   // Brand
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
   const brandLogo    = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png';
@@ -363,7 +375,8 @@ export default function NewInvoicePage() {
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
         if (!r.item_id || !r.qty) continue;
-        const client_tx_id = crypto.randomUUID();
+        let client_tx_id = '';
+        try { client_tx_id = crypto.randomUUID(); } catch { client_tx_id = makeId(); }
         const { error } = await supabase.rpc(moveRpc, {
           p_item_id: r.item_id,
           p_qty: r.qty,
@@ -412,12 +425,6 @@ export default function NewInvoicePage() {
   // Customer Screen only
   // =======================
   if (isCustomerView) {
-    const [liveState, setLiveState] = useState<any>(null);
-    useEffect(() => {
-      const off = live.on((msg) => { if (msg?.type === 'invoice-update') setLiveState(msg.payload); });
-      return off;
-    }, []);
-
     const brand = liveState?.brand ?? { name: brandName, logo: brandLogo, address: brandAddress, phone: brandPhone };
     const header = liveState?.header ?? { docType, issuedAt, customerName, customerAddress1Line };
     const liveLines: any[] = liveState?.lines ?? [];
@@ -529,11 +536,7 @@ export default function NewInvoicePage() {
           </div>
 
           <div className="ml-auto flex gap-2">
-            <Button type="button" onClick={() => {
-              const url = new URL(window.location.href);
-              url.searchParams.set('display', 'customer');
-              window.open(url.toString(), '_blank', 'noopener,noreferrer');
-            }}>
+            <Button type="button" onClick={openCustomerScreen}>
               Open Customer Screen
             </Button>
             <Button type="button" onClick={handleNewInvoice} className="bg-gray-700 hover:bg-gray-800">
@@ -691,7 +694,7 @@ export default function NewInvoicePage() {
           )}
         </div>
 
-        {/* Line items — EXACT order you requested */}
+        {/* Line items — EXACT order requested */}
         <div className="overflow-auto">
           <table className="table">
             <thead>
