@@ -53,6 +53,22 @@ function getUomCode(u: UomField): string {
   return u?.code ?? '';
 }
 
+// Simple UUID fallback if crypto.randomUUID is unavailable
+function makeClientTxId(): string {
+  // Try native
+  try {
+    // @ts-ignore
+    if (typeof crypto !== 'undefined' && crypto?.randomUUID) return crypto.randomUUID();
+  } catch {}
+  // Fallback
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0;
+    // eslint-disable-next-line no-mixed-operators
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 export default function Stock() {
   // Left panel state
   const [sku, setSku] = useState<string>('');
@@ -87,7 +103,6 @@ export default function Stock() {
   }, []);
 
   // ---------- Loads ----------
-
   const loadHistory = async () => {
     const h = await supabase
       .from('stock_moves')
@@ -151,7 +166,6 @@ export default function Stock() {
   };
 
   // ---------- Find by SKU (case-insensitive exact) ----------
-
   const findBySku = async () => {
     setFound(null);
     const trimmed = sku.trim();
@@ -188,7 +202,6 @@ export default function Stock() {
   };
 
   // ---------- Preview helpers ----------
-
   const autoUnitCost = found?.unit_cost ?? 0;
   const costToUse = moveType === 'receive' ? unitCost : autoUnitCost;
   const qtyLabel =
@@ -214,7 +227,6 @@ export default function Stock() {
   }, [found, qty, costToUse, moveType]);
 
   // ---------- Submit ----------
-
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -242,6 +254,9 @@ export default function Stock() {
 
     setLoading(true);
     try {
+      // Generate idempotency key for this attempt
+      const clientTxId = makeClientTxId();
+
       if (moveType === 'receive') {
         if (unitCost < 0) {
           submittingRef.current = false;
@@ -255,6 +270,7 @@ export default function Stock() {
           p_uom_code: found.uom_code || null,
           p_ref: ref || null,
           p_reason: reason || null,
+          p_client_tx_id: clientTxId,
         });
         if (error) throw error;
 
@@ -264,6 +280,7 @@ export default function Stock() {
           p_qty: qty,
           p_ref: ref || null,
           p_reason: reason || null,
+          p_client_tx_id: clientTxId,
         });
         if (error) throw error;
 
@@ -273,6 +290,7 @@ export default function Stock() {
           p_qty: qty,
           p_ref: ref || null,
           p_reason: reason || null,
+          p_client_tx_id: clientTxId,
         });
         if (error) throw error;
 
@@ -282,6 +300,7 @@ export default function Stock() {
           p_delta: qty,
           p_ref: ref || null,
           p_reason: reason || null,
+          p_client_tx_id: clientTxId,
         });
         if (error) throw error;
       }
@@ -304,7 +323,6 @@ export default function Stock() {
   };
 
   // ---------- Save Minimum ----------
-
   const saveMinimum = async () => {
     if (!found) return;
     setSavingMin(true);
@@ -326,7 +344,6 @@ export default function Stock() {
   };
 
   // ---------- Inventory helpers ----------
-
   const invFiltered = useMemo(() => {
     const term = invSearch.trim().toLowerCase();
     return invRows.filter((r) => {
@@ -379,7 +396,6 @@ export default function Stock() {
   };
 
   // ---------- Render ----------
-
   return (
     <div className="grid md:grid-cols-3 gap-4">
       {/* LEFT: Entry form */}
@@ -467,7 +483,9 @@ export default function Stock() {
           {/* Qty + Unit Cost */}
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <label className="label">{qtyLabel}</label>
+              <label className="label">
+                {qtyLabel}
+              </label>
               <input
                 className="input"
                 type="number"
