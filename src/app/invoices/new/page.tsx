@@ -363,7 +363,7 @@ export default function NewInvoicePage() {
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
         if (!r.item_id || !r.qty) continue;
-        const client_tx_id = `${invoiceNo}-${i}-${r.item_id}`;
+        const client_tx_id = makeId(); // real UUID value
         const { error } = await supabase.rpc(moveRpc, {
           p_item_id: r.item_id,
           p_qty: r.qty,
