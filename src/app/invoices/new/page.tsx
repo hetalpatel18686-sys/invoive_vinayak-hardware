@@ -7,6 +7,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 import Protected from '@/components/Protected';
+import { useSearchParams } from 'next/navigation';
 
 type DocType = 'sale' | 'return';
 
@@ -98,6 +99,7 @@ class StorageBus {
       } catch (e) { console.error('StorageBus.on parse error', e); }
     };
     window.addEventListener('storage', handler);
+    // initial snapshot
     try {
       const raw = localStorage.getItem(this.key);
       if (raw) { const env = JSON.parse(raw); fn(env?.payload); }
@@ -109,15 +111,14 @@ const live = new StorageBus('invoice-live-payload');
 /** --------------------------------------------------------------- */
 
 export default function NewInvoicePage() {
-import { useSearchParams } from 'next/navigation';
+  // ===== Determine view + autoprint (SSR-safe) =====
+  const sp = useSearchParams();
+  const isCustomerView = sp.get('display') === 'customer';
+  const autoPrint =
+    sp.get('autoprint') === '1' ||
+    sp.get('_print') === '1' ||
+    sp.get('print') === '1';
 
-// Determine view + autoprint (SSR-safe, no hydration error)
-const sp = useSearchParams();
-const isCustomerView = sp.get('display') === 'customer';
-const autoPrint =
-  sp.get('autoprint') === '1' ||
-  sp.get('_print') === '1' ||
-  sp.get('print') === '1';
   // Customer view – listen for live payload
   const [liveState, setLiveState] = useState<any>(null);
   const [hasLiveData, setHasLiveData] = useState(false);
@@ -585,16 +586,22 @@ const autoPrint =
     setPayments([]);
   };
 
-  // ----- open customer views
-const openCustomerScreen = () => {
-  postLiveSnapshot();
-  const url = new URL(window.location.href);
-  url.searchParams.set('display', 'customer');
-  const final = url.pathname + "?" + url.searchParams.toString();
-  window.open(final, "_blank", "noopener,noreferrer");
-};
-
-const openCustomerPrint = () => {
+  // ----- open customer views (safe URLs)
+  const openCustomerScreen = () => {
+    postLiveSnapshot();
+    const url = new URL(window.location.href);
+    url.searchParams.set('display', 'customer');
+    const final = url.pathname + '?' + url.searchParams.toString();
+    window.open(final, '_blank', 'noopener,noreferrer');
+  };
+  const openCustomerPrint = () => {
+    postLiveSnapshot();
+    const url = new URL(window.location.href);
+    url.searchParams.set('display', 'customer');
+    url.searchParams.set('autoprint', '1');
+    const final = url.pathname + '?' + url.searchParams.toString();
+    window.open(final, '_blank', 'noopener,noreferrer');
+  };
 
   // ===== Auto-generate QR (UPI read-only) =====
   const buildUpiUri = (upi: string, amount: number, note: string, payeeName: string) => {
@@ -617,16 +624,17 @@ const openCustomerPrint = () => {
     (async () => {
       try {
         setGeneratingQR(true);
-        // dynamic import only on client
-        // @ts-ignore - types are provided but this keeps TS calm in all setups
-        const QR = await import('qrcode');
+        const mod: any = await import('qrcode');
+        // robust: handle both CJS and ESM shapes
+        const toDataURL = mod?.toDataURL || mod?.default?.toDataURL;
+        if (!toDataURL) throw new Error('QR library not loaded');
         const upi = buildUpiUri(
           upiId.trim(),
           payAmount || 0,
           payReference || (invoiceNoJustSaved ?? 'Payment'),
           brandName
         );
-        const dataUrl = await QR.toDataURL(upi, { margin: 1, scale: 8 });
+        const dataUrl = await toDataURL(upi, { margin: 1, scale: 8 });
         if (!cancelled) setQrImageUrl(dataUrl);
       } catch (e: any) {
         if (!cancelled) {
@@ -1167,11 +1175,7 @@ const openCustomerPrint = () => {
 
                 <div>
                   <label className="label">UPI ID (read‑only)</label>
-                  <input
-                    className="input"
-                    value={upiId}
-                    readOnly
-                  />
+                  <input className="input" value={upiId} readOnly />
                 </div>
 
                 <div className="mt-2 border rounded p-2 flex flex-col items-center">
