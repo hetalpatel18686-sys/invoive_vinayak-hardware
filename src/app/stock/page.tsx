@@ -13,7 +13,8 @@ interface FoundItem {
   description?: string | null;
   stock_qty?: number;
   unit_cost?: number;
-  uom_code?: string; // auto from units_of_measure
+  uom_code?: string;
+  low_stock_threshold?: number | null;
 }
 
 interface MoveRow {
@@ -44,22 +45,27 @@ interface UomRow {
 }
 
 export default function Stock() {
-  // --- State for SKU-based flow ---
+  // --- Left panel: fast entry
   const [sku, setSku] = useState('');
   const [found, setFound] = useState<FoundItem | null>(null);
 
   const [moveType, setMoveType] = useState<MoveType>('receive');
-  const [qty, setQty] = useState<number>(0);           // adjust can be negative or positive
-  const [unitCost, setUnitCost] = useState<number>(0); // used only for receive (manual)
+  const [qty, setQty] = useState<number>(0);            // adjust: can be negative
+  const [unitCost, setUnitCost] = useState<number>(0);  // purchase cost (receive)
   const [ref, setRef] = useState('');
   const [reason, setReason] = useState('');
-  const [history, setHistory] = useState<MoveRow[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // ----- Tabs on the right -----
+  // Minimum (low-stock threshold) editor for found item
+  const [minQty, setMinQty] = useState<number>(0);
+  const [savingMin, setSavingMin] = useState(false);
+
+  // --- Right panel: tabs
   const [activeTab, setActiveTab] = useState<'moves' | 'inventory'>('moves');
 
-  // ----- Inventory data -----
+  // Movements
+  const [history, setHistory] = useState<MoveRow[]>([]);
+  // Inventory
   const [invRows, setInvRows] = useState<InvRow[]>([]);
   const [invLoading, setInvLoading] = useState(true);
   const [invSearch, setInvSearch] = useState('');
@@ -70,7 +76,8 @@ export default function Stock() {
     loadInventory();
   }, []);
 
-  // Load last 50 moves (with UoM, Unit Cost, Total Cost)
+  /* ---------- Loads ---------- */
+
   const loadHistory = async () => {
     const h = await supabase
       .from('stock_moves')
@@ -96,11 +103,10 @@ export default function Stock() {
     setHistory(rows);
   };
 
-  // Load Inventory (2 calls: items then UoM map)
   const loadInventory = async () => {
     setInvLoading(true);
 
-    // 1) items (no join)
+    // Items (no join)
     const { data: itemsData, error: itemsErr } = await supabase
       .from('items')
       .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id')
@@ -112,11 +118,10 @@ export default function Stock() {
       return;
     }
 
-    // 2) UoMs -> map
+    // UoMs → map
     const { data: uomData } = await supabase
       .from('units_of_measure')
-      .select('id, code, name')
-      .order('code', { ascending: true });
+      .select('id, code, name');
 
     const uomMap: Record<string, UomRow> = {};
     (uomData ?? []).forEach((u: any) => {
@@ -140,35 +145,26 @@ export default function Stock() {
     setInvLoading(false);
   };
 
-  // Find item by SKU (case-insensitive), also fetch UoM code, stock & current avg unit_cost
+  /* ---------- Find by SKU (case insensitive) ---------- */
   const findBySku = async () => {
     setFound(null);
     const trimmed = sku.trim();
-    if (!trimmed) {
-      alert('Please enter SKU');
-      return;
-    }
+    if (!trimmed) return alert('Please enter SKU');
 
-    // IMPORTANT: use .ilike for case-insensitive exact match (no wildcards)
+    // Case-insensitive EXACT match (no wildcards)
     const { data, error } = await supabase
       .from('items')
       .select(`
-        id, sku, name, description, stock_qty, unit_cost,
+        id, sku, name, description, stock_qty, unit_cost, low_stock_threshold,
         uom:units_of_measure ( code )
       `)
-      .ilike('sku', trimmed)  // ← case-insensitive, exact text (no %)
+      .ilike('sku', trimmed)  // ← key change
       .limit(1);
 
-    if (error) {
-      alert(error.message);
-      return;
-    }
-    if (!data || data.length === 0) {
-      alert('No item found for this SKU');
-      return;
-    }
+    if (error) return alert(error.message);
+    const row = (data ?? [])[0];
+    if (!row) return alert('No item found for this SKU');
 
-    const row = data[0] as any;
     const uom_code = Array.isArray(row.uom) ? (row.uom[0]?.code ?? '') : (row.uom?.code ?? '');
 
     setFound({
@@ -179,31 +175,28 @@ export default function Stock() {
       stock_qty: Number(row.stock_qty ?? 0),
       unit_cost: Number(row.unit_cost ?? 0),
       uom_code,
+      low_stock_threshold: row.low_stock_threshold ?? null,
     });
 
-    // Reset entry fields when a new item is found
+    setMinQty(Number(row.low_stock_threshold ?? 0));
     setQty(0);
     setUnitCost(0);
     setRef('');
     setReason('');
   };
 
-  // For Issue/Return/Adjust, unit cost is auto = current avg
-  const autoUnitCost = found?.unit_cost ?? 0;
+  /* ---------- Preview helpers ---------- */
 
-  // For total-cost preview, pick correct cost source
+  const autoUnitCost = found?.unit_cost ?? 0;
   const costToUse = moveType === 'receive' ? unitCost : autoUnitCost;
 
-  // For Adjust: allow negative (lost) or positive (found).
   const qtyLabel =
     moveType === 'adjust'
       ? 'Adjust Qty (use negative for lost, positive for found)'
       : 'Qty';
 
-  // Preview: total cost and, for Receive, new average cost
   const preview = useMemo(() => {
     if (!found) return null;
-
     const q = Number(qty || 0);
     const unit = Number(costToUse || 0);
     const total = q * unit;
@@ -216,20 +209,15 @@ export default function Stock() {
         newQty === 0 ? unit : ((oldQty * oldCost) + (q * unit)) / newQty;
       return { total, newAvg, oldQty, oldCost, newQty };
     }
-
     return { total };
   }, [found, qty, costToUse, moveType]);
 
-  // Save stock move
+  /* ---------- Submit ---------- */
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (loading) return;             // hard guard against double-submit
-    if (!found) {
-      alert('Please find an item by SKU first');
-      return;
-    }
+    if (loading) return;  // extra guard against double submit
+    if (!found) return alert('Please find an item by SKU first');
 
-    // Validate qty by move type
     if (moveType === 'adjust') {
       if (!qty || qty === 0) return alert('For adjust, delta cannot be 0');
     } else {
@@ -271,17 +259,17 @@ export default function Stock() {
       } else if (moveType === 'adjust') {
         const { error } = await supabase.rpc('adjust_stock_delta', {
           p_item_id: found.id,
-          p_delta: qty, // negative (lost) or positive (found)
+          p_delta: qty,
           p_ref: ref || null,
           p_reason: reason || null,
         });
         if (error) throw error;
       }
 
-      // Clear / reload UI
       await findBySku();
       await loadHistory();
       await loadInventory();
+
       setQty(0);
       if (moveType === 'receive') setUnitCost(0);
       setRef('');
@@ -294,11 +282,33 @@ export default function Stock() {
     }
   };
 
-  // ---------- Inventory helpers ----------
+  /* ---------- Save Minimum (Low-stock threshold) ---------- */
+  const saveMinimum = async () => {
+    if (!found) return;
+    setSavingMin(true);
+    try {
+      const { error } = await supabase
+        .from('items')
+        .update({ low_stock_threshold: Number.isFinite(minQty) ? minQty : 0 })
+        .eq('id', found.id);
+      if (error) throw error;
+
+      // keep UI in sync
+      await findBySku();
+      await loadInventory();
+      alert('Minimum qty saved.');
+    } catch (err: any) {
+      alert(err.message || String(err));
+    } finally {
+      setSavingMin(false);
+    }
+  };
+
+  /* ---------- Inventory helpers ---------- */
   const invFiltered = useMemo(() => {
     const term = invSearch.trim().toLowerCase();
     return invRows.filter((r) => {
-      const matchTerm =
+      const match =
         !term ||
         r.sku.toLowerCase().includes(term) ||
         (r.name ?? '').toLowerCase().includes(term);
@@ -306,7 +316,7 @@ export default function Stock() {
         r.low_stock_threshold != null &&
         r.low_stock_threshold > 0 &&
         r.stock_qty <= r.low_stock_threshold;
-      return matchTerm && (!invLowOnly || isLow);
+      return match && (!invLowOnly || isLow);
     });
   }, [invRows, invSearch, invLowOnly]);
 
@@ -346,6 +356,7 @@ export default function Stock() {
     URL.revokeObjectURL(url);
   };
 
+  /* ---------- Render ---------- */
   return (
     <div className="grid md:grid-cols-3 gap-4">
       {/* LEFT: Entry form */}
@@ -353,7 +364,7 @@ export default function Stock() {
         <h2 className="font-semibold mb-3">Receive / Adjust / Issue / Return</h2>
 
         <form onSubmit={submit} className="space-y-3">
-          {/* SKU input + Find button */}
+          {/* SKU input + Find */}
           <div className="flex gap-2">
             <input
               className="input"
@@ -367,12 +378,10 @@ export default function Stock() {
                 }
               }}
             />
-            <Button type="button" onClick={findBySku}>
-              Find
-            </Button>
+            <Button type="button" onClick={findBySku}>Find</Button>
           </div>
 
-          {/* Read-only item preview + UoM + current stock & avg cost */}
+          {/* Item preview */}
           <div>
             <label className="label">Item</label>
             <input
@@ -397,6 +406,26 @@ export default function Stock() {
             </div>
           </div>
 
+          {/* Minimum qty editor */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="col-span-2">
+              <label className="label">Minimum Qty (low-stock threshold)</label>
+              <input
+                className="input"
+                type="number"
+                min={0}
+                value={minQty}
+                onChange={(e) => setMinQty(parseInt(e.target.value || '0', 10))}
+                disabled={!found}
+              />
+            </div>
+            <div className="flex items-end">
+              <Button type="button" onClick={saveMinimum} disabled={!found || savingMin}>
+                {savingMin ? 'Saving…' : 'Save Min'}
+              </Button>
+            </div>
+          </div>
+
           {/* Move type */}
           <div>
             <label className="label">Type</label>
@@ -412,15 +441,18 @@ export default function Stock() {
             </select>
           </div>
 
-          {/* Qty + Unit Cost (auto except Receive) */}
+          {/* Qty + Unit Cost */}
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <label className="label">{qtyLabel}</label>
+              <label className="label">
+                {moveType === 'adjust'
+                  ? 'Adjust Qty (use negative for lost, positive for found)'
+                  : 'Qty'}
+              </label>
               <input
                 className="input"
                 type="number"
                 step="1"
-                // For adjust we allow negatives; for others keep >=1
                 min={moveType === 'adjust' ? undefined : 1}
                 value={qty}
                 onChange={(e) => {
@@ -432,7 +464,6 @@ export default function Stock() {
               />
             </div>
 
-            {/* Unit Cost field */}
             {moveType === 'receive' ? (
               <div>
                 <label className="label">Unit Cost (per {found?.uom_code || 'UoM'})</label>
@@ -448,22 +479,16 @@ export default function Stock() {
             ) : (
               <div>
                 <label className="label">Unit Cost (auto)</label>
-                <input
-                  className="input"
-                  value={autoUnitCost.toFixed(2)}
-                  readOnly
-                />
+                <input className="input" value={(found?.unit_cost ?? 0).toFixed(2)} readOnly />
               </div>
             )}
           </div>
 
-          {/* Preview: Total Cost and (for Receive) New Avg */}
+          {/* Preview */}
           <div className="text-sm text-gray-700">
             <div>
               Total Cost:&nbsp;
-              <b>
-                ₹ {Number(preview?.total ?? 0).toFixed(2)}
-              </b>
+              <b>₹ {Number(preview?.total ?? 0).toFixed(2)}</b>
               {moveType !== 'receive' && ' (auto: Qty × current Avg Cost)'}
             </div>
             {moveType === 'receive' && preview && typeof preview.newAvg === 'number' && (
@@ -497,7 +522,7 @@ export default function Stock() {
         </form>
       </div>
 
-      {/* RIGHT: Tabs (Movements / Inventory) */}
+      {/* RIGHT: Tabs */}
       <div className="md:col-span-2 card">
         <div className="flex items-center gap-4 mb-3">
           <button
