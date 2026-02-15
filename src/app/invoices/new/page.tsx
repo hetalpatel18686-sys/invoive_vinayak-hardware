@@ -97,17 +97,15 @@ export default function NewInvoicePage() {
     }
   }, []);
 
-  // ---------- FIX: hooks used by customer view must be top-level ----------
+  // Top-level hooks for customer view (Rules of Hooks safe)
   const [liveState, setLiveState] = useState<any>(null);
   useEffect(() => {
-    // Listen only in the customer view
     if (!isCustomerView) return;
     const off = live.on((msg) => {
       if (msg?.type === 'invoice-update') setLiveState(msg.payload);
     });
     return off;
   }, [isCustomerView]);
-  // -----------------------------------------------------------------------
 
   // Brand
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
@@ -246,11 +244,12 @@ export default function NewInvoicePage() {
   const addRow = () => setRows(prev => [...prev, makeEmptyRow()]);
   const removeRow = (rowId: string) => setRows(prev => prev.filter(r => r.id !== rowId));
 
-  // -------- Return: load by invoice no --------
+  // -------- Return: load by invoice no (NO nested select; same UI) --------
   const loadItemsFromInvoiceNo = async () => {
     const invNo = (originalInvoiceNo || '').trim();
     if (!invNo) return alert('Please enter the original invoice no');
 
+    // A) Get the invoice by number
     const { data: invs, error: e1 } = await supabase
       .from('invoices')
       .select('id, invoice_no')
@@ -260,28 +259,66 @@ export default function NewInvoicePage() {
     const inv = (invs ?? [])[0];
     if (!inv) return alert('Invoice not found');
 
+    // B) Get invoice lines (flat)
     const { data: lines, error: e2 } = await supabase
       .from('invoice_items')
-      .select('item_id, description, qty, unit_price, tax_rate, items:items ( sku, name, unit_cost, tax_rate, uom:units_of_measure ( code ) )')
+      .select('item_id, description, qty, unit_price, tax_rate')
       .eq('invoice_id', inv.id);
     if (e2) return alert(e2.message);
 
+    if (!lines || lines.length === 0) {
+      setRows([makeEmptyRow()]);
+      return;
+    }
+
+    // C) Fetch items for line item_ids (flat)
+    const itemIds = Array.from(new Set(lines.map((ln: any) => ln.item_id).filter(Boolean)));
+    const { data: items, error: e3 } = await supabase
+      .from('items')
+      .select('id, sku, name, unit_cost, tax_rate, uom_id') // include uom_id if present
+      .in('id', itemIds);
+    if (e3) return alert(e3.message);
+
+    const byId = new Map<string, any>();
+    (items ?? []).forEach((it: any) => byId.set(it.id, it));
+
+    // D) OPTIONAL: try to fetch UoM codes if we have uom_id (ignore errors gracefully)
+    let uomMap = new Map<any, string>();
+    try {
+      const uomIds = Array.from(
+        new Set((items ?? []).map(it => it?.uom_id).filter(Boolean))
+      );
+      if (uomIds.length > 0) {
+        const { data: uoms } = await supabase
+          .from('units_of_measure')
+          .select('id, code')
+          .in('id', uomIds);
+        (uoms ?? []).forEach((u: any) => uomMap.set(u.id, u.code));
+      }
+    } catch { /* ignore if table/name not present */ }
+
+    // E) Compose UI rows — SAME interface as before
     const prefilled: Row[] = (lines ?? []).map((ln: any) => {
-      const uom_code = safeUomCode(ln.items?.uom ?? null);
-      const base = Number(ln.items?.unit_cost || 0);
+      const it = byId.get(ln.item_id) || {};
+      const base = Number(it.unit_cost || 0);
+      const uom_code =
+        (it.uom_id && uomMap.get(it.uom_id)) || // from optional fetch
+        ''; // fallback if not available
+
       return {
         id: makeId(),
-        sku_input: ln.items?.sku || '',
+        sku_input: it.sku || '',
         item_id: ln.item_id,
-        description: ln.description || ln.items?.name || '',
+        description: ln.description || it.name || '',
         uom_code,
         base_cost: base,
         qty: 1, // default for return
         margin_pct: 0,
-        tax_rate: Number(ln.tax_rate || ln.items?.tax_rate || 0),
+        tax_rate: Number(ln.tax_rate ?? it.tax_rate ?? 0),
         unit_price: Number(ln.unit_price || 0),
       };
     });
+
     setRows(prefilled.length > 0 ? prefilled : [makeEmptyRow()]);
   };
 
@@ -855,3 +892,4 @@ export default function NewInvoicePage() {
     </Protected>
   );
 }
+``
