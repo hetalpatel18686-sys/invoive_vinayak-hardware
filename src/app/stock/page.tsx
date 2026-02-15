@@ -49,17 +49,17 @@ export default function Stock() {
   const [found, setFound] = useState<FoundItem | null>(null);
 
   const [moveType, setMoveType] = useState<MoveType>('receive');
-  const [qty, setQty] = useState<number>(0); // for adjust: can be negative or positive
+  const [qty, setQty] = useState<number>(0);           // adjust can be negative or positive
   const [unitCost, setUnitCost] = useState<number>(0); // used only for receive (manual)
   const [ref, setRef] = useState('');
   const [reason, setReason] = useState('');
   const [history, setHistory] = useState<MoveRow[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // ----- New: tabs on the right -----
+  // ----- Tabs on the right -----
   const [activeTab, setActiveTab] = useState<'moves' | 'inventory'>('moves');
 
-  // ----- New: inventory data -----
+  // ----- Inventory data -----
   const [invRows, setInvRows] = useState<InvRow[]>([]);
   const [invLoading, setInvLoading] = useState(true);
   const [invSearch, setInvSearch] = useState('');
@@ -70,7 +70,7 @@ export default function Stock() {
     loadInventory();
   }, []);
 
-  // Load last 50 moves for the right-hand table (with UoM, Unit Cost, Total Cost)
+  // Load last 50 moves (with UoM, Unit Cost, Total Cost)
   const loadHistory = async () => {
     const h = await supabase
       .from('stock_moves')
@@ -96,7 +96,7 @@ export default function Stock() {
     setHistory(rows);
   };
 
-  // ----- New: Load Inventory (2-call: items then UoM map) -----
+  // Load Inventory (2 calls: items then UoM map)
   const loadInventory = async () => {
     setInvLoading(true);
 
@@ -112,7 +112,7 @@ export default function Stock() {
       return;
     }
 
-    // 2) uoms -> map
+    // 2) UoMs -> map
     const { data: uomData } = await supabase
       .from('units_of_measure')
       .select('id, code, name')
@@ -140,7 +140,7 @@ export default function Stock() {
     setInvLoading(false);
   };
 
-  // Find item by SKU (also fetch UoM code, stock & current avg unit_cost)
+  // Find item by SKU (case-insensitive), also fetch UoM code, stock & current avg unit_cost
   const findBySku = async () => {
     setFound(null);
     const trimmed = sku.trim();
@@ -149,13 +149,14 @@ export default function Stock() {
       return;
     }
 
+    // IMPORTANT: use .ilike for case-insensitive exact match (no wildcards)
     const { data, error } = await supabase
       .from('items')
       .select(`
         id, sku, name, description, stock_qty, unit_cost,
         uom:units_of_measure ( code )
       `)
-      .eq('sku', trimmed)
+      .ilike('sku', trimmed)  // ← case-insensitive, exact text (no %)
       .limit(1);
 
     if (error) {
@@ -222,6 +223,7 @@ export default function Stock() {
   // Save stock move
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;             // hard guard against double-submit
     if (!found) {
       alert('Please find an item by SKU first');
       return;
@@ -247,6 +249,7 @@ export default function Stock() {
           p_reason: reason || null,
         });
         if (error) throw error;
+
       } else if (moveType === 'issue') {
         const { error } = await supabase.rpc('issue_stock', {
           p_item_id: found.id,
@@ -255,6 +258,7 @@ export default function Stock() {
           p_reason: reason || null,
         });
         if (error) throw error;
+
       } else if (moveType === 'return') {
         const { error } = await supabase.rpc('return_stock', {
           p_item_id: found.id,
@@ -263,10 +267,11 @@ export default function Stock() {
           p_reason: reason || null,
         });
         if (error) throw error;
+
       } else if (moveType === 'adjust') {
         const { error } = await supabase.rpc('adjust_stock_delta', {
           p_item_id: found.id,
-          p_delta: qty, // can be negative (lost) or positive (found)
+          p_delta: qty, // negative (lost) or positive (found)
           p_ref: ref || null,
           p_reason: reason || null,
         });
@@ -276,7 +281,7 @@ export default function Stock() {
       // Clear / reload UI
       await findBySku();
       await loadHistory();
-      await loadInventory(); // <-- update Inventory tab too
+      await loadInventory();
       setQty(0);
       if (moveType === 'receive') setUnitCost(0);
       setRef('');
