@@ -112,6 +112,15 @@ export default function NewInvoicePage() {
     return off;
   }, [isCustomerView]);
 
+  // ✅ FIX: Auto-print effect moved to TOP-LEVEL (no hooks inside conditional render)
+  useEffect(() => {
+    if (!isCustomerView || !autoPrint) return;
+    const t = setTimeout(() => {
+      if (typeof window !== 'undefined') window.print();
+    }, 200);
+    return () => clearTimeout(t);
+  }, [isCustomerView, autoPrint]);
+
   // Brand
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
   const brandLogo    = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png';
@@ -362,7 +371,7 @@ export default function NewInvoicePage() {
         item_id: ln.item_id,
         description: ln.description || it?.name || '',
         uom_code,
-        base_cost: Number(ln.base_cost_at_sale ?? it?.unit_cost ?? 0), // store exact when available
+        base_cost: Number(ln.base_cost_at_sale ?? it?.unit_cost ?? 0), // exact when available
         qty: Number(ln.qty || 0),                  // original sold qty (read-only in return mode)
         margin_pct: 0,                             // not used in return mode
         tax_rate: Number(ln.tax_rate || it?.tax_rate || 0),
@@ -478,7 +487,7 @@ export default function NewInvoicePage() {
                 unit_price: r.unit_price,
                 tax_rate: r.tax_rate,
                 line_total: round2(Number(r.qty || 0) * r.unit_price),
-                // NEW: persist exact values for future returns
+                // Persist exact values for future returns
                 base_cost_at_sale: r.base_cost,
                 margin_pct_at_sale: r.margin_pct,
               }))
@@ -556,14 +565,6 @@ export default function NewInvoicePage() {
     const header = liveState?.header ?? { docType, issuedAt, customerName, customerAddress1Line };
     const liveLines: any[] = liveState?.lines ?? [];
     const liveTotals = liveState?.totals ?? { subtotal: 0, tax: 0, grand: 0 };
-
-    useEffect(() => {
-      if (autoPrint) {
-        // Wait a tick to ensure DOM paints
-        const t = setTimeout(() => window.print(), 200);
-        return () => clearTimeout(t);
-      }
-    }, [autoPrint]);
 
     const onPrint = () => window.print();
 
@@ -902,7 +903,7 @@ export default function NewInvoicePage() {
                   <th style={{ minWidth: 220 }}>Description</th>
                   <th style={{ minWidth: 80 }}>UoM</th>
                   <th className="text-right" style={{ minWidth: 90 }}>Qty (Sold)</th>
-                  {/* Unit Price hidden in return mode (per request) */}
+                  {/* Unit Price hidden in return mode per request */}
                   <th className="text-right" style={{ minWidth: 80 }}>Tax %</th>
                   <th className="text-right" style={{ minWidth: 120 }}>Line Total</th>
                   <th className="text-right" style={{ minWidth: 110 }}>Return Qty</th>
