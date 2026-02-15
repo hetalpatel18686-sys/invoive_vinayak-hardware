@@ -2,12 +2,19 @@
 'use client';
 
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  Suspense,
+} from 'react';
+import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 import Protected from '@/components/Protected';
-import { useSearchParams } from 'next/navigation';
 
 type DocType = 'sale' | 'return';
 
@@ -110,8 +117,22 @@ class StorageBus {
 const live = new StorageBus('invoice-live-payload');
 /** --------------------------------------------------------------- */
 
-export default function NewInvoicePage() {
-  // ===== Determine view + autoprint (SSR-safe) =====
+/**
+ * Wrapper page: Suspense boundary is required for useSearchParams on Next.js 16.
+ */
+export default function Page() {
+  return (
+    <Suspense fallback={<div className="p-4">Loading…</div>}>
+      <NewInvoicePageBody />
+    </Suspense>
+  );
+}
+
+/**
+ * The actual page body that uses useSearchParams and all the logic.
+ */
+function NewInvoicePageBody() {
+  // ===== Determine view + autoprint (SSR-safe + inside Suspense) =====
   const sp = useSearchParams();
   const isCustomerView = sp.get('display') === 'customer';
   const autoPrint =
@@ -150,8 +171,7 @@ export default function NewInvoicePage() {
   const brandPhone   = process.env.NEXT_PUBLIC_BRAND_PHONE    || '+91 7046826808';
 
   // Default UPI (read-only in UI). You can also set NEXT_PUBLIC_UPI_ID in Vercel.
-  const upiId =
-    process.env.NEXT_PUBLIC_UPI_ID || 'patelkb308@okaxis';
+  const upiId = process.env.NEXT_PUBLIC_UPI_ID || 'patelkb308@okaxis';
 
   // Header
   const [issuedAt, setIssuedAt] = useState<string>(() => new Date().toISOString().slice(0,10));
@@ -625,7 +645,6 @@ export default function NewInvoicePage() {
       try {
         setGeneratingQR(true);
         const mod: any = await import('qrcode');
-        // robust: handle both CJS and ESM shapes
         const toDataURL = mod?.toDataURL || mod?.default?.toDataURL;
         if (!toDataURL) throw new Error('QR library not loaded');
         const upi = buildUpiUri(
