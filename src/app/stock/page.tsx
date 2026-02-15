@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 
@@ -44,7 +44,7 @@ interface UomRow {
   name: string;
 }
 
-/** ---------- Types to fix the `uom.code on never` issue ---------- */
+/** ---------- Types to safely read `uom.code` ---------- */
 type Uom = { code?: string; name?: string };
 type UomField = Uom | Uom[] | null | undefined;
 
@@ -167,14 +167,13 @@ export default function Stock() {
         id, sku, name, description, stock_qty, unit_cost, low_stock_threshold,
         uom:units_of_measure ( code )
       `)
-      .ilike('sku', trimmed)  // exact pattern (no %): case-insensitive equality
+      .ilike('sku', trimmed) // without % acts like case-insensitive equality
       .limit(1);
 
     if (error) return alert(error.message);
     const row: any = (data ?? [])[0];
     if (!row) return alert('No item found for this SKU');
 
-    // ✅ fix: safe UoM code extraction to avoid TS "never"
     const uom_code = getUomCode(row.uom as UomField);
 
     setFound({
@@ -225,7 +224,7 @@ export default function Stock() {
   /* ---------- Submit ---------- */
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (loading) return;  // extra guard against double submit
+    if (loading) return;  // guard against double submit
     if (!found) return alert('Please find an item by SKU first');
 
     if (moveType === 'adjust') {
@@ -407,8 +406,8 @@ export default function Stock() {
             <div className="text-xs text-gray-600 mt-1">
               {found ? (
                 <>
-                  UoM: <b>{found.uom_code || '-'}</b> • Current Qty: <b>{found.stock_qty ?? 0}</b> •
-                  {' '}Avg Cost: <b>₹ {(found.unit_cost ?? 0).toFixed(2)}</b>
+                  UoM: <b>{found.uom_code || '-'}</b> • Current Qty: <b>{found.stock_qty ?? 0}</b> •{' '}
+                  Avg Cost: <b>₹ {(found.unit_cost ?? 0).toFixed(2)}</b>
                 </>
               ) : (
                 <>UoM: — • Current Qty: — • Avg Cost: —</>
@@ -463,71 +462,3 @@ export default function Stock() {
                 step="1"
                 min={moveType === 'adjust' ? undefined : 1}
                 value={qty}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  const n = v === '' ? 0 : Number(v);
-                  setQty(Number.isFinite(n) ? n : 0);
-                }}
-                placeholder={moveType === 'adjust' ? 'e.g., -2 (lost) or 3 (found)' : 'e.g., 5'}
-              />
-            </div>
-
-            {moveType === 'receive' ? (
-              <div>
-                <label className="label">Unit Cost (per {found?.uom_code || 'UoM'})</label>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.01"
-                  min={0}
-                  value={unitCost}
-                  onChange={(e) => setUnitCost(parseFloat(e.target.value || '0'))}
-                />
-              </div>
-            ) : (
-              <div>
-                <label className="label">Unit Cost (auto)</label>
-                <input className="input" value={(found?.unit_cost ?? 0).toFixed(2)} readOnly />
-              </div>
-            )}
-          </div>
-
-          {/* Preview */}
-          <div className="text-sm text-gray-700">
-            <div>
-              Total Cost:&nbsp;
-              <b>₹ {Number(preview?.total ?? 0).toFixed(2)}</b>
-              {moveType !== 'receive' && ' (auto: Qty × current Avg Cost)'}
-            </div>
-            {moveType === 'receive' && preview && typeof (preview as any).newAvg === 'number' && (
-              <div>
-                New Avg Cost after Receive:&nbsp;
-                <b>₹ {(preview as any).newAvg.toFixed(2)}</b>
-                <span className="text-xs text-gray-500">
-                  {' '}[old: {(preview as any).oldQty} @ ₹{(preview as any).oldCost.toFixed(2)} → new: {(preview as any).newQty}]
-                </span>
-              </div>
-            )}
-          </div>
-
-          {/* Ref & Reason */}
-          <input
-            className="input"
-            placeholder="Reference (PO# etc.)"
-            value={ref}
-            onChange={(e) => setRef(e.target.value)}
-          />
-          <input
-            className="input"
-            placeholder="Reason / Note"
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-          />
-
-          <Button type="submit" disabled={loading || !found}>
-            {loading ? 'Saving...' : 'Save'}
-          </Button>
-        </form>
-      </div>
-
-      {/* RIGHT: Tabs */}
