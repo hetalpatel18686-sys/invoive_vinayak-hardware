@@ -1,14 +1,13 @@
-
 'use client';
 
+export const dynamic = 'force-dynamic';
+
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 import Protected from '@/components/Protected';
 
 type DocType = 'sale' | 'return';
-type ViewMode = 'user' | 'customer';
 
 interface Customer {
   id: string;
@@ -72,7 +71,7 @@ function oneLineAddress(c: Partial<Customer>) {
     .join(', ');
 }
 
-/** Simple channel to mirror live data to the customer tab */
+/** Live mirror channel (User → Customer tab) */
 class LiveChannel {
   ch: BroadcastChannel | null = null;
   constructor(name = 'invoice-live') {
@@ -89,9 +88,14 @@ class LiveChannel {
 const live = new LiveChannel('invoice-live');
 
 export default function NewInvoicePage() {
-  const search = useSearchParams();
-  const viewParam = (search.get('display') || 'user') as ViewMode;
-  const isCustomerView = viewParam === 'customer';
+  // Determine view from URL (no useSearchParams)
+  const [isCustomerView, setIsCustomerView] = useState(false);
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const sp = new URLSearchParams(window.location.search);
+      setIsCustomerView(sp.get('display') === 'customer');
+    }
+  }, []);
 
   // Brand
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
@@ -131,7 +135,6 @@ export default function NewInvoicePage() {
   const savingRef = useRef(false);
 
   useEffect(() => { setRows([makeEmptyRow()]); }, []);
-
   function makeEmptyRow(): Row {
     return {
       id: makeId(),
@@ -261,7 +264,7 @@ export default function NewInvoicePage() {
         description: ln.description || ln.items?.name || '',
         uom_code,
         base_cost: base,
-        qty: 1, // default to 1 for return
+        qty: 1, // default for return
         margin_pct: 0,
         tax_rate: Number(ln.tax_rate || ln.items?.tax_rate || 0),
         unit_price: Number(ln.unit_price || 0),
@@ -302,14 +305,19 @@ export default function NewInvoicePage() {
   }, [isCustomerView, rows, totals, brandName, brandLogo, brandAddress, brandPhone, docType, issuedAt, customerName, customerAddress1Line]);
 
   // -------- Save --------
-  const save = async () => {
-    if (savingRef.current || saving) return;
-    if (!customerId) return alert('Please lookup or create the customer (by phone) first');
-    const hasLine = rows.some(r => r.item_id && r.qty > 0);
-    if (!hasLine) return alert('Add at least one line item');
+  const savingLatch = () => {
+    if (savingRef.current || saving) return true;
+    savingRef.current = true; setSaving(true);
+    return false;
+  };
+  const saveDone = () => { setSaving(false); savingRef.current = false; };
 
-    savingRef.current = true;
-    setSaving(true);
+  const save = async () => {
+    if (savingLatch()) return;
+    if (!customerId) { saveDone(); return alert('Please lookup or create the customer (by phone) first'); }
+    const hasLine = rows.some(r => r.item_id && r.qty > 0);
+    if (!hasLine) { saveDone(); return alert('Add at least one line item'); }
+
     try {
       // next invoice no (fallback)
       let invoiceNo = '';
@@ -371,11 +379,10 @@ export default function NewInvoicePage() {
       alert('Saved invoice #' + invoiceNo);
     } catch (err: any) {
       console.error(err);
-      // If you see: "Could not find the table 'public.invoice'" rename to invoices (plural)
+      // If you see: "Could not find the table 'public.invoice'" → rename to invoices (plural)
       alert(err?.message || String(err));
     } finally {
-      setSaving(false);
-      savingRef.current = false;
+      saveDone();
     }
   };
 
@@ -394,7 +401,7 @@ export default function NewInvoicePage() {
     setInvoiceNoJustSaved(null);
   };
 
-  // -------- Open Customer Screen (live mirror) --------
+  // -------- Open Customer Screen --------
   const openCustomerScreen = () => {
     const url = new URL(window.location.href);
     url.searchParams.set('display', 'customer');
@@ -522,7 +529,11 @@ export default function NewInvoicePage() {
           </div>
 
           <div className="ml-auto flex gap-2">
-            <Button type="button" onClick={openCustomerScreen}>
+            <Button type="button" onClick={() => {
+              const url = new URL(window.location.href);
+              url.searchParams.set('display', 'customer');
+              window.open(url.toString(), '_blank', 'noopener,noreferrer');
+            }}>
               Open Customer Screen
             </Button>
             <Button type="button" onClick={handleNewInvoice} className="bg-gray-700 hover:bg-gray-800">
