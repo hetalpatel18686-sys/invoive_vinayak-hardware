@@ -136,18 +136,40 @@ export default function NewInvoicePage() {
     return off;
   }, [isCustomerView]);
 
-  // Auto-print after first payload (or fallback)
-  useEffect(() => {
-    if (!isCustomerView || !autoPrint) return;
-    let printed = false;
-    const maybePrint = () => { if (!printed) { printed = true; window.print(); } };
-    if (hasLiveData) {
-      const t = setTimeout(maybePrint, 100);
-      return () => clearTimeout(t);
+ // Auto-print after first payload (or fallback), but wait for fonts & logo image
+useEffect(() => {
+  if (!isCustomerView || !autoPrint) return;
+
+  let cancelled = false;
+
+  const doPrint = async () => {
+    // If no live data yet, keep your original fallback wait
+    if (!hasLiveData) {
+      await new Promise(r => setTimeout(r, 1500));
     }
-    const t2 = setTimeout(maybePrint, 1500);
-    return () => clearTimeout(t2);
-  }, [isCustomerView, autoPrint, hasLiveData]);
+
+    // Wait for fonts if supported (helps Chrome/Safari avoid blank prints)
+    try {
+      // @ts-ignore
+      await document.fonts?.ready;
+    } catch {}
+
+    // If there is a logo URL, wait a tiny bit or until it has loaded
+    if (brandLogo && !logoReady) {
+      // small buffer to allow onLoad to fire
+      await new Promise(r => setTimeout(r, 120));
+    }
+
+    // Two RAF frames so layout/paint settle
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+    if (!cancelled) window.print();
+  };
+
+  doPrint();
+  return () => { cancelled = true; };
+}, [isCustomerView, autoPrint, hasLiveData, brandLogo, logoReady]);
+``
 
   // Brand (🆕 will be SHOWN on Customer View too)
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
