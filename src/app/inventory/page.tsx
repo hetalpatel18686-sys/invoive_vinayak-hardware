@@ -284,3 +284,73 @@ export default function InventoryPage() {
           </div>
         )}
       </div>
+
+      {/* ==================== RECENT STOCK MOVEMENTS ==================== */}
+      <div className="card">
+        <div className="flex flex-wrap items-end gap-3 mb-3">
+          <div className="text-lg font-semibold mr-auto">Recent Stock Movements</div>
+
+          {/* Quick search/filter for movements (SKU / Item / Type / Ref) */}
+          <input
+            className="input"
+            placeholder="Search movements (SKU / Item / Type / Ref)…"
+            value={movesSearch}
+            onChange={(e) => setMovesSearch(e.target.value)}
+          />
+
+          {/* Limit selector */}
+          <select
+            className="input"
+            value={movesLimit}
+            onChange={(e) => setMovesLimit(parseInt(e.target.value || '100', 10))}
+          >
+            <option value={50}>Last 50</option>
+            <option value={100}>Last 100</option>
+            <option value={200}>Last 200</option>
+            <option value={500}>Last 500</option>
+          </select>
+
+          <Button type="button" onClick={exportMovesCsv}>Download CSV</Button>
+          <Button type="button" onClick={loadMoves}>Refresh</Button>
+        </div>
+
+        {movesLoading ? (
+          <p>Loading stock movements…</p>
+        ) : moves.length === 0 ? (
+          <div className="p-3 text-sm text-gray-700">No movements yet.</div>
+        ) : (
+          <div className="overflow-auto">
+            <table className="table w-full">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Item</th>
+                  <th>Type</th>
+                  <th className="text-right">Qty</th>
+                  <th>UoM</th>
+                  <th className="text-right">Unit Cost</th>
+                  <th className="text-right">Total Cost</th>
+                  <th>Ref</th>
+                </tr>
+              </thead>
+              <tbody>
+                {movesFiltered.map((h, idx) => (
+                  <tr key={`${h.created_at}-${idx}`}>
+                    <td>{new Date(h.created_at).toLocaleString()}</td>
+                    <td>{h.item?.sku} — {h.item?.name}</td>
+                    <td className="capitalize">{h.move_type}</td>
+                    <td className="text-right">{h.qty}</td>
+                    <td>{h.uom_code || '-'}</td>
+                    <td className="text-right">{h.unit_cost != null ? `₹ ${Number(h.unit_cost).toFixed(2)}` : '-'}</td>
+                    <td className="text-right">{h.total_cost != null ? `₹ ${Number(h.total_cost).toFixed(2)}` : '-'}</td>
+                    <td>{h.ref || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
