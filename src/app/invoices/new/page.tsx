@@ -46,11 +46,11 @@ interface Row {
   return_qty?: number;
 }
 
-function round2(n: number) {
-  return Math.round((n + Number.EPSILON) * 100) / 100;
-}
+// -------- Helpers (with “always round up” for rupee values) --------
 function ceilRupee(n: number) {
-  return Math.ceil(Number(n || 0));
+  // If any fraction exists, bump up to next integer rupee
+  const x = Number(n || 0);
+  return Number.isFinite(x) ? Math.ceil(x) : 0;
 }
 function safeUomCode(u: ItemDb['uom']): string {
   if (Array.isArray(u)) return u[0]?.code ?? '';
@@ -62,9 +62,7 @@ function makeId(): string {
     if (typeof crypto !== 'undefined' && crypto?.randomUUID) return crypto.randomUUID();
   } catch {}
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
+    const r = (Math.random() * 16) | 0; const v = c === 'x' ? r : (r & 0x3) | 0x8; return v.toString(16);
   });
 }
 function fullName(c: Partial<Customer>) {
@@ -73,11 +71,11 @@ function fullName(c: Partial<Customer>) {
 function oneLineAddress(c: Partial<Customer>) {
   return [c.street_name, c.village_town, c.city, c.postal_code, c.state]
     .filter(Boolean)
-    .map((s) => String(s).trim())
+    .map(s => String(s).trim())
     .join(', ');
 }
 
-/** ---------- Live mirror via localStorage (rock-solid) ---------- */
+/** ---------- Live mirror via localStorage ---------- */
 class StorageBus {
   key: string;
   constructor(key = 'invoice-live-payload') { this.key = key; }
@@ -86,8 +84,9 @@ class StorageBus {
       const envelope = { ts: Date.now(), payload };
       const json = JSON.stringify(envelope);
       localStorage.setItem(this.key, json);
-      // fire a best-effort local event so a second tab gets the latest snapshot fast
-      try { window.dispatchEvent(new StorageEvent('storage', { key: this.key, newValue: json })); } catch {}
+      try {
+        window.dispatchEvent(new StorageEvent('storage', { key: this.key, newValue: json }));
+      } catch {}
     } catch (e) { console.error('StorageBus.post error', e); }
   }
   on(fn: (payload: any) => void) {
@@ -99,7 +98,6 @@ class StorageBus {
       } catch (e) { console.error('StorageBus.on parse error', e); }
     };
     window.addEventListener('storage', handler);
-    // initial snapshot if exists
     try {
       const raw = localStorage.getItem(this.key);
       if (raw) { const env = JSON.parse(raw); fn(env?.payload); }
@@ -108,10 +106,10 @@ class StorageBus {
   }
 }
 const live = new StorageBus('invoice-live-payload');
-/** --------------------------------------------------------------- */
+// ---------------------------------------------------
 
 export default function NewInvoicePage() {
-  // ✅ Read view flags synchronously on first render (prevents crash on new tab)
+  // Read view flags synchronously on first render (prevents crash)
   const [isCustomerView] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     const sp = new URLSearchParams(window.location.search);
@@ -134,7 +132,7 @@ export default function NewInvoicePage() {
     return off;
   }, [isCustomerView]);
 
-  // Auto-print after first payload (or fallback timeout)
+  // Auto-print after first payload (or fallback)
   useEffect(() => {
     if (!isCustomerView || !autoPrint) return;
     let printed = false;
@@ -147,15 +145,12 @@ export default function NewInvoicePage() {
     return () => clearTimeout(t2);
   }, [isCustomerView, autoPrint, hasLiveData]);
 
-  // Brand
+  // Brand (used for QR “pn” only; NOT shown on Customer View)
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
   const brandLogo    = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png';
   const brandAddress = process.env.NEXT_PUBLIC_BRAND_ADDRESS  || 'Bilimora, Gandevi, Navsari, Gujarat, 396321';
   const brandPhone   = process.env.NEXT_PUBLIC_BRAND_PHONE    || '+91 7046826808';
-
-  // Default UPI (read-only in UI). You can also set NEXT_PUBLIC_UPI_ID in Vercel.
-  const upiId =
-    process.env.NEXT_PUBLIC_UPI_ID || 'patelkb308@okaxis';
+  const upiId        = process.env.NEXT_PUBLIC_UPI_ID         || 'patelkb308@okaxis';
 
   // Header
   const [issuedAt, setIssuedAt] = useState<string>(() => new Date().toISOString().slice(0,10));
@@ -209,44 +204,11 @@ export default function NewInvoicePage() {
   useEffect(() => { setRows([makeEmptyRow()]); }, []);
   function makeEmptyRow(): Row {
     return {
-      id: makeId(),
-      sku_input: '',
-      item_id: '',
-      description: '',
-      uom_code: '',
-      base_cost: 0,
-      qty: 1,
-      margin_pct: 0,
-      tax_rate: 0,
-      unit_price: 0,
-      issued_margin_pct: 0,
-      return_qty: 0,
+      id: makeId(), sku_input: '', item_id: '', description: '', uom_code: '',
+      base_cost: 0, qty: 1, margin_pct: 0, tax_rate: 0, unit_price: 0,
+      issued_margin_pct: 0, return_qty: 0,
     };
   }
-
-  /** Build live payload for mirror */
-  const buildLivePayload = () => ({
-    brand: { name: brandName, logo: brandLogo, address: brandAddress, phone: brandPhone },
-    header: { docType, issuedAt, customerName, customerAddress1Line },
-    lines: rows.map(r => {
-      const qtyForCalc = docType === 'return' ? Number(r.return_qty || 0) : Number(r.qty || 0);
-      return {
-        sku: r.sku_input,
-        description: r.description,
-        uom_code: r.uom_code,
-        qty: qtyForCalc,
-        unit_price: r.unit_price,
-        tax_rate: r.tax_rate,
-        line_total: round2(qtyForCalc * r.unit_price),
-      };
-    }),
-    totals,
-  });
-
-  /** always post snapshot before open */
-  const postLiveSnapshot = () => {
-    try { live.post(buildLivePayload()); } catch {}
-  };
 
   // ----- payments load
   const refreshPayments = async (invoiceId: string) => {
@@ -280,7 +242,7 @@ export default function NewInvoicePage() {
       setCustomerId(''); setCustomerName(''); setCustomerAddress1Line('');
       setCustomerInvoices([]);
     } else {
-      const c = (data as any[])[0] as Customer;
+      const c = data[0] as Customer;
       setCustomerId(c.id);
       setCustomerName(fullName(c));
       setCustomerAddress1Line(oneLineAddress(c));
@@ -314,7 +276,7 @@ export default function NewInvoicePage() {
     setShowCreateCustomer(false);
   };
 
-  // ----- set item by SKU (sale)
+  // ----- set item by SKU (sale) — unit_price always ceil
   const setItemBySku = async (rowId: string, skuRaw: string) => {
     const sku = (skuRaw || '').trim();
     if (!sku) return;
@@ -331,8 +293,8 @@ export default function NewInvoicePage() {
     setRows(prev => prev.map(r => {
       if (r.id !== rowId) return r;
       const base = Number(rec.unit_cost || 0);
-      const calc = (base) * (1 + (r.margin_pct || 0) / 100);
-      const unit = ceilRupee(calc);
+      const calc = base * (1 + (r.margin_pct || 0) / 100);
+      const unit = ceilRupee(calc); // ✅ round up
       return {
         ...r,
         sku_input: rec.sku,
@@ -346,7 +308,7 @@ export default function NewInvoicePage() {
     }));
   };
 
-  // ----- row setters
+  // ----- row setters (respect rounding rule)
   const setSkuInput = (rowId: string, text: string) =>
     setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text } : r));
 
@@ -357,7 +319,7 @@ export default function NewInvoicePage() {
     setRows(prev => prev.map(r => {
       if (r.id !== rowId) return r;
       const calc = (r.base_cost || 0) * (1 + (m || 0) / 100);
-      const unit = ceilRupee(calc);
+      const unit = ceilRupee(calc); // ✅ round up when margin changes
       return { ...r, margin_pct: m || 0, unit_price: unit };
     }));
 
@@ -368,7 +330,7 @@ export default function NewInvoicePage() {
     setRows(prev => prev.map(r => r.id === rowId ? { ...r, qty: qty || 0 } : r));
 
   const setUnitPrice = (rowId: string, price: number) =>
-    setRows(prev => prev.map(r => r.id === rowId ? { ...r, unit_price: ceilRupee(price) } : r));
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, unit_price: ceilRupee(price) } : r)); // ✅ any decimal -> +1
 
   const setReturnQty = (rowId: string, ret: number) =>
     setRows(prev => prev.map(r => {
@@ -438,7 +400,7 @@ export default function NewInvoicePage() {
         issued_margin_pct = Number(ln.margin_pct_at_sale) || 0;
       } else {
         const baseNow = Number(it.unit_cost || 0);
-        issued_margin_pct = baseNow > 0 ? round2(((Number(ln.unit_price || 0) - baseNow) / baseNow) * 100) : 0;
+        issued_margin_pct = baseNow > 0 ? Math.ceil(((Number(ln.unit_price || 0) - baseNow) / baseNow) * 100) : 0;
       }
 
       return {
@@ -460,23 +422,78 @@ export default function NewInvoicePage() {
     setRows(prefilled.length > 0 ? prefilled : [makeEmptyRow()]);
   };
 
-  // ----- totals
+  // ----- totals (with rounding rule: ceil GST per line, unit prices already ceiled)
   const totals = useMemo(() => {
     let subtotal = 0, tax = 0;
     for (const r of rows) {
-      const qtyForCalc = docType === 'return' ? Number(r.return_qty || 0) : Number(r.qty || 0);
-      const line = qtyForCalc * Number(r.unit_price || 0);
-      subtotal += line;
-      tax += line * ((Number(r.tax_rate || 0)) / 100);
+      const qty = (docType === 'return' ? Number(r.return_qty || 0) : Number(r.qty || 0));
+      const lineAmount = ceilRupee(qty * Number(r.unit_price || 0)); // usually integer already
+      subtotal += lineAmount;
+      const lineTaxRaw = lineAmount * (Number(r.tax_rate || 0) / 100);
+      const lineTax = ceilRupee(lineTaxRaw);          // ✅ ceil GST per line
+      tax += lineTax;
     }
-    return { subtotal: round2(subtotal), tax: round2(tax), grand: round2(subtotal + tax) };
+    // grand total also integer
+    return { subtotal: ceilRupee(subtotal), tax: ceilRupee(tax), grand: ceilRupee(subtotal + tax) };
   }, [rows, docType]);
+
+  // ----- payments summary (for editor + live payload)
+  const computePaymentSummary = () => {
+    const paidIn  = (payments || []).filter(p => p.direction === 'in').reduce((s, p) => s + Number(p.amount || 0), 0);
+    const paidOut = (payments || []).filter(p => p.direction === 'out').reduce((s, p) => s + Number(p.amount || 0), 0);
+    const paidInCeil  = ceilRupee(paidIn);
+    const paidOutCeil = ceilRupee(paidOut);
+    const grandAtSave = invoiceGrandTotalAtSave ?? totals.grand;
+    const balance = docType === 'return'
+      ? ceilRupee(grandAtSave - paidOutCeil + paidInCeil)   // refund remaining
+      : ceilRupee(grandAtSave - paidInCeil + paidOutCeil);  // balance due
+    return {
+      paidIn: paidInCeil,
+      paidOut: paidOutCeil,
+      netPaid: ceilRupee(paidInCeil - paidOutCeil),
+      balance,
+    };
+  };
+
+  // ----- live payload (includes payments summary + invoice no)
+  const buildLivePayload = () => {
+    const pay = computePaymentSummary();
+    return {
+      brand: { name: brandName, logo: brandLogo, address: brandAddress, phone: brandPhone }, // not shown, just kept if ever needed
+      header: { docType, issuedAt, customerName, customerAddress1Line, invoiceNo: invoiceNoJustSaved ?? null, notes },
+      lines: rows.map(r => {
+        const qty = docType === 'return' ? Number(r.return_qty || 0) : Number(r.qty || 0);
+        const line_total = ceilRupee(qty * Number(r.unit_price || 0));
+        return {
+          sku: r.sku_input,
+          description: r.description,
+          uom_code: r.uom_code,
+          qty,
+          unit_price: ceilRupee(r.unit_price),
+          tax_rate: r.tax_rate,
+          line_total,
+        };
+      }),
+      totals,
+      payments: (payments || []).map(p => ({
+        id: p.id,
+        created_at: p.created_at,
+        method: p.method,
+        direction: p.direction,
+        amount: ceilRupee(p.amount),
+        reference: p.reference,
+      })),
+      paySummary: pay,
+    };
+  };
 
   // ----- mirror to customer screen
   useEffect(() => {
     if (isCustomerView) return;
     live.post(buildLivePayload());
-  }, [isCustomerView, rows, totals, brandName, brandLogo, brandAddress, brandPhone, docType, issuedAt, customerName, customerAddress1Line]);
+  }, [
+    isCustomerView, rows, totals, docType, issuedAt, customerName, customerAddress1Line, payments, invoiceGrandTotalAtSave, invoiceNoJustSaved, notes
+  ]);
 
   // ----- save invoice/return
   const savingLatch = () => {
@@ -527,9 +544,9 @@ export default function NewInvoicePage() {
                 item_id: r.item_id,
                 description: r.description,
                 qty: Number(r.return_qty || 0),
-                unit_price: r.unit_price,
+                unit_price: ceilRupee(r.unit_price),
                 tax_rate: r.tax_rate,
-                line_total: round2(Number(r.return_qty || 0) * r.unit_price),
+                line_total: ceilRupee(Number(r.return_qty || 0) * ceilRupee(r.unit_price)),
               }))
           : rows.filter(r => r.item_id && Number(r.qty || 0) > 0)
               .map(r => ({
@@ -537,9 +554,9 @@ export default function NewInvoicePage() {
                 item_id: r.item_id,
                 description: r.description,
                 qty: Number(r.qty || 0),
-                unit_price: r.unit_price,
+                unit_price: ceilRupee(r.unit_price),
                 tax_rate: r.tax_rate,
-                line_total: round2(Number(r.qty || 0) * r.unit_price),
+                line_total: ceilRupee(Number(r.qty || 0) * ceilRupee(r.unit_price)),
                 base_cost_at_sale: r.base_cost,
                 margin_pct_at_sale: r.margin_pct,
               }))
@@ -590,36 +607,32 @@ export default function NewInvoicePage() {
     setPayments([]);
   };
 
-  // ----- open customer views (SAFE path + query + popup fallback)
+  // ----- open customer views (NO redirect fallback; editor stays editor)
   const openCustomerScreen = () => {
-    postLiveSnapshot();
-    const url = new URL(window.location.href);
-    url.searchParams.set('display', 'customer');
-    const final = url.pathname + '?' + url.searchParams.toString();
-    const w = window.open(final, '_blank', 'noopener,noreferrer');
-    if (!w || w.closed || typeof w.closed === 'undefined') {
-      window.location.href = final;
-    }
+    try { live.post(buildLivePayload()); } catch {}
+    const qs = new URLSearchParams();
+    qs.set('display', 'customer');
+    const final = `${window.location.pathname}?${qs.toString()}`;
+    const w = window.open(final, '_blank'); // no redirect; if blocked, alert below
+    if (!w) alert('Please allow pop-ups for this site to open the Customer Screen.');
   };
   const openCustomerPrint = () => {
-    postLiveSnapshot();
-    const url = new URL(window.location.href);
-    url.searchParams.set('display', 'customer');
-    url.searchParams.set('autoprint', '1');
-    const final = url.pathname + '?' + url.searchParams.toString();
-    const w = window.open(final, '_blank', 'noopener,noreferrer');
-    if (!w || w.closed || typeof w.closed === 'undefined') {
-      window.location.href = final;
-    }
+    try { live.post(buildLivePayload()); } catch {}
+    const qs = new URLSearchParams();
+    qs.set('display', 'customer');
+    qs.set('autoprint', '1');
+    const final = `${window.location.pathname}?${qs.toString()}`;
+    const w = window.open(final, '_blank');
+    if (!w) alert('Please allow pop-ups for this site to open the Print view.');
   };
 
   // ===== Auto-generate QR (UPI read-only) =====
   const buildUpiUri = (upi: string, amount: number, note: string, payeeName: string) => {
     if (!upi) return '';
     const params = new URLSearchParams();
-    params.set('pa', upi);            // payee address (UPI ID)
+    params.set('pa', upi);
     if (payeeName) params.set('pn', payeeName);
-    if (amount > 0) params.set('am', round2(amount).toFixed(2));
+    if (amount > 0) params.set('am', ceilRupee(amount).toString()); // ✅ ceil amount in QR too
     params.set('cu', 'INR');
     if (note) params.set('tn', note);
     return `upi://pay?${params.toString()}`;
@@ -628,33 +641,25 @@ export default function NewInvoicePage() {
   useEffect(() => {
     if (payMethod !== 'qr') return;
     if (!upiId) return;
-
     let cancelled = false;
-
     (async () => {
       try {
         setGeneratingQR(true);
-        // dynamic import only on client
-        // @ts-ignore - types are provided but this keeps TS calm in all setups
-        const QR = await import('qrcode');
+        const QR: any = await import('qrcode');
         const upi = buildUpiUri(
           upiId.trim(),
           payAmount || 0,
           payReference || (invoiceNoJustSaved ?? 'Payment'),
           brandName
         );
-        const dataUrl = await QR.toDataURL(upi, { margin: 1, scale: 8 });
+        const dataUrl = await (QR?.toDataURL || QR?.default?.toDataURL)(upi, { margin: 1, scale: 8 });
         if (!cancelled) setQrImageUrl(dataUrl);
       } catch (e: any) {
-        if (!cancelled) {
-          console.error(e);
-          alert(e?.message || 'Failed to generate QR');
-        }
+        if (!cancelled) { console.error(e); alert(e?.message || 'Failed to generate QR'); }
       } finally {
         if (!cancelled) setGeneratingQR(false);
       }
     })();
-
     return () => { cancelled = true; };
   }, [payMethod, upiId, payAmount, payReference, invoiceNoJustSaved, brandName]);
 
@@ -671,7 +676,7 @@ export default function NewInvoicePage() {
         meta.card_auth  = cardAuth  || null;
         meta.card_txn   = cardTxn   || null;
       } else if (payMethod === 'qr') {
-        meta.qr_image_url = qrImageUrl || null; // dataURL (auto)
+        meta.qr_image_url = qrImageUrl || null;
         meta.qr_txn       = qrTxn || null;
         meta.upi_id       = upiId || null;
       }
@@ -680,7 +685,7 @@ export default function NewInvoicePage() {
         invoice_id: invoiceIdJustSaved,
         method: payMethod,
         direction: payDirection,
-        amount: round2(payAmount),
+        amount: ceilRupee(payAmount), // ✅ ceil amount
         reference: payReference || null,
         meta,
       };
@@ -706,12 +711,14 @@ export default function NewInvoicePage() {
   // Customer Screen only
   // =======================
   if (isCustomerView) {
-    const brand = liveState?.brand ?? { name: brandName, logo: brandLogo, address: brandAddress, phone: brandPhone };
-    const header = liveState?.header ?? { docType, issuedAt, customerName, customerAddress1Line };
+    // NO brand/app header here — just the invoice
+    const header = liveState?.header ?? { docType, issuedAt, customerName, customerAddress1Line, invoiceNo: invoiceNoJustSaved, notes };
     const liveLines: any[] = liveState?.lines ?? [];
     const liveTotals = liveState?.totals ?? { subtotal: 0, tax: 0, grand: 0 };
+    const paymentsList: any[] = liveState?.payments ?? [];
+    const paySummary = liveState?.paySummary ?? { paidIn: 0, paidOut: 0, netPaid: 0, balance: liveTotals.grand || 0 };
 
-    const onPrint = () => window.print();
+    const docTitle = header.docType === 'return' ? 'Return' : 'Invoice';
 
     return (
       <div className="p-4 print:p-0">
@@ -721,49 +728,49 @@ export default function NewInvoicePage() {
             body * { visibility: hidden !important; }
             .print-area, .print-area * { visibility: visible !important; }
             .print-area { position: absolute; left: 0; top: 0; width: 100%; }
-            header, nav, .no-print, .app-header, .app-nav, [data-app-header] { display: none !important; }
-            .card { box-shadow: none !important; border: 0 !important; }
-            body { background: #fff !important; }
+            .no-print { display: none !important; }
           }
         `}</style>
 
+        {/* Controls (not printed) */}
         <div className="no-print mb-3 flex gap-2">
-          <Button type="button" onClick={onPrint}>Print</Button>
+          <Button type="button" onClick={() => window.print()}>Print</Button>
           <Button type="button" onClick={() => window.close()} className="bg-gray-700 hover:bg-gray-800">Close</Button>
         </div>
 
-        <div className="card print-area">
-          <div className="flex items-center gap-4 mb-4">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={brand.logo} alt="logo" className="h-14 w-14 rounded bg-white object-contain" />
+        {/* Pure Invoice Area */}
+        <div className="print-area">
+          {/* Minimal heading (NO brand header) */}
+          <div className="mb-3 flex items-start justify-between">
             <div>
-              <div className="text-2xl font-bold text-orange-600">{brand.name}</div>
-              <div className="text-sm text-gray-700">{brand.address}</div>
-              <div className="text-sm text-gray-700">Phone: {brand.phone}</div>
-            </div>
-            <div className="ml-auto text-right">
-              <div className="text-lg font-semibold">{header.docType === 'return' ? 'Return' : 'Invoice'}</div>
-              <div className="text-sm">Date: {header.issuedAt || '—'}</div>
+              <div className="text-xl font-semibold">{docTitle}</div>
+              {header.invoiceNo ? (
+                <div className="text-sm text-gray-700">No: {header.invoiceNo}</div>
+              ) : null}
+              <div className="text-sm text-gray-700">Date: {header.issuedAt || '—'}</div>
             </div>
           </div>
 
-          {/* Customer */}
+          {/* Bill To */}
           <div className="mb-4">
-            <div className="font-semibold">Customer</div>
+            <div className="font-semibold">Bill To</div>
             <div>{header.customerName || '—'}</div>
             <div className="text-sm text-gray-700">{header.customerAddress1Line || '—'}</div>
+            {header.notes ? (
+              <div className="text-sm text-gray-700 mt-1">Notes: {header.notes}</div>
+            ) : null}
           </div>
 
           {/* Lines */}
           <div className="overflow-auto">
-            <table className="table">
+            <table className="table w-full">
               <thead>
                 <tr>
                   <th>SKU</th>
                   <th style={{ minWidth: 220 }}>Description</th>
                   <th>UoM</th>
                   <th className="text-right">Qty</th>
-                  <th className="text-right">Unit Price</th>
+                  <th className="text-right">Unit</th>
                   <th className="text-right">Tax %</th>
                   <th className="text-right">Line Total</th>
                 </tr>
@@ -800,6 +807,54 @@ export default function NewInvoicePage() {
               </tfoot>
             </table>
           </div>
+
+          {/* Payments (Customer View) */}
+          <div className="mt-4">
+            <div className="font-semibold mb-1">Payments</div>
+            {paymentsList.length === 0 ? (
+              <div className="text-sm text-gray-600">No payments yet.</div>
+            ) : (
+              <div className="overflow-auto">
+                <table className="table w-full">
+                  <thead>
+                    <tr>
+                      <th>When</th>
+                      <th>Method</th>
+                      <th>Direction</th>
+                      <th>Reference</th>
+                      <th className="text-right">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paymentsList.map(p => (
+                      <tr key={p.id}>
+                        <td>{p.created_at ? new Date(p.created_at).toLocaleString() : '—'}</td>
+                        <td className="capitalize">{p.method}</td>
+                        <td className="uppercase">{p.direction}</td>
+                        <td>{p.reference || '—'}</td>
+                        <td className="text-right">₹ {Number(p.amount || 0).toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div className="mt-2 grid sm:grid-cols-2 gap-3">
+              <div className="border rounded p-2">
+                <div className="flex justify-between"><div>Paid In</div><div>₹ {Number(paySummary.paidIn || 0).toFixed(2)}</div></div>
+                <div className="flex justify-between"><div>Refunded (Out)</div><div>₹ {Number(paySummary.paidOut || 0).toFixed(2)}</div></div>
+                <div className="flex justify-between font-semibold"><div>Net Paid</div><div>₹ {Number(paySummary.netPaid || 0).toFixed(2)}</div></div>
+              </div>
+              <div className="border rounded p-2">
+                <div className="flex justify-between font-semibold">
+                  <div>{header.docType === 'return' ? 'Refund Remaining' : 'Balance Due'}</div>
+                  <div>₹ {Number(paySummary.balance || 0).toFixed(2)}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
     );
@@ -810,20 +865,14 @@ export default function NewInvoicePage() {
   // =======================
   const isReturn = docType === 'return';
 
-  const paidIn  = useMemo(() => round2((payments || []).filter(p => p.direction === 'in').reduce((s, p) => s + Number(p.amount || 0), 0)), [payments]);
-  const paidOut = useMemo(() => round2((payments || []).filter(p => p.direction === 'out').reduce((s, p) => s + Number(p.amount || 0), 0)), [payments]);
-  const netPaid = useMemo(() => round2(paidIn - paidOut), [paidIn, paidOut]);
-
-  const grandAtSave = invoiceGrandTotalAtSave ?? totals.grand;
-  const balance = useMemo(() => {
-    if (!invoiceIdJustSaved) return round2(grandAtSave);
-    if (isReturn) return round2(grandAtSave - paidOut + paidIn);
-    return round2(grandAtSave - paidIn + paidOut);
-  }, [invoiceIdJustSaved, isReturn, grandAtSave, paidIn, paidOut]);
+  const paidIn  = useMemo(() => computePaymentSummary().paidIn,  [payments, totals.grand, invoiceGrandTotalAtSave, docType]);
+  const paidOut = useMemo(() => computePaymentSummary().paidOut, [payments, totals.grand, invoiceGrandTotalAtSave, docType]);
+  const netPaid = useMemo(() => computePaymentSummary().netPaid, [payments, totals.grand, invoiceGrandTotalAtSave, docType]);
+  const balance = useMemo(() => computePaymentSummary().balance,[payments, totals.grand, invoiceGrandTotalAtSave, docType]);
 
   return (
     <Protected>
-      {/* Header */}
+      {/* Editor Header */}
       <div className="card mb-4">
         <div className="flex items-center gap-4">
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -983,7 +1032,7 @@ export default function NewInvoicePage() {
             <tbody>
               {rows.map((r) => {
                 if (!isReturn) {
-                  const lineTotal = round2((r.qty || 0) * (r.unit_price || 0));
+                  const lineTotal = ceilRupee((r.qty || 0) * (r.unit_price || 0));
                   return (
                     <tr key={r.id}>
                       <td>
@@ -999,7 +1048,7 @@ export default function NewInvoicePage() {
                       </td>
                       <td><input className="input" placeholder="Description" value={r.description} onChange={(e) => setDescription(r.id, e.target.value)} /></td>
                       <td><input className="input" value={r.uom_code || ''} readOnly placeholder="-" /></td>
-                      <td><input className="input" value={r.base_cost.toFixed(2)} readOnly /></td>
+                      <td><input className="input" value={ceilRupee(r.base_cost).toFixed(2)} readOnly /></td>
                       <td><input className="input" type="number" min={0} step="1" value={r.qty} onChange={(e) => setQty(r.id, parseFloat(e.target.value || '0'))} /></td>
                       <td><input className="input" type="number" step="0.01" value={r.margin_pct} onChange={(e) => setMargin(r.id, parseFloat(e.target.value || '0'))} /></td>
                       <td><input className="input" type="number" step="0.01" value={r.tax_rate} onChange={(e) => setTaxRate(r.id, parseFloat(e.target.value || '0'))} /></td>
@@ -1011,10 +1060,10 @@ export default function NewInvoicePage() {
                 }
 
                 // Return row
-                const soldLineTotal = round2(Number(r.qty || 0) * Number(r.unit_price || 0));
+                const soldLineTotal = ceilRupee(Number(r.qty || 0) * Number(r.unit_price || 0));
                 const retQty = Number(r.return_qty || 0);
-                const returnAmount = round2(retQty * Number(r.unit_price || 0));
-                const remaining = round2(soldLineTotal - returnAmount);
+                const returnAmount = ceilRupee(retQty * Number(r.unit_price || 0));
+                const remaining = ceilRupee(soldLineTotal - returnAmount);
 
                 return (
                   <tr key={r.id}>
@@ -1184,11 +1233,7 @@ export default function NewInvoicePage() {
 
                 <div>
                   <label className="label">UPI ID (read‑only)</label>
-                  <input
-                    className="input"
-                    value={upiId}
-                    readOnly
-                  />
+                  <input className="input" value={upiId} readOnly />
                 </div>
 
                 <div className="mt-2 border rounded p-2 flex flex-col items-center">
@@ -1235,10 +1280,11 @@ export default function NewInvoicePage() {
                   type="button"
                   className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm"
                   onClick={() => {
+                    const grandAtSave = invoiceGrandTotalAtSave ?? totals.grand;
                     const remaining = isReturn
-                      ? (invoiceGrandTotalAtSave ?? totals.grand) - paidOut + paidIn
-                      : (invoiceGrandTotalAtSave ?? totals.grand) - paidIn + paidOut;
-                    setPayAmount(round2(Math.max(0, remaining)));
+                      ? grandAtSave - paidOut + paidIn
+                      : grandAtSave - paidIn + paidOut;
+                    setPayAmount(ceilRupee(Math.max(0, remaining)));
                   }}
                 >
                   Remaining
