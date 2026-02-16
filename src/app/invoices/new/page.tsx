@@ -86,7 +86,8 @@ class StorageBus {
       const envelope = { ts: Date.now(), payload };
       const json = JSON.stringify(envelope);
       localStorage.setItem(this.key, json);
-      window.dispatchEvent(new StorageEvent('storage', { key: this.key, newValue: json }));
+      // fire a best-effort local event so a second tab gets the latest snapshot fast
+      try { window.dispatchEvent(new StorageEvent('storage', { key: this.key, newValue: json })); } catch {}
     } catch (e) { console.error('StorageBus.post error', e); }
   }
   on(fn: (payload: any) => void) {
@@ -98,6 +99,7 @@ class StorageBus {
       } catch (e) { console.error('StorageBus.on parse error', e); }
     };
     window.addEventListener('storage', handler);
+    // initial snapshot if exists
     try {
       const raw = localStorage.getItem(this.key);
       if (raw) { const env = JSON.parse(raw); fn(env?.payload); }
@@ -109,16 +111,17 @@ const live = new StorageBus('invoice-live-payload');
 /** --------------------------------------------------------------- */
 
 export default function NewInvoicePage() {
-  // Determine view + autoprint from URL
-  const [isCustomerView, setIsCustomerView] = useState(false);
-  const [autoPrint, setAutoPrint] = useState(false);
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const sp = new URLSearchParams(window.location.search);
-      setIsCustomerView(sp.get('display') === 'customer');
-      setAutoPrint(sp.get('autoprint') === '1' || sp.get('_print') === '1' || sp.get('print') === '1');
-    }
-  }, []);
+  // ✅ Read view flags synchronously on first render (prevents crash on new tab)
+  const [isCustomerView] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const sp = new URLSearchParams(window.location.search);
+    return sp.get('display') === 'customer';
+  });
+  const [autoPrint] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const sp = new URLSearchParams(window.location.search);
+    return sp.get('autoprint') === '1' || sp.get('_print') === '1' || sp.get('print') === '1';
+  });
 
   // Customer view – listen for live payload
   const [liveState, setLiveState] = useState<any>(null);
@@ -131,7 +134,7 @@ export default function NewInvoicePage() {
     return off;
   }, [isCustomerView]);
 
-  // Auto-print after first payload (or fallback)
+  // Auto-print after first payload (or fallback timeout)
   useEffect(() => {
     if (!isCustomerView || !autoPrint) return;
     let printed = false;
@@ -277,7 +280,7 @@ export default function NewInvoicePage() {
       setCustomerId(''); setCustomerName(''); setCustomerAddress1Line('');
       setCustomerInvoices([]);
     } else {
-      const c = data[0] as Customer;
+      const c = (data as any[])[0] as Customer;
       setCustomerId(c.id);
       setCustomerName(fullName(c));
       setCustomerAddress1Line(oneLineAddress(c));
@@ -587,8 +590,7 @@ export default function NewInvoicePage() {
     setPayments([]);
   };
 
-  // ----- open customer views
-  // [FIXED] open using PATH + QUERY with popup fallback
+  // ----- open customer views (SAFE path + query + popup fallback)
   const openCustomerScreen = () => {
     postLiveSnapshot();
     const url = new URL(window.location.href);
@@ -599,7 +601,6 @@ export default function NewInvoicePage() {
       window.location.href = final;
     }
   };
-  // [FIXED] open using PATH + QUERY with popup fallback (and autoprint)
   const openCustomerPrint = () => {
     postLiveSnapshot();
     const url = new URL(window.location.href);
