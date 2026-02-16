@@ -156,6 +156,7 @@ export default function NewInvoicePage() {
   const brandPhone   = process.env.NEXT_PUBLIC_BRAND_PHONE    || '+91 7046826808';
   const upiId        = process.env.NEXT_PUBLIC_UPI_ID         || 'patelkb308@okaxis';
 
+  const [logoReady, setLogoReady] = useState(false);
   // Header
   const [issuedAt, setIssuedAt] = useState<string>(() => new Date().toISOString().slice(0,10));
   const [docType, setDocType] = useState<DocType>('sale');
