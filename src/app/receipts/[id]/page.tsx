@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useParams, useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 
@@ -56,7 +56,7 @@ export default function ReceiptPage() {
   const id = String(params?.id || '');
   const autoprint = searchParams.get('autoprint') === '1';
 
-  // Brand (same defaults you used in invoice page)
+  // Brand (same defaults as invoice page)
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
   const brandLogo    = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png';
   const brandAddress = process.env.NEXT_PUBLIC_BRAND_ADDRESS  || 'Bilimora, Gandevi, Navsari, Gujarat, 396321';
@@ -77,12 +77,15 @@ export default function ReceiptPage() {
   const [itemsById, setItemsById] = useState<Map<string, any>>(new Map());
   const [uomCodeById, setUomCodeById] = useState<Map<string, string>>(new Map());
 
+  // 🔥 All payments for the invoice (to compute Paid In/Out/Net/Balance like your first screenshot)
+  const [allPayments, setAllPayments] = useState<any[]>([]);
+
   const dataReady = useMemo(
     () => Boolean(payment && invoice),
     [payment, invoice]
   );
 
-  // Compute totals from lines (pre-tax subtotal, tax, grand)
+  // Totals recomputed from lines (in case invoice.grand_total absent)
   const computedTotals = useMemo(() => {
     let subtotal = 0;
     let tax = 0;
@@ -92,14 +95,34 @@ export default function ReceiptPage() {
       const lineTax = ceilRupee(line * (Number(ln.tax_rate || 0) / 100));
       tax += lineTax;
     }
-    return {
-      subtotal: ceilRupee(subtotal),
-      tax: ceilRupee(tax),
-      grand: ceilRupee(subtotal + tax),
-    };
+    return { subtotal: ceilRupee(subtotal), tax: ceilRupee(tax), grand: ceilRupee(subtotal + tax) };
   }, [lines]);
 
-  /* -------- Fetch payment + invoice + customer + items -------- */
+  // 🔢 Payment summary (like your first screenshot)
+  const paymentSummary = useMemo(() => {
+    const paidIn = allPayments
+      .filter(p => p.direction === 'in' && !p.is_void)
+      .reduce((s, p) => s + Number(p.amount || 0), 0);
+    const paidOut = allPayments
+      .filter(p => p.direction === 'out' && !p.is_void)
+      .reduce((s, p) => s + Number(p.amount || 0), 0);
+
+    const paidInC  = ceilRupee(paidIn);
+    const paidOutC = ceilRupee(paidOut);
+
+    const total = Number(invoice?.grand_total ?? computedTotals.grand ?? 0);
+    // Balance Due = Total - PaidIn + PaidOut
+    const balance = ceilRupee(total - paidInC + paidOutC);
+
+    return {
+      paidIn: paidInC,
+      paidOut: paidOutC,
+      netPaid: ceilRupee(paidInC - paidOutC),
+      balance,
+    };
+  }, [allPayments, invoice?.grand_total, computedTotals.grand]);
+
+  /* -------- Fetch payment + invoice + customer + items + ALL payments -------- */
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
@@ -109,7 +132,7 @@ export default function ReceiptPage() {
       setErr(null);
 
       try {
-        // 1) Payment
+        // 1) Payment (current)
         const { data: pay, error: e1 } = await supabase
           .from('payments')
           .select('id, invoice_id, method, direction, amount, reference, meta, created_at, is_void')
@@ -126,11 +149,10 @@ export default function ReceiptPage() {
           .select('id, invoice_no, issued_at, grand_total, subtotal, tax_total, notes, customer_id, doc_type')
           .eq('id', pay.invoice_id)
           .single();
-
         if (e2) throw e2;
         if (!inv) throw new Error('Invoice not found for this payment.');
 
-        // 3) Customer (optional)
+        // 3) Customer
         let cust: any = null;
         if (inv.customer_id) {
           const { data: c, error: e3 } = await supabase
@@ -146,10 +168,9 @@ export default function ReceiptPage() {
           .from('invoice_items')
           .select('item_id, description, qty, unit_price, tax_rate, line_total')
           .eq('invoice_id', inv.id);
-
         if (e4) throw e4;
 
-        // 5) Lookup items (sku, name, uom_id)
+        // 5) Item lookups (sku, name, uom_id)
         const uniqueItemIds = Array.from(
           new Set((invLines || []).map((ln: any) => ln.item_id).filter(Boolean))
         );
@@ -177,6 +198,15 @@ export default function ReceiptPage() {
           }
         }
 
+        // 6) 🔥 Load all non-void payments for this invoice for the summary & table
+        const { data: pays, error: e7 } = await supabase
+          .from('payments')
+          .select('id, method, direction, amount, reference, created_at, is_void')
+          .eq('invoice_id', inv.id)
+          .eq('is_void', false)
+          .order('created_at', { ascending: true }); // oldest first
+        if (e7) throw e7;
+
         if (!cancelled) {
           setPayment(pay);
           setInvoice(inv);
@@ -184,6 +214,7 @@ export default function ReceiptPage() {
           setLines(invLines || []);
           setItemsById(itemsMap);
           setUomCodeById(uomMap);
+          setAllPayments(pays || []);
         }
       } catch (e: any) {
         if (!cancelled) setErr(e?.message || String(e));
@@ -367,7 +398,7 @@ export default function ReceiptPage() {
                         <tr className="font-semibold">
                           <td colSpan={5}></td>
                           <td className="text-right">Total</td>
-                          <td className="text-right">{fmt(computedTotals.grand)}</td>
+                          <td className="text-right">{fmt(invoice?.grand_total ?? computedTotals.grand)}</td>
                         </tr>
                       </tfoot>
                     </table>
@@ -375,64 +406,56 @@ export default function ReceiptPage() {
                 )}
               </div>
 
-              {/* --- Payment summary --- */}
+              {/* --- Payment section (table + 2 summary cards) --- */}
               <div className="mt-5">
-                <div className="font-semibold mb-2">Payment</div>
-                <div className="overflow-auto">
-                  <table className="table w-full">
-                    <thead>
-                      <tr>
-                        <th>Method</th>
-                        <th>Direction</th>
-                        <th>Reference</th>
-                        <th className="text-right">Amount</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <td className="capitalize">{payment.method}</td>
-                        <td className="uppercase">{payment.direction}</td>
-                        <td>{payment.reference || '—'}</td>
-                        <td className="text-right">{fmt(ceilRupee(payment.amount))}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* Meta (optional blocks) */}
-                {payment?.meta && (
-                  <div className="mt-3 grid sm:grid-cols-2 gap-3">
-                    {(payment.meta.card_holder || payment.meta.card_last4 || payment.meta.card_auth || payment.meta.card_txn) && (
-                      <div className="border rounded p-2">
-                        <div className="font-semibold mb-1">Card Details</div>
-                        <div className="text-sm">Holder: {payment.meta.card_holder || '—'}</div>
-                        <div className="text-sm">Last 4: {payment.meta.card_last4 || '—'}</div>
-                        <div className="text-sm">Auth Code: {payment.meta.card_auth || '—'}</div>
-                        <div className="text-sm">Txn ID: {payment.meta.card_txn || '—'}</div>
-                      </div>
-                    )}
-                    {(payment.meta.upi_id || payment.meta.qr_txn || payment.meta.qr_image_url) && (
-                      <div className="border rounded p-2">
-                        <div className="font-semibold mb-1">UPI / QR</div>
-                        <div className="text-sm">UPI ID: {payment.meta.upi_id || '—'}</div>
-                        <div className="text-sm">Txn ID: {payment.meta.qr_txn || '—'}</div>
-                        {payment.meta.qr_image_url ? (
-                          <div className="mt-2 flex items-center">
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img
-                              src={payment.meta.qr_image_url}
-                              alt="QR"
-                              className="h-28 w-28 object-contain border rounded"
-                            />
-                          </div>
-                        ) : null}
-                      </div>
-                    )}
+                <div className="font-semibold mb-2">Payments</div>
+                {/* Table of all payments for this invoice */}
+                {allPayments.length === 0 ? (
+                  <div className="text-sm text-gray-600">No payments yet.</div>
+                ) : (
+                  <div className="overflow-auto">
+                    <table className="table w-full">
+                      <thead>
+                        <tr>
+                          <th>When</th>
+                          <th>Method</th>
+                          <th>Direction</th>
+                          <th>Reference</th>
+                          <th className="text-right">Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {allPayments.map(p => (
+                          <tr key={p.id}>
+                            <td>{p.created_at ? new Date(p.created_at).toLocaleString() : '—'}</td>
+                            <td className="capitalize">{p.method}</td>
+                            <td className="uppercase">{p.direction}</td>
+                            <td>{p.reference || '—'}</td>
+                            <td className="text-right">{fmt(ceilRupee(p.amount))}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 )}
+
+                {/* Two summary cards below the table (like your first screenshot) */}
+                <div className="mt-2 grid sm:grid-cols-2 gap-3">
+                  <div className="border rounded p-2">
+                    <div className="flex justify-between"><div>Paid In</div><div>{fmt(paymentSummary.paidIn)}</div></div>
+                    <div className="flex justify-between"><div>Refunded (Out)</div><div>{fmt(paymentSummary.paidOut)}</div></div>
+                    <div className="flex justify-between font-semibold"><div>Net Paid</div><div>{fmt(paymentSummary.netPaid)}</div></div>
+                  </div>
+                  <div className="border rounded p-2">
+                    <div className="flex justify-between font-semibold">
+                      <div>Balance Due</div>
+                      <div>{fmt(paymentSummary.balance)}</div>
+                    </div>
+                  </div>
+                </div>
               </div>
 
-              {/* --- Totals recap --- */}
+              {/* --- Totals recap (kept for clarity) --- */}
               <div className="mt-5 border rounded p-3 grid sm:grid-cols-2 gap-3">
                 <div className="flex justify-between">
                   <div>Invoice Total</div>
