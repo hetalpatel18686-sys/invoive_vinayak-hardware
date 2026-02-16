@@ -28,23 +28,7 @@ interface MoveRow {
   item: { sku: string; name: string } | null;
 }
 
-interface InvRow {
-  id: string;
-  sku: string;
-  name: string;
-  stock_qty: number;
-  unit_cost: number;
-  uom_code: string;
-  low_stock_threshold: number | null;
-}
-
-interface UomRow {
-  id: string;
-  code: string;
-  name: string;
-}
-
-// ---------- Safe type helpers for UoM ----------
+/* ---------- Safe type helpers for UoM ---------- */
 type Uom = { code?: string; name?: string };
 type UomField = Uom | Uom[] | null | undefined;
 
@@ -55,18 +39,61 @@ function getUomCode(u: UomField): string {
 
 // Simple UUID fallback if crypto.randomUUID is unavailable
 function makeClientTxId(): string {
-  // Try native
   try {
     // @ts-ignore
     if (typeof crypto !== 'undefined' && crypto?.randomUUID) return crypto.randomUUID();
   } catch {}
-  // Fallback
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
     const r = (Math.random() * 16) | 0;
-    // eslint-disable-next-line no-mixed-operators
     const v = c === 'x' ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
+}
+
+/* ---------- Small helpers ---------- */
+function downloadCsv(filename: string, rows: string[]) {
+  const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+type MoveSortKey =
+  | 'created_at'
+  | 'sku'
+  | 'name'
+  | 'move_type'
+  | 'qty'
+  | 'uom_code'
+  | 'unit_cost'
+  | 'total_cost'
+  | 'ref';
+
+function SortHeader({
+  label, active, dir, onClick, alignRight = false, minWidth,
+}: {
+  label: string;
+  active: boolean;
+  dir: 'asc' | 'desc';
+  onClick: () => void;
+  alignRight?: boolean;
+  minWidth?: number;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full flex items-center gap-1 ${alignRight ? 'justify-end' : 'justify-start'} font-semibold`}
+      style={{ minWidth }}
+      title={`Sort by ${label}`}
+    >
+      <span>{label}</span>
+      <span className="text-xs opacity-70">{active ? (dir === 'asc' ? '▲' : '▼') : '↕'}</span>
+    </button>
+  );
 }
 
 export default function Stock() {
@@ -84,85 +111,65 @@ export default function Stock() {
   const [minQty, setMinQty] = useState<number>(0);
   const [savingMin, setSavingMin] = useState<boolean>(false);
 
-  // Right panel
-  const [activeTab, setActiveTab] = useState<'moves' | 'inventory'>('moves');
-
-  // Data
+  // Movements data + UX
   const [history, setHistory] = useState<MoveRow[]>([]);
-  const [invRows, setInvRows] = useState<InvRow[]>([]);
-  const [invLoading, setInvLoading] = useState<boolean>(true);
-  const [invSearch, setInvSearch] = useState<string>('');
-  const [invLowOnly, setInvLowOnly] = useState<boolean>(false);
+  const [movesLoading, setMovesLoading] = useState<boolean>(false);
+  const [movesSearch, setMovesSearch] = useState<string>(''); // quick search (SKU/Item/Type/Ref)
+  const [movesLimit, setMovesLimit] = useState<number>(100);  // how many rows to load
+
+  const [sortKey, setSortKey] = useState<MoveSortKey>('created_at');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+
+  function toggleSort(k: MoveSortKey) {
+    setSortKey(prev => {
+      if (prev !== k) {
+        setSortDir('asc');
+        return k;
+      }
+      setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
+      return k;
+    });
+  }
 
   // Extra double-submit guard
   const submittingRef = useRef(false);
 
   useEffect(() => {
     loadHistory();
-    loadInventory();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [movesLimit]); // reload when limit changes
 
   // ---------- Loads ----------
   const loadHistory = async () => {
-    const h = await supabase
-      .from('stock_moves')
-      .select('created_at, move_type, qty, ref, uom_code, unit_cost, total_cost, item:items ( name, sku )')
-      .order('created_at', { ascending: false })
-      .limit(50);
+    try {
+      setMovesLoading(true);
+      const h = await supabase
+        .from('stock_moves')
+        .select(
+          'created_at, move_type, qty, ref, uom_code, unit_cost, total_cost, item:items ( name, sku )'
+        )
+        .order('created_at', { ascending: false })
+        .limit(movesLimit);
 
-    const rows: MoveRow[] =
-      (h.data ?? []).map((r: any) => ({
-        created_at: r.created_at,
-        move_type: r.move_type,
-        qty: Number(r.qty ?? 0),
-        ref: r.ref ?? null,
-        uom_code: r.uom_code ?? null,
-        unit_cost: r.unit_cost ?? null,
-        total_cost: r.total_cost ?? null,
-        item: Array.isArray(r.item) ? (r.item[0] ?? null) : r.item ?? null,
-      })) ?? [];
+      const rows: MoveRow[] =
+        (h.data ?? []).map((r: any) => ({
+          created_at: r.created_at,
+          move_type: r.move_type,
+          qty: Number(r.qty ?? 0),
+          ref: r.ref ?? null,
+          uom_code: r.uom_code ?? null,
+          unit_cost: r.unit_cost ?? null,
+          total_cost: r.total_cost ?? null,
+          item: Array.isArray(r.item) ? (r.item[0] ?? null) : r.item ?? null,
+        })) ?? [];
 
-    setHistory(rows);
-  };
-
-  const loadInventory = async () => {
-    setInvLoading(true);
-
-    const { data: itemsData, error: itemsErr } = await supabase
-      .from('items')
-      .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id')
-      .order('sku', { ascending: true });
-
-    if (itemsErr) {
-      setInvRows([]);
-      setInvLoading(false);
-      return;
+      setHistory(rows);
+    } catch (e) {
+      console.error(e);
+      setHistory([]);
+    } finally {
+      setMovesLoading(false);
     }
-
-    const { data: uomData } = await supabase
-      .from('units_of_measure')
-      .select('id, code, name');
-
-    const uomMap: Record<string, UomRow> = {};
-    (uomData ?? []).forEach((u: any) => {
-      uomMap[u.id] = { id: u.id, code: u.code, name: u.name };
-    });
-
-    const rows: InvRow[] = (itemsData ?? []).map((it: any) => {
-      const u = it.uom_id ? uomMap[it.uom_id] ?? null : null;
-      return {
-        id: it.id,
-        sku: it.sku,
-        name: it.name,
-        stock_qty: Number(it.stock_qty ?? 0),
-        unit_cost: Number(it.unit_cost ?? 0),
-        low_stock_threshold: it.low_stock_threshold ?? null,
-        uom_code: u?.code ?? '',
-      };
-    });
-
-    setInvRows(rows);
-    setInvLoading(false);
   };
 
   // ---------- Find by SKU (case-insensitive exact) ----------
@@ -173,8 +180,10 @@ export default function Stock() {
 
     const { data, error } = await supabase
       .from('items')
-      .select('id, sku, name, description, stock_qty, unit_cost, low_stock_threshold, uom:units_of_measure ( code )')
-      .ilike('sku', trimmed) // case-insensitive equality when no %
+      .select(
+        'id, sku, name, description, stock_qty, unit_cost, low_stock_threshold, uom:units_of_measure ( code )'
+      )
+      .ilike('sku', trimmed)
       .limit(1);
 
     if (error) return alert(error.message);
@@ -254,7 +263,6 @@ export default function Stock() {
 
     setLoading(true);
     try {
-      // Generate idempotency key for this attempt
       const clientTxId = makeClientTxId();
 
       if (moveType === 'receive') {
@@ -307,7 +315,6 @@ export default function Stock() {
 
       await findBySku();
       await loadHistory();
-      await loadInventory();
 
       setQty(0);
       if (moveType === 'receive') setUnitCost(0);
@@ -334,7 +341,6 @@ export default function Stock() {
       if (error) throw error;
 
       await findBySku();
-      await loadInventory();
       alert('Minimum qty saved.');
     } catch (err: any) {
       alert(err?.message || String(err));
@@ -343,59 +349,73 @@ export default function Stock() {
     }
   };
 
-  // ---------- Inventory helpers ----------
-  const invFiltered = useMemo(() => {
-    const term = invSearch.trim().toLowerCase();
-    return invRows.filter((r) => {
-      const match =
-        !term ||
-        r.sku.toLowerCase().includes(term) ||
-        (r.name ?? '').toLowerCase().includes(term);
-      const isLow =
-        r.low_stock_threshold != null &&
-        r.low_stock_threshold > 0 &&
-        r.stock_qty <= r.low_stock_threshold;
-      return match && (!invLowOnly || isLow);
-    });
-  }, [invRows, invSearch, invLowOnly]);
+  /* ===== Movements: search → sort → render ===== */
 
-  const invTotals = useMemo(() => {
-    let qty = 0;
-    let value = 0;
-    for (const r of invFiltered) {
-      qty += r.stock_qty;
-      value += r.stock_qty * r.unit_cost;
-    }
-    const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
-    return { qty: round2(qty), value: round2(value) };
-  }, [invFiltered]);
-
-  const exportInvCsv = () => {
-    const header = ['SKU','Item','UoM','Qty','Avg Unit Cost','Total Value','Minimum'];
-    const lines = invFiltered.map((r) => {
-      const total = r.stock_qty * r.unit_cost;
-      return [
-        r.sku,
-        (r.name ?? '').replaceAll('"','""'),
-        r.uom_code,
-        String(r.stock_qty),
-        r.unit_cost.toFixed(2),
-        total.toFixed(2),
-        r.low_stock_threshold != null ? String(r.low_stock_threshold) : ''
-      ].map(v => `"${v}"`).join(',');
+  // 1) Filter by quick search
+  const movesFiltered = useMemo(() => {
+    const t = movesSearch.trim().toLowerCase();
+    if (!t) return history;
+    return history.filter((m) => {
+      const sku = m.item?.sku?.toLowerCase() ?? '';
+      const nm  = m.item?.name?.toLowerCase() ?? '';
+      const ty  = m.move_type?.toLowerCase() ?? '';
+      const rf  = m.ref?.toLowerCase() ?? '';
+      return sku.includes(t) || nm.includes(t) || ty.includes(t) || rf.includes(t);
     });
-    const csv = [header.join(','), ...lines].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
+  }, [history, movesSearch]);
+
+  // 2) Sort by selected column and direction
+  const movesSorted = useMemo(() => {
+    const cp = [...movesFiltered];
+    cp.sort((a, b) => {
+      const dir = sortDir === 'asc' ? 1 : -1;
+
+      const get = (row: MoveRow): any => {
+        switch (sortKey) {
+          case 'created_at': return new Date(row.created_at).valueOf();
+          case 'sku':        return (row.item?.sku ?? '').toLowerCase();
+          case 'name':       return (row.item?.name ?? '').toLowerCase();
+          case 'move_type':  return (row.move_type ?? '').toLowerCase();
+          case 'qty':        return Number(row.qty);
+          case 'uom_code':   return (row.uom_code ?? '').toLowerCase();
+          case 'unit_cost':  return row.unit_cost == null ? Number.NEGATIVE_INFINITY : Number(row.unit_cost);
+          case 'total_cost': return row.total_cost == null ? Number.NEGATIVE_INFINITY : Number(row.total_cost);
+          case 'ref':        return (row.ref ?? '').toLowerCase();
+          default:           return 0;
+        }
+      };
+
+      const va = get(a);
+      const vb = get(b);
+
+      if (typeof va === 'number' && typeof vb === 'number') {
+        return (va - vb) * dir;
+      }
+      if (va < vb) return -1 * dir;
+      if (va > vb) return  1 * dir;
+      return 0;
+    });
+    return cp;
+  }, [movesFiltered, sortKey, sortDir]);
+
+  // 3) Export CSV (current filtered + sorted)
+  const exportMovesCsv = () => {
+    const header = ['Date','SKU','Item','Type','Qty','UoM','Unit Cost','Total Cost','Ref'];
+    const rows = movesSorted.map(m => [
+      new Date(m.created_at).toLocaleString().replaceAll('"','""'),
+      (m.item?.sku ?? '').replaceAll('"','""'),
+      (m.item?.name ?? '').replaceAll('"','""'),
+      (m.move_type ?? '').replaceAll('"','""'),
+      String(m.qty),
+      m.uom_code || '',
+      m.unit_cost != null ? m.unit_cost.toFixed(2) : '',
+      m.total_cost != null ? m.total_cost.toFixed(2) : '',
+      (m.ref ?? '').replaceAll('"','""'),
+    ].map(v => `"${v}"`).join(','));
     const date = new Date().toISOString().slice(0,10);
-    a.download = `inventory_${date}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadCsv(`stock_movements_${date}.csv`, [header.join(','), ...rows]);
   };
 
-  // ---------- Render ----------
   return (
     <div className="grid md:grid-cols-3 gap-4">
       {/* LEFT: Entry form */}
@@ -435,12 +455,12 @@ export default function Stock() {
             />
             <div className="text-xs text-gray-600 mt-1">
               {found ? (
-                <React.Fragment>
+                <>
                   UoM: <b>{found.uom_code || '-'}</b> • Current Qty: <b>{found.stock_qty ?? 0}</b> •{' '}
                   Avg Cost: <b>₹ {(found.unit_cost ?? 0).toFixed(2)}</b>
-                </React.Fragment>
+                </>
               ) : (
-                <React.Fragment>UoM: — • Current Qty: — • Avg Cost: —</React.Fragment>
+                <>UoM: — • Current Qty: — • Avg Cost: —</>
               )}
             </div>
           </div>
@@ -560,131 +580,143 @@ export default function Stock() {
         </form>
       </div>
 
-      {/* RIGHT: Tabs */}
+      {/* RIGHT: Recent Stock Movements with Search + Sort + CSV */}
       <div className="md:col-span-2 card">
-        <div className="flex items-center gap-4 mb-3">
-          <button
-            className={`px-3 py-1 rounded ${activeTab === 'moves' ? 'bg-primary text-white' : 'bg-gray-200'}`}
-            onClick={() => setActiveTab('moves')}
+        <div className="flex flex-wrap items-end gap-3 mb-3">
+          <div className="text-lg font-semibold mr-auto">Recent Stock Movements</div>
+
+          {/* Quick search */}
+          <input
+            className="input"
+            placeholder="Search (SKU / Item / Type / Ref)…"
+            value={movesSearch}
+            onChange={(e) => setMovesSearch(e.target.value)}
+          />
+
+          {/* Limit */}
+          <select
+            className="input"
+            value={movesLimit}
+            onChange={(e) => setMovesLimit(parseInt(e.target.value || '100', 10))}
+            title="Rows to load"
           >
-            Recent Stock Movements
-          </button>
-          <button
-            className={`px-3 py-1 rounded ${activeTab === 'inventory' ? 'bg-primary text-white' : 'bg-gray-200'}`}
-            onClick={() => setActiveTab('inventory')}
-          >
-            Inventory
-          </button>
+            <option value={50}>Last 50</option>
+            <option value={100}>Last 100</option>
+            <option value={200}>Last 200</option>
+            <option value={500}>Last 500</option>
+          </select>
+
+          <Button type="button" onClick={exportMovesCsv}>Download CSV</Button>
+          <Button type="button" onClick={loadHistory}>Refresh</Button>
         </div>
 
-        {activeTab === 'moves' ? (
-          <div className="overflow-auto">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Item</th>
-                  <th>Type</th>
-                  <th>Qty</th>
-                  <th>UoM</th>
-                  <th>Unit Cost</th>
-                  <th>Total Cost</th>
-                  <th>Ref</th>
-                </tr>
-              </thead>
-              <tbody>
-                {history.map((h, idx) => (
+        <div className="overflow-auto">
+          <table className="table w-full">
+            <thead>
+              <tr>
+                <th>
+                  <SortHeader
+                    label="Date"
+                    active={sortKey==='created_at'}
+                    dir={sortDir}
+                    onClick={() => toggleSort('created_at')}
+                    minWidth={160}
+                  />
+                </th>
+                <th>
+                  <SortHeader
+                    label="Item"
+                    active={sortKey==='sku' || sortKey==='name'}
+                    dir={sortDir}
+                    onClick={() => toggleSort('sku')}
+                    minWidth={220}
+                  />
+                </th>
+                <th>
+                  <SortHeader
+                    label="Type"
+                    active={sortKey==='move_type'}
+                    dir={sortDir}
+                    onClick={() => toggleSort('move_type')}
+                    minWidth={80}
+                  />
+                </th>
+                <th className="text-right">
+                  <SortHeader
+                    label="Qty"
+                    active={sortKey==='qty'}
+                    dir={sortDir}
+                    onClick={() => toggleSort('qty')}
+                    alignRight
+                    minWidth={80}
+                  />
+                </th>
+                <th>
+                  <SortHeader
+                    label="UoM"
+                    active={sortKey==='uom_code'}
+                    dir={sortDir}
+                    onClick={() => toggleSort('uom_code')}
+                    minWidth={60}
+                  />
+                </th>
+                <th className="text-right">
+                  <SortHeader
+                    label="Unit Cost"
+                    active={sortKey==='unit_cost'}
+                    dir={sortDir}
+                    onClick={() => toggleSort('unit_cost')}
+                    alignRight
+                    minWidth={110}
+                  />
+                </th>
+                <th className="text-right">
+                  <SortHeader
+                    label="Total Cost"
+                    active={sortKey==='total_cost'}
+                    dir={sortDir}
+                    onClick={() => toggleSort('total_cost')}
+                    alignRight
+                    minWidth={120}
+                  />
+                </th>
+                <th>
+                  <SortHeader
+                    label="Ref"
+                    active={sortKey==='ref'}
+                    dir={sortDir}
+                    onClick={() => toggleSort('ref')}
+                    minWidth={120}
+                  />
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {movesLoading ? (
+                <tr><td colSpan={8} className="p-3 text-sm text-gray-600">Loading stock movements…</td></tr>
+              ) : movesSorted.length === 0 ? (
+                <tr><td colSpan={8} className="p-3 text-sm text-gray-600">No movements found.</td></tr>
+              ) : (
+                movesSorted.map((h, idx) => (
                   <tr key={`${h.created_at}-${idx}`}>
                     <td>{new Date(h.created_at).toLocaleString()}</td>
                     <td>{h.item?.sku} — {h.item?.name}</td>
-                    <td>{h.move_type}</td>
-                    <td>{h.qty}</td>
+                    <td className="capitalize">{h.move_type}</td>
+                    <td className="text-right" style={{ fontVariantNumeric: 'tabular-nums' }}>{h.qty}</td>
                     <td>{h.uom_code || '-'}</td>
-                    <td>{h.unit_cost != null ? `₹ ${Number(h.unit_cost).toFixed(2)}` : '-'}</td>
-                    <td>{h.total_cost != null ? `₹ ${Number(h.total_cost).toFixed(2)}` : '-'}</td>
-                    <td>{h.ref}</td>
+                    <td className="text-right" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                      {h.unit_cost != null ? `₹ ${Number(h.unit_cost).toFixed(2)}` : '-'}
+                    </td>
+                    <td className="text-right" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                      {h.total_cost != null ? `₹ ${Number(h.total_cost).toFixed(2)}` : '-'}
+                    </td>
+                    <td>{h.ref || '—'}</td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <React.Fragment>
-            <div className="mb-3 grid md:grid-cols-3 gap-2">
-              <input
-                className="input"
-                placeholder="Search SKU or Name…"
-                value={invSearch}
-                onChange={(e) => setInvSearch(e.target.value)}
-              />
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={invLowOnly}
-                  onChange={(e) => setInvLowOnly(e.target.checked)}
-                />
-                Low stock only
-              </label>
-              <div className="flex gap-2">
-                <Button type="button" onClick={exportInvCsv}>Export CSV</Button>
-                <Button type="button" onClick={loadInventory}>Refresh</Button>
-              </div>
-            </div>
-
-            {invLoading ? (
-              <p>Loading…</p>
-            ) : invRows.length === 0 ? (
-              <div className="p-3 text-sm text-gray-700">No items found. Add items or refresh.</div>
-            ) : (
-              <div className="overflow-auto">
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>SKU</th>
-                      <th>Item</th>
-                      <th>UoM</th>
-                      <th className="text-right">Qty</th>
-                      <th className="text-right">Minimum</th>
-                      <th className="text-right">Avg Unit Cost</th>
-                      <th className="text-right">Total Value (₹)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {invFiltered.map((r) => {
-                      const total = r.stock_qty * r.unit_cost;
-                      const isLow =
-                        r.low_stock_threshold != null &&
-                        r.low_stock_threshold > 0 &&
-                        r.stock_qty <= r.low_stock_threshold;
-                      return (
-                        <tr key={r.id} className={isLow ? 'bg-red-50' : ''}>
-                          <td>{r.sku}</td>
-                          <td>{r.name}</td>
-                          <td>{r.uom_code || '-'}</td>
-                          <td className="text-right">{r.stock_qty}</td>
-                          <td className="text-right">
-                            {r.low_stock_threshold != null ? r.low_stock_threshold : '—'}
-                          </td>
-                          <td className="text-right">₹ {r.unit_cost.toFixed(2)}</td>
-                          <td className="text-right">₹ {total.toFixed(2)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                  <tfoot>
-                    <tr className="font-semibold">
-                      <td colSpan={3} className="text-right">Totals:</td>
-                      <td className="text-right">{invTotals.qty}</td>
-                      <td className="text-right">—</td>
-                      <td className="text-right">—</td>
-                      <td className="text-right">₹ {invTotals.value.toFixed(2)}</td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-            )}
-          </React.Fragment>
-        )}
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
