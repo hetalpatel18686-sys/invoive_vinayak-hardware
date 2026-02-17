@@ -1,7 +1,7 @@
 
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 import Protected from '@/components/Protected';
@@ -47,6 +47,13 @@ export default function Items() {
     low_stock_threshold: 0,
     uom_id: '' as string | '',
   });
+
+  // --- Scanner/UX helpers ---
+  const [scanMode, setScanMode] = useState<boolean>(true); // return focus to SKU after add
+  const skuRef = useRef<HTMLInputElement | null>(null);
+  const nameRef = useRef<HTMLInputElement | null>(null);
+  const priceRef = useRef<HTMLInputElement | null>(null);
+  const formRef = useRef<HTMLFormElement | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -95,9 +102,41 @@ export default function Items() {
     setLoading(false);
   };
 
+  // Initial load and focus to SKU for scanner
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    // Auto-focus SKU on mount
+    tryFocusSku(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
+
+  const tryFocusSku = (selectAll = false) => {
+    requestAnimationFrame(() => {
+      const el = skuRef.current;
+      if (el) {
+        el.focus();
+        if (selectAll) {
+          try { el.select(); } catch {}
+        }
+      }
+    });
+  };
+
+  const validateRequireds = () => {
+    const nameOk = !!form.name.trim();
+    const priceOk = Number(form.unit_price) > 0;
+    return { nameOk, priceOk, allOk: nameOk && priceOk };
+  };
+
+  // Submit helper (submit programmatically)
+  const submitForm = () => {
+    if (!formRef.current) return;
+    // requestSubmit works better than formRef.current.submit() in React
+    (formRef.current as any).requestSubmit?.();
+  };
 
   const add = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -119,7 +158,7 @@ export default function Items() {
     if (error) {
       alert(error.message);
     } else {
-      // Reset form and reload list
+      // Reset form
       setForm({
         sku: '',
         name: '',
@@ -130,8 +169,53 @@ export default function Items() {
         low_stock_threshold: 0,
         uom_id: '',
       });
+      // Reload table
       load();
+
+      // Return to SKU for continuous scanning
+      if (scanMode) tryFocusSku(true);
     }
+  };
+
+  // -------- Key handlers to support scanner "Enter" workflow --------
+  const onSkuKeyDown: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
+    if (e.key !== 'Enter') return;
+
+    e.preventDefault();
+    const { nameOk, priceOk, allOk } = validateRequireds();
+
+    // If all required fields are ready, submit immediately (scanner auto-enter)
+    if (allOk) {
+      submitForm();
+      return;
+    }
+
+    // If Name missing, go to Name first; else if Price missing, go to Price
+    if (!nameOk) {
+      nameRef.current?.focus();
+      nameRef.current?.select?.();
+      return;
+    }
+    if (!priceOk) {
+      priceRef.current?.focus();
+      priceRef.current?.select?.();
+      return;
+    }
+  };
+
+  const onNameKeyDown: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    // Move to Price
+    priceRef.current?.focus();
+    priceRef.current?.select?.();
+  };
+
+  const onPriceKeyDown: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    // With Price done, submit (works nicely with scanners too)
+    submitForm();
   };
 
   return (
@@ -139,70 +223,90 @@ export default function Items() {
       <div className="grid md:grid-cols-3 gap-4">
         {/* LEFT: Items table */}
         <div className="card md:col-span-2">
-          <h1 className="text-xl font-semibold mb-3">
-            Items &amp; Pricing <span className="text-xs text-gray-500">(UoM v2)</span>
-          </h1>
+          <div className="flex items-center justify-between mb-3">
+            <h1 className="text-xl font-semibold">
+              Items &amp; Pricing <span className="text-xs text-gray-500">(UoM v2)</span>
+            </h1>
+
+            {/* Scan mode toggle */}
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={scanMode}
+                onChange={(e) => setScanMode(e.target.checked)}
+              />
+              <span>Scan Mode (auto focus SKU)</span>
+            </label>
+          </div>
+
           {loading ? (
             <p>Loading...</p>
           ) : (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>SKU</th>
-                  <th>Name</th>
-                  <th>UoM</th>
-                  <th>Price</th>
-                  <th>Cost</th>
-                  <th>Margin</th>
-                  <th>Stock</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((it) => {
-                  const price = Number(it.unit_price || 0);
-                  const cost = Number(it.unit_cost || 0);
-                  const margin = price - cost;
-                  const pct = price > 0 ? (margin / price) * 100 : 0;
-                  const low =
-                    it.low_stock_threshold != null &&
-                    it.low_stock_threshold > 0 &&
-                    (it.stock_qty || 0) <= it.low_stock_threshold;
+            <div className="overflow-auto">
+              <table className="table w-full">
+                <thead>
+                  <tr>
+                    <th>SKU</th>
+                    <th>Name</th>
+                    <th>UoM</th>
+                    <th>Price</th>
+                    <th>Cost</th>
+                    <th>Margin</th>
+                    <th>Stock</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((it) => {
+                    const price = Number(it.unit_price || 0);
+                    const cost = Number(it.unit_cost || 0);
+                    const margin = price - cost;
+                    const pct = price > 0 ? (margin / price) * 100 : 0;
+                    const low =
+                      it.low_stock_threshold != null &&
+                      it.low_stock_threshold > 0 &&
+                      (it.stock_qty || 0) <= it.low_stock_threshold;
 
-                  return (
-                    <tr key={it.id} className={low ? 'bg-orange-50' : ''}>
-                      <td>{it.sku}</td>
-                      <td>{it.name}</td>
-                      <td>{it.uom_code || '-'}</td>
-                      <td>${price.toFixed(2)}</td>
-                      <td>${cost.toFixed(2)}</td>
-                      <td>
-                        {margin.toFixed(2)} ({pct.toFixed(1)}%)
-                      </td>
-                      <td>{it.stock_qty ?? 0}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                    return (
+                      <tr key={it.id} className={low ? 'bg-orange-50' : ''}>
+                        <td>{it.sku}</td>
+                        <td>{it.name}</td>
+                        <td>{it.uom_code || '-'}</td>
+                        <td>₹ {price.toFixed(2)}</td>
+                        <td>₹ {cost.toFixed(2)}</td>
+                        <td>
+                          {margin.toFixed(2)} ({pct.toFixed(1)}%)
+                        </td>
+                        <td>{it.stock_qty ?? 0}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
 
         {/* RIGHT: Add item form */}
         <div className="card">
           <h2 className="font-semibold mb-2">Add New Item</h2>
-          <form onSubmit={add} className="space-y-3">
+
+          <form ref={formRef} onSubmit={add} className="space-y-3">
             <input
+              ref={skuRef}
               className="input"
-              placeholder="SKU"
+              placeholder="SKU (scan barcode here)"
               value={form.sku}
               onChange={(e) => setForm({ ...form, sku: e.target.value })}
+              onKeyDown={onSkuKeyDown}
               required
             />
             <input
+              ref={nameRef}
               className="input"
               placeholder="Name"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
+              onKeyDown={onNameKeyDown}
               required
             />
             <textarea
@@ -224,6 +328,7 @@ export default function Items() {
                 }
               />
               <input
+                ref={priceRef}
                 className="input"
                 type="number"
                 step="0.01"
@@ -232,6 +337,7 @@ export default function Items() {
                 onChange={(e) =>
                   setForm({ ...form, unit_price: parseFloat(e.target.value || '0') })
                 }
+                onKeyDown={onPriceKeyDown}
                 required
                 min={0}
               />
@@ -260,8 +366,6 @@ export default function Items() {
                 </option>
               ))}
             </select>
-
-            {/* Removed the old Profit preview line */}
 
             <input
               className="input"
