@@ -25,6 +25,7 @@ interface MoveRow {
   uom_code: string | null;
   unit_cost: number | null;
   total_cost: number | null;
+  location?: string | null; // NEW
   item: { sku: string; name: string } | null;
 }
 
@@ -70,7 +71,8 @@ type MoveSortKey =
   | 'uom_code'
   | 'unit_cost'
   | 'total_cost'
-  | 'ref';
+  | 'ref'
+  | 'location';
 
 function SortHeader({
   label, active, dir, onClick, alignRight = false, minWidth,
@@ -105,6 +107,7 @@ export default function Stock() {
   const [unitCost, setUnitCost] = useState<number>(0);
   const [ref, setRef] = useState<string>('');
   const [reason, setReason] = useState<string>('');
+  const [location, setLocation] = useState<string>(''); // NEW
   const [loading, setLoading] = useState<boolean>(false);
 
   // Min qty editor
@@ -114,7 +117,7 @@ export default function Stock() {
   // Movements data + UX
   const [history, setHistory] = useState<MoveRow[]>([]);
   const [movesLoading, setMovesLoading] = useState<boolean>(false);
-  const [movesSearch, setMovesSearch] = useState<string>(''); // quick search (SKU/Item/Type/Ref)
+  const [movesSearch, setMovesSearch] = useState<string>(''); // quick search (SKU/Item/Type/Ref/Location)
   const [movesLimit, setMovesLimit] = useState<number>(100);  // how many rows to load
 
   const [sortKey, setSortKey] = useState<MoveSortKey>('created_at');
@@ -131,6 +134,12 @@ export default function Stock() {
     });
   }
 
+  // Barcode-friendly UX: focus
+  const [scanMode, setScanMode] = useState<boolean>(true);
+  const skuRef = useRef<HTMLInputElement | null>(null);
+  const qtyRef = useRef<HTMLInputElement | null>(null);
+  const unitCostRef = useRef<HTMLInputElement | null>(null);
+
   // Extra double-submit guard
   const submittingRef = useRef(false);
 
@@ -139,6 +148,23 @@ export default function Stock() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [movesLimit]); // reload when limit changes
 
+  useEffect(() => {
+    // Auto-focus SKU on mount
+    tryFocusSku(true);
+  }, []);
+
+  const tryFocusSku = (selectAll = false) => {
+    requestAnimationFrame(() => {
+      const el = skuRef.current;
+      if (el) {
+        el.focus();
+        if (selectAll) {
+          try { el.select(); } catch {}
+        }
+      }
+    });
+  };
+
   // ---------- Loads ----------
   const loadHistory = async () => {
     try {
@@ -146,7 +172,7 @@ export default function Stock() {
       const h = await supabase
         .from('stock_moves')
         .select(
-          'created_at, move_type, qty, ref, uom_code, unit_cost, total_cost, item:items ( name, sku )'
+          'created_at, move_type, qty, ref, uom_code, unit_cost, total_cost, location, item:items ( name, sku )'
         )
         .order('created_at', { ascending: false })
         .limit(movesLimit);
@@ -160,6 +186,7 @@ export default function Stock() {
           uom_code: r.uom_code ?? null,
           unit_cost: r.unit_cost ?? null,
           total_cost: r.total_cost ?? null,
+          location: r.location ?? null,
           item: Array.isArray(r.item) ? (r.item[0] ?? null) : r.item ?? null,
         })) ?? [];
 
@@ -208,6 +235,10 @@ export default function Stock() {
     setUnitCost(0);
     setRef('');
     setReason('');
+    setLocation(''); // reset location for fresh receipt
+
+    // After we find an item, go straight to Qty for speed
+    requestAnimationFrame(() => qtyRef.current?.focus());
   };
 
   // ---------- Preview helpers ----------
@@ -313,13 +344,31 @@ export default function Stock() {
         if (error) throw error;
       }
 
-      await findBySku();
-      await loadHistory();
+      // --- NEW: attach location (if your stock_moves table has a 'location' column) ---
+      if (location && location.trim()) {
+        try {
+          await supabase
+            .from('stock_moves')
+            .update({ location: location.trim() })
+            .eq('client_tx_id', clientTxId);
+        } catch (e) {
+          // If the column doesn't exist or RLS prevents update, ignore silently.
+          console.warn('location update skipped:', e);
+        }
+      }
+
+      await findBySku();        // refresh the left panel with updated stock/avg cost
+      await loadHistory();      // refresh the movements table
 
       setQty(0);
       if (moveType === 'receive') setUnitCost(0);
       setRef('');
       setReason('');
+      setLocation('');
+
+      if (scanMode) {
+        tryFocusSku(true); // back to SKU for next scan
+      }
       alert('Saved successfully.');
     } catch (err: any) {
       alert(err?.message || String(err));
@@ -360,7 +409,8 @@ export default function Stock() {
       const nm  = m.item?.name?.toLowerCase() ?? '';
       const ty  = m.move_type?.toLowerCase() ?? '';
       const rf  = m.ref?.toLowerCase() ?? '';
-      return sku.includes(t) || nm.includes(t) || ty.includes(t) || rf.includes(t);
+      const lc  = m.location?.toLowerCase() ?? '';
+      return sku.includes(t) || nm.includes(t) || ty.includes(t) || rf.includes(t) || lc.includes(t);
     });
   }, [history, movesSearch]);
 
@@ -381,6 +431,7 @@ export default function Stock() {
           case 'unit_cost':  return row.unit_cost == null ? Number.NEGATIVE_INFINITY : Number(row.unit_cost);
           case 'total_cost': return row.total_cost == null ? Number.NEGATIVE_INFINITY : Number(row.total_cost);
           case 'ref':        return (row.ref ?? '').toLowerCase();
+          case 'location':   return (row.location ?? '').toLowerCase();
           default:           return 0;
         }
       };
@@ -400,7 +451,7 @@ export default function Stock() {
 
   // 3) Export CSV (current filtered + sorted)
   const exportMovesCsv = () => {
-    const header = ['Date','SKU','Item','Type','Qty','UoM','Unit Cost','Total Cost','Ref'];
+    const header = ['Date','SKU','Item','Type','Qty','UoM','Unit Cost','Total Cost','Ref','Location'];
     const rows = movesSorted.map(m => [
       new Date(m.created_at).toLocaleString().replaceAll('"','""'),
       (m.item?.sku ?? '').replaceAll('"','""'),
@@ -411,6 +462,7 @@ export default function Stock() {
       m.unit_cost != null ? m.unit_cost.toFixed(2) : '',
       m.total_cost != null ? m.total_cost.toFixed(2) : '',
       (m.ref ?? '').replaceAll('"','""'),
+      (m.location ?? '').replaceAll('"','""'),
     ].map(v => `"${v}"`).join(','));
     const date = new Date().toISOString().slice(0,10);
     downloadCsv(`stock_movements_${date}.csv`, [header.join(','), ...rows]);
@@ -420,14 +472,26 @@ export default function Stock() {
     <div className="grid md:grid-cols-3 gap-4">
       {/* LEFT: Entry form */}
       <div className="card">
-        <h2 className="font-semibold mb-3">Receive / Adjust / Issue / Return</h2>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-semibold">Receive / Adjust / Issue / Return</h2>
+          {/* Scan mode toggle */}
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={scanMode}
+              onChange={(e) => setScanMode(e.target.checked)}
+            />
+            <span>Scan Mode (auto focus SKU)</span>
+          </label>
+        </div>
 
         <form onSubmit={submit} className="space-y-3">
           {/* SKU + Find */}
           <div className="flex gap-2">
             <input
+              ref={skuRef}
               className="input"
-              placeholder="SKU (e.g., TEST-1)"
+              placeholder="SKU (scan barcode here)"
               value={sku}
               onChange={(e) => setSku(e.target.value)}
               onKeyDown={(e) => {
@@ -507,6 +571,7 @@ export default function Stock() {
                 {qtyLabel}
               </label>
               <input
+                ref={qtyRef}
                 className="input"
                 type="number"
                 step="1"
@@ -518,6 +583,17 @@ export default function Stock() {
                   setQty(Number.isFinite(n) ? n : 0);
                 }}
                 placeholder={moveType === 'adjust' ? 'e.g., -2 (lost) or 3 (found)' : 'e.g., 5'}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter') return;
+                  e.preventDefault();
+                  if (moveType === 'receive') {
+                    unitCostRef.current?.focus();
+                    unitCostRef.current?.select?.();
+                  } else {
+                    // For issue/return/adjust, Enter on Qty submits directly
+                    (e.currentTarget.form as HTMLFormElement)?.requestSubmit?.();
+                  }
+                }}
               />
             </div>
 
@@ -525,12 +601,18 @@ export default function Stock() {
               <div>
                 <label className="label">Unit Cost (per {found?.uom_code || 'UoM'})</label>
                 <input
+                  ref={unitCostRef}
                   className="input"
                   type="number"
                   step="0.01"
                   min={0}
                   value={unitCost}
                   onChange={(e) => setUnitCost(parseFloat(e.target.value || '0'))}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter') return;
+                    e.preventDefault();
+                    (e.currentTarget.form as HTMLFormElement)?.requestSubmit?.();
+                  }}
                 />
               </div>
             ) : (
@@ -560,7 +642,7 @@ export default function Stock() {
             )}
           </div>
 
-          {/* Ref & Reason */}
+          {/* Ref / Reason / Location */}
           <input
             className="input"
             placeholder="Reference (PO# etc.)"
@@ -572,6 +654,14 @@ export default function Stock() {
             placeholder="Reason / Note"
             value={reason}
             onChange={(e) => setReason(e.target.value)}
+          />
+
+          {/* NEW: Location field (helpful for receiving) */}
+          <input
+            className="input"
+            placeholder="Item Location (e.g., Rack A3 / Shelf 2)"
+            value={location}
+            onChange={(e) => setLocation(e.target.value)}
           />
 
           <Button type="submit" disabled={loading || !found}>
@@ -588,7 +678,7 @@ export default function Stock() {
           {/* Quick search */}
           <input
             className="input"
-            placeholder="Search (SKU / Item / Type / Ref)…"
+            placeholder="Search (SKU / Item / Type / Ref / Location)…"
             value={movesSearch}
             onChange={(e) => setMovesSearch(e.target.value)}
           />
@@ -689,13 +779,22 @@ export default function Stock() {
                     minWidth={120}
                   />
                 </th>
+                <th>
+                  <SortHeader
+                    label="Location"
+                    active={sortKey==='location'}
+                    dir={sortDir}
+                    onClick={() => toggleSort('location')}
+                    minWidth={120}
+                  />
+                </th>
               </tr>
             </thead>
             <tbody>
               {movesLoading ? (
-                <tr><td colSpan={8} className="p-3 text-sm text-gray-600">Loading stock movements…</td></tr>
+                <tr><td colSpan={9} className="p-3 text-sm text-gray-600">Loading stock movements…</td></tr>
               ) : movesSorted.length === 0 ? (
-                <tr><td colSpan={8} className="p-3 text-sm text-gray-600">No movements found.</td></tr>
+                <tr><td colSpan={9} className="p-3 text-sm text-gray-600">No movements found.</td></tr>
               ) : (
                 movesSorted.map((h, idx) => (
                   <tr key={`${h.created_at}-${idx}`}>
@@ -711,6 +810,7 @@ export default function Stock() {
                       {h.total_cost != null ? `₹ ${Number(h.total_cost).toFixed(2)}` : '-'}
                     </td>
                     <td>{h.ref || '—'}</td>
+                    <td>{h.location || '—'}</td>
                   </tr>
                 ))
               )}
