@@ -25,9 +25,12 @@ interface MoveRow {
   uom_code: string | null;
   unit_cost: number | null;
   total_cost: number | null;
-  location?: string | null; // NEW
+  location?: string | null;
   item: { sku: string; name: string } | null;
 }
+
+/* ---------- New: Per-location balance type ---------- */
+type LocBalance = { name: string; qty: number };
 
 /* ---------- Safe type helpers for UoM ---------- */
 type Uom = { code?: string; name?: string };
@@ -107,8 +110,12 @@ export default function Stock() {
   const [unitCost, setUnitCost] = useState<number>(0);
   const [ref, setRef] = useState<string>('');
   const [reason, setReason] = useState<string>('');
-  const [location, setLocation] = useState<string>(''); // NEW
+  const [location, setLocation] = useState<string>(''); // Selected or typed location
   const [loading, setLoading] = useState<boolean>(false);
+
+  // New: location balances + UI mode
+  const [locBalances, setLocBalances] = useState<LocBalance[]>([]);
+  const [useCustomLocation, setUseCustomLocation] = useState<boolean>(false); // only allowed for receive
 
   // Min qty editor
   const [minQty, setMinQty] = useState<number>(0);
@@ -199,9 +206,52 @@ export default function Stock() {
     }
   };
 
+  // ---------- New: Load per-location balances for a found item ----------
+  const loadItemLocations = async (itemId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('stock_moves')
+        .select('move_type, qty, location, item_id')
+        .eq('item_id', itemId);
+
+      if (error) throw error;
+
+      const map = new Map<string, number>();
+
+      (data ?? []).forEach((r: any) => {
+        const mt = String(r.move_type || '').toLowerCase() as MoveType;
+        const loc = (String(r.location ?? '').trim()) || '(unassigned)';
+        const qRaw = Number(r.qty ?? 0);
+
+        // Calculate delta:
+        // - receive: +qty
+        // - return:  +qty
+        // - issue:   -qty
+        // - adjust:  qty is already delta (+/-)
+        let delta = qRaw;
+        if (mt === 'issue') delta = -Math.abs(qRaw);
+        else if (mt === 'receive' || mt === 'return') delta = Math.abs(qRaw);
+        // adjust uses the value as-is (could be negative or positive)
+
+        map.set(loc, (map.get(loc) ?? 0) + delta);
+      });
+
+      const balances = Array.from(map.entries())
+        .map(([name, qty]) => ({ name, qty }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      setLocBalances(balances);
+    } catch (e) {
+      console.warn('loadItemLocations failed:', e);
+      setLocBalances([]);
+    }
+  };
+
   // ---------- Find by SKU (case-insensitive exact) ----------
   const findBySku = async () => {
     setFound(null);
+    setLocBalances([]);
+    setUseCustomLocation(false);
     const trimmed = sku.trim();
     if (!trimmed) return alert('Please enter SKU');
 
@@ -219,7 +269,7 @@ export default function Stock() {
 
     const uom_code = getUomCode(row.uom as UomField);
 
-    setFound({
+    const foundItem: FoundItem = {
       id: row.id,
       sku: row.sku,
       name: row.name,
@@ -228,14 +278,19 @@ export default function Stock() {
       unit_cost: Number(row.unit_cost ?? 0),
       uom_code,
       low_stock_threshold: row.low_stock_threshold ?? null,
-    });
+    };
 
+    setFound(foundItem);
     setMinQty(Number(row.low_stock_threshold ?? 0));
     setQty(0);
     setUnitCost(0);
     setRef('');
     setReason('');
-    setLocation(''); // reset location for fresh receipt
+    setLocation(''); // reset location for fresh operation
+    setUseCustomLocation(false);
+
+    // Load per-location balances for this item
+    await loadItemLocations(foundItem.id);
 
     // After we find an item, go straight to Qty for speed
     requestAnimationFrame(() => qtyRef.current?.focus());
@@ -266,6 +321,13 @@ export default function Stock() {
     return { total };
   }, [found, qty, costToUse, moveType]);
 
+  // New: computed available qty for the currently selected location
+  const selectedLocQty = useMemo(() => {
+    if (!location) return 0;
+    const foundLoc = locBalances.find(l => l.name === location);
+    return foundLoc?.qty ?? 0;
+  }, [locBalances, location]);
+
   // ---------- Submit ----------
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -280,6 +342,7 @@ export default function Stock() {
       return alert('Please find an item by SKU first');
     }
 
+    // Validate qty semantics by move type
     if (moveType === 'adjust') {
       if (!qty || qty === 0) {
         submittingRef.current = false;
@@ -290,6 +353,46 @@ export default function Stock() {
         submittingRef.current = false;
         return alert('Quantity must be > 0');
       }
+    }
+
+    // Validate location rules
+    if (moveType === 'issue' || moveType === 'return' || moveType === 'adjust') {
+      // For these types, location must be selected from existing options
+      if (!location) {
+        submittingRef.current = false;
+        return alert(`Please select a location for ${moveType}.`);
+      }
+      const exists = locBalances.some(l => l.name === location);
+      if (!exists) {
+        submittingRef.current = false;
+        return alert(`Please choose an existing location for ${moveType}.`);
+      }
+
+      // Prevent issuing more than available at location
+      if (moveType === 'issue' && selectedLocQty < qty) {
+        submittingRef.current = false;
+        return alert(`Insufficient quantity at "${location}". Available: ${selectedLocQty}`);
+      }
+
+      // For adjust (negative), don't allow location to go below zero
+      if (moveType === 'adjust' && qty < 0 && (selectedLocQty + qty) < 0) {
+        submittingRef.current = false;
+        return alert(
+          `Adjustment would make "${location}" negative. Available: ${selectedLocQty}, delta: ${qty}`
+        );
+      }
+    } else if (moveType === 'receive') {
+      // For receive, allow custom location or existing selection (optional)
+      if (useCustomLocation && !location.trim()) {
+        submittingRef.current = false;
+        return alert('Please enter a new location name.');
+      }
+      // If not using custom and not selected, we allow empty (unassigned) if you prefer.
+      // To force selection, uncomment the next lines:
+      // if (!useCustomLocation && !location) {
+      //   submittingRef.current = false;
+      //   return alert('Please select an existing location or choose "Other / New".');
+      // }
     }
 
     setLoading(true);
@@ -344,8 +447,8 @@ export default function Stock() {
         if (error) throw error;
       }
 
-      // --- NEW: attach location (if your stock_moves table has a 'location' column) ---
-      if (location && location.trim()) {
+      // --- Attach location to the new stock_moves row (by client_tx_id) ---
+      if ((location && location.trim()) || (useCustomLocation && location.trim())) {
         try {
           await supabase
             .from('stock_moves')
@@ -357,14 +460,15 @@ export default function Stock() {
         }
       }
 
-      await findBySku();        // refresh the left panel with updated stock/avg cost
-      await loadHistory();      // refresh the movements table
+      await findBySku();        // refresh item + per-location
+      await loadHistory();      // refresh history
 
       setQty(0);
       if (moveType === 'receive') setUnitCost(0);
       setRef('');
       setReason('');
       setLocation('');
+      setUseCustomLocation(false);
 
       if (scanMode) {
         tryFocusSku(true); // back to SKU for next scan
@@ -468,6 +572,88 @@ export default function Stock() {
     downloadCsv(`stock_movements_${date}.csv`, [header.join(','), ...rows]);
   };
 
+  // Helper to render location selector
+  const renderLocationSelector = () => {
+    const hasLocations = locBalances.length > 0;
+
+    if (moveType === 'issue' || moveType === 'return' || moveType === 'adjust') {
+      // Must select existing location
+      return (
+        <div>
+          <label className="label">Location</label>
+          <select
+            className="input"
+            value={location}
+            onChange={(e) => setLocation(e.target.value)}
+            disabled={!found}
+          >
+            <option value="">Select location…</option>
+            {locBalances.map((l) => (
+              <option key={l.name} value={l.name}>
+                {l.name} — {l.qty} {found?.uom_code || ''}
+              </option>
+            ))}
+          </select>
+          {location && (
+            <div className="text-xs text-gray-600 mt-1">
+              Available at <b>{location}</b>: <b>{selectedLocQty}</b> {found?.uom_code || ''}
+            </div>
+          )}
+          {!hasLocations && (
+            <div className="text-xs text-amber-600 mt-1">
+              No existing locations found for this item.
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // Receive: can select existing or type new
+    return (
+      <div>
+        <label className="label">Location (optional)</label>
+        <div className="grid grid-cols-2 gap-2">
+          <select
+            className="input"
+            value={useCustomLocation ? '__NEW__' : (location || '')}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === '__NEW__') {
+                setUseCustomLocation(true);
+                setLocation('');
+              } else {
+                setUseCustomLocation(false);
+                setLocation(v);
+              }
+            }}
+            disabled={!found}
+          >
+            <option value="">{hasLocations ? 'Select existing…' : 'No locations yet'}</option>
+            {locBalances.map((l) => (
+              <option key={l.name} value={l.name}>
+                {l.name} — {l.qty} {found?.uom_code || ''}
+              </option>
+            ))}
+            <option value="__NEW__">Other / New…</option>
+          </select>
+
+          <input
+            className="input"
+            placeholder="Type new location (e.g., Rack A3 / Shelf 2)"
+            value={useCustomLocation ? location : ''}
+            onChange={(e) => setLocation(e.target.value)}
+            disabled={!found || !useCustomLocation}
+          />
+        </div>
+        {(!useCustomLocation && location) && (
+          <div className="text-xs text-gray-600 mt-1">
+            Selected: <b>{location}</b> — Available: <b>{selectedLocQty}</b> {found?.uom_code || ''}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="grid md:grid-cols-3 gap-4">
       {/* LEFT: Entry form */}
@@ -529,6 +715,27 @@ export default function Stock() {
             </div>
           </div>
 
+          {/* New: Per-location stock snapshot */}
+          {found && (
+            <div className="rounded border p-2 bg-gray-50">
+              <div className="text-sm font-medium mb-1">Per-location Stock</div>
+              {locBalances.length === 0 ? (
+                <div className="text-xs text-gray-600">No location splits yet.</div>
+              ) : (
+                <ul className="text-xs text-gray-800 space-y-0.5">
+                  {locBalances.map(l => (
+                    <li key={l.name} className="flex justify-between">
+                      <span>{l.name}</span>
+                      <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                        {l.qty} {found?.uom_code || ''}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
           {/* Minimum qty */}
           <div className="grid grid-cols-3 gap-2">
             <div className="col-span-2">
@@ -555,7 +762,19 @@ export default function Stock() {
             <select
               className="input"
               value={moveType}
-              onChange={(e) => setMoveType(e.target.value as MoveType)}
+              onChange={(e) => {
+                const mt = e.target.value as MoveType;
+                setMoveType(mt);
+
+                // When switching to issue/return/adjust, enforce existing selection
+                if (mt === 'issue' || mt === 'return' || mt === 'adjust') {
+                  setUseCustomLocation(false);
+                  // keep previously selected existing location if it still exists; otherwise clear
+                  if (location && !locBalances.some(l => l.name === location)) {
+                    setLocation('');
+                  }
+                }
+              }}
             >
               <option value="receive">Receive</option>
               <option value="adjust">Adjust</option>
@@ -595,6 +814,11 @@ export default function Stock() {
                   }
                 }}
               />
+              {(moveType === 'issue' || moveType === 'adjust') && location && (
+                <div className="text-xs text-gray-600 mt-1">
+                  Available at <b>{location}</b>: <b>{selectedLocQty}</b> {found?.uom_code || ''}
+                </div>
+              )}
             </div>
 
             {moveType === 'receive' ? (
@@ -642,7 +866,7 @@ export default function Stock() {
             )}
           </div>
 
-          {/* Ref / Reason / Location */}
+          {/* Ref / Reason */}
           <input
             className="input"
             placeholder="Reference (PO# etc.)"
@@ -656,13 +880,8 @@ export default function Stock() {
             onChange={(e) => setReason(e.target.value)}
           />
 
-          {/* NEW: Location field (helpful for receiving) */}
-          <input
-            className="input"
-            placeholder="Item Location (e.g., Rack A3 / Shelf 2)"
-            value={location}
-            onChange={(e) => setLocation(e.target.value)}
-          />
+          {/* NEW: Location selector (smart) */}
+          {renderLocationSelector()}
 
           <Button type="submit" disabled={loading || !found}>
             {loading ? 'Saving...' : 'Save'}
