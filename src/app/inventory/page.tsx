@@ -12,6 +12,13 @@ interface InvRow {
   unit_cost: number;
   uom_code: string;
   low_stock_threshold: number | null;
+
+  // per-location aggregates
+  locations: { name: string; qty: number }[];
+  // original (unfiltered) per-location aggregates (for toggle behavior)
+  locations_all: { name: string; qty: number }[];
+  // flattened text for UI/CSV/search (for the currently applied zero-qty toggle)
+  locations_text: string;
 }
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -26,7 +33,15 @@ function downloadCsv(filename: string, rows: string[]) {
   URL.revokeObjectURL(url);
 }
 
-type SortKey = 'sku' | 'name' | 'uom_code' | 'stock_qty' | 'low_stock_threshold' | 'unit_cost' | 'total_value';
+type SortKey =
+  | 'sku'
+  | 'name'
+  | 'uom_code'
+  | 'stock_qty'
+  | 'low_stock_threshold'
+  | 'unit_cost'
+  | 'total_value'
+  | 'locations_text';
 
 function SortHeader({
   label, active, dir, onClick, alignRight = false, minWidth,
@@ -48,6 +63,11 @@ function SortHeader({
   );
 }
 
+type LocationScope = 'all_items' | 'has_stock' | 'appears_any'; 
+// all_items: ignore location selection on filtering
+// has_stock: only items with qty>0 at selected location
+// appears_any: items that have any movement at selected location (qty can be 0 after net)
+
 export default function InventoryPage() {
   const [loading, setLoading] = useState<boolean>(true);
   const [rows, setRows] = useState<InvRow[]>([]);
@@ -56,6 +76,12 @@ export default function InventoryPage() {
 
   const [sortKey, setSortKey] = useState<SortKey>('sku');
   const [sortDir, setSortDir] = useState<'asc'|'desc'>('asc');
+
+  // NEW: UI state for location filtering and display options
+  const [allLocations, setAllLocations] = useState<string[]>([]);
+  const [selectedLocation, setSelectedLocation] = useState<string>(''); // '' = no selection
+  const [locationScope, setLocationScope] = useState<LocationScope>('all_items');
+  const [showZeroQtyLocations, setShowZeroQtyLocations] = useState<boolean>(false);
 
   function toggleSort(k: SortKey) {
     setSortKey(prev => {
@@ -72,6 +98,7 @@ export default function InventoryPage() {
     try {
       setLoading(true);
 
+      // 1) Load base items
       const { data: itemsData, error: itemsErr } = await supabase
         .from('items')
         .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id')
@@ -79,6 +106,7 @@ export default function InventoryPage() {
 
       if (itemsErr) throw itemsErr;
 
+      // 2) Load UoMs for mapping
       const { data: uoms } = await supabase
         .from('units_of_measure')
         .select('id, code');
@@ -86,15 +114,67 @@ export default function InventoryPage() {
       const uomMap = new Map<string, string>();
       (uoms ?? []).forEach((u: any) => uomMap.set(u.id, u.code));
 
-      const mapped: InvRow[] = (itemsData ?? []).map((it: any) => ({
-        id: it.id,
-        sku: it.sku,
-        name: it.name,
-        stock_qty: Number(it.stock_qty ?? 0),
-        unit_cost: Number(it.unit_cost ?? 0),
-        low_stock_threshold: it.low_stock_threshold ?? null,
-        uom_code: it.uom_id ? (uomMap.get(it.uom_id) ?? '') : '',
-      }));
+      // 3) Load stock_moves for per-location aggregation
+      const { data: moves, error: movesErr } = await supabase
+        .from('stock_moves')
+        .select('item_id, move_type, qty, location');
+
+      if (movesErr) throw movesErr;
+
+      // Build: itemId -> (location -> qty)
+      const perItemLocMap = new Map<string, Map<string, number>>();
+      const allLocSet = new Set<string>();
+
+      (moves ?? []).forEach((m: any) => {
+        const itemId = String(m.item_id);
+        const mt = String(m.move_type || '').toLowerCase();
+        const loc = (String(m.location ?? '').trim()) || '(unassigned)';
+        const qRaw = Number(m.qty ?? 0);
+
+        let delta = qRaw;
+        if (mt === 'issue') delta = -Math.abs(qRaw);
+        else if (mt === 'receive' || mt === 'return') delta = Math.abs(qRaw);
+        // adjust uses provided sign as-is
+
+        if (!perItemLocMap.has(itemId)) perItemLocMap.set(itemId, new Map());
+        const locMap = perItemLocMap.get(itemId)!;
+        locMap.set(loc, (locMap.get(loc) ?? 0) + delta);
+
+        // Collect the location names for the filter dropdown
+        allLocSet.add(loc);
+      });
+
+      const allLocArr = Array.from(allLocSet.values()).sort((a, b) => a.localeCompare(b));
+      setAllLocations(allLocArr);
+
+      // 4) Map into rows
+      const mapped: InvRow[] = (itemsData ?? []).map((it: any) => {
+        const itemId = String(it.id);
+        const locMap = perItemLocMap.get(itemId) ?? new Map<string, number>();
+
+        // all locations (including zero qty)
+        const locations_all = Array.from(locMap.entries())
+          .map(([name, qty]) => ({ name, qty }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+
+        // default visible locations (filtered by showZeroQtyLocations; we’ll re-apply later)
+        const filteredLocs = locations_all.filter(l => l.qty !== 0);
+
+        return {
+          id: it.id,
+          sku: it.sku,
+          name: it.name,
+          stock_qty: Number(it.stock_qty ?? 0),
+          unit_cost: Number(it.unit_cost ?? 0),
+          low_stock_threshold: it.low_stock_threshold ?? null,
+          uom_code: it.uom_id ? (uomMap.get(it.uom_id) ?? '') : '',
+          locations: filteredLocs,          // initial (will be replaced by memo below to reflect toggle)
+          locations_all,                    // keep the full list
+          locations_text: filteredLocs.length
+            ? filteredLocs.map(l => `${l.name}: ${l.qty}`).join(' | ')
+            : '',
+        };
+      });
 
       setRows(mapped);
     } catch (e) {
@@ -109,20 +189,58 @@ export default function InventoryPage() {
     loadInventory();
   }, []);
 
-  const filtered = useMemo(() => {
+  // NEW: Apply "showZeroQtyLocations" toggle at display-time
+  const rowsWithDisplayLocations = useMemo(() => {
+    return rows.map(row => {
+      const displayLocs = showZeroQtyLocations
+        ? row.locations_all
+        : row.locations_all.filter(l => l.qty !== 0);
+
+      return {
+        ...row,
+        locations: displayLocs,
+        locations_text: displayLocs.length
+          ? displayLocs.map(l => `${l.name}: ${l.qty}`).join(' | ')
+          : '',
+      };
+    });
+  }, [rows, showZeroQtyLocations]);
+
+  // Filter by search + lowOnly first
+  const prefiltered = useMemo(() => {
     const t = search.trim().toLowerCase();
-    return rows.filter((r) => {
+    return rowsWithDisplayLocations.filter((r) => {
       const match =
         !t ||
         r.sku.toLowerCase().includes(t) ||
-        (r.name ?? '').toLowerCase().includes(t);
+        (r.name ?? '').toLowerCase().includes(t) ||
+        (r.locations_text ?? '').toLowerCase().includes(t);
       const isLow =
         r.low_stock_threshold != null &&
         r.low_stock_threshold > 0 &&
         r.stock_qty <= r.low_stock_threshold;
       return match && (!lowOnly || isLow);
     });
-  }, [rows, search, lowOnly]);
+  }, [rowsWithDisplayLocations, search, lowOnly]);
+
+  // NEW: Apply Location filter with scope
+  const filtered = useMemo(() => {
+    if (!selectedLocation || locationScope === 'all_items') return prefiltered;
+
+    if (locationScope === 'has_stock') {
+      // Keep items that have qty > 0 at the selected location
+      return prefiltered.filter(r => {
+        const loc = r.locations_all.find(l => l.name === selectedLocation);
+        return !!loc && Number(loc.qty) > 0;
+      });
+    }
+
+    // appears_any: Keep items that have this location in their map at all
+    return prefiltered.filter(r => {
+      const loc = r.locations_all.find(l => l.name === selectedLocation);
+      return !!loc; // qty may be 0
+    });
+  }, [prefiltered, selectedLocation, locationScope]);
 
   const sorted = useMemo(() => {
     const cp = filtered.map(r => ({
@@ -136,11 +254,12 @@ export default function InventoryPage() {
       switch (sortKey) {
         case 'sku':                 va = a.sku?.toLowerCase() ?? ''; vb = b.sku?.toLowerCase() ?? ''; break;
         case 'name':                va = a.name?.toLowerCase() ?? ''; vb = b.name?.toLowerCase() ?? ''; break;
-        case 'uom_code':            va = a.uom_code?.toLowerCase() ?? ''; vb = b.uom_code?.toLowerCase() ?? ''; break;
+      case 'uom_code':            va = a.uom_code?.toLowerCase() ?? ''; vb = b.uom_code?.toLowerCase() ?? ''; break;
         case 'stock_qty':           va = Number(a.stock_qty); vb = Number(b.stock_qty); break;
         case 'low_stock_threshold': va = Number(a.low_stock_threshold ?? -Infinity); vb = Number(b.low_stock_threshold ?? -Infinity); break;
         case 'unit_cost':           va = Number(a.unit_cost); vb = Number(b.unit_cost); break;
         case 'total_value':         va = Number(a.total_value); vb = Number(b.total_value); break;
+        case 'locations_text':      va = (a.locations_text ?? '').toLowerCase(); vb = (b.locations_text ?? '').toLowerCase(); break;
         default:                    va = 0; vb = 0;
       }
 
@@ -165,7 +284,7 @@ export default function InventoryPage() {
   }, [sorted]);
 
   const exportCsv = () => {
-    const header = ['SKU','Item','UoM','Qty','Minimum','Avg Unit Cost','Total Value'];
+    const header = ['SKU','Item','UoM','Qty','Minimum','Avg Unit Cost','Total Value','Locations'];
     const lines = sorted.map((r) => {
       const total = r.stock_qty * r.unit_cost;
       return [
@@ -176,6 +295,7 @@ export default function InventoryPage() {
         r.low_stock_threshold != null ? String(r.low_stock_threshold) : '',
         r.unit_cost.toFixed(2),
         total.toFixed(2),
+        (r.locations_text ?? '').replaceAll('"','""'),
       ].map(v => `"${v}"`).join(',');
     });
     const date = new Date().toISOString().slice(0,10);
@@ -188,13 +308,15 @@ export default function InventoryPage() {
         <div className="flex flex-wrap items-end gap-3 mb-3">
           <div className="text-lg font-semibold mr-auto">Inventory</div>
 
+          {/* Search */}
           <input
             className="input"
-            placeholder="Search by SKU or Name…"
+            placeholder="Search by SKU, Name, or Location…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
 
+          {/* Low only */}
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -203,6 +325,41 @@ export default function InventoryPage() {
             />
             Low stock only
           </label>
+
+          {/* NEW: Location Filter controls */}
+          <div className="flex items-center gap-2">
+            <select
+              className="input"
+              value={selectedLocation}
+              onChange={(e) => setSelectedLocation(e.target.value)}
+              title="Filter by location"
+            >
+              <option value="">All locations</option>
+              {allLocations.map((loc) => (
+                <option key={loc} value={loc}>{loc}</option>
+              ))}
+            </select>
+
+            <select
+              className="input"
+              value={locationScope}
+              onChange={(e) => setLocationScope(e.target.value as LocationScope)}
+              title="Location filter scope"
+            >
+              <option value="all_items">Scope: All items</option>
+              <option value="has_stock">Scope: Items with stock at location</option>
+              <option value="appears_any">Scope: Items that appear at location</option>
+            </select>
+
+            <label className="flex items-center gap-2 text-sm" title="Show zero-qty locations in the Locations column">
+              <input
+                type="checkbox"
+                checked={showZeroQtyLocations}
+                onChange={(e) => setShowZeroQtyLocations(e.target.checked)}
+              />
+              Show zero-qty
+            </label>
+          </div>
 
           <Button type="button" onClick={exportCsv}>Export CSV</Button>
           <Button type="button" onClick={loadInventory}>Refresh</Button>
@@ -238,6 +395,9 @@ export default function InventoryPage() {
                   <th className="text-right">
                     <SortHeader label="Total Value (₹)" active={sortKey==='total_value'} dir={sortDir} onClick={() => toggleSort('total_value')} alignRight minWidth={140} />
                   </th>
+                  <th>
+                    <SortHeader label="Locations" active={sortKey==='locations_text'} dir={sortDir} onClick={() => toggleSort('locations_text')} minWidth={260} />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -263,6 +423,17 @@ export default function InventoryPage() {
                       <td className="text-right" style={{ minWidth: 140, fontVariantNumeric: 'tabular-nums' }}>
                         ₹ {total.toFixed(2)}
                       </td>
+                      <td style={{ minWidth: 260 }}>
+                        {r.locations.length === 0 ? '—' : (
+                          <div className="flex flex-wrap gap-1">
+                            {r.locations.map(l => (
+                              <span key={l.name} className="inline-flex items-center px-2 py-0.5 rounded bg-gray-100 text-xs text-gray-800">
+                                {l.name}: {l.qty}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}
@@ -274,6 +445,7 @@ export default function InventoryPage() {
                   <td className="text-right" style={{ minWidth: 90 }}>—</td>
                   <td className="text-right" style={{ minWidth: 120 }}>—</td>
                   <td className="text-right" style={{ minWidth: 140, fontVariantNumeric: 'tabular-nums' }}>₹ {totals.value.toFixed(2)}</td>
+                  <td>—</td>
                 </tr>
               </tfoot>
             </table>
