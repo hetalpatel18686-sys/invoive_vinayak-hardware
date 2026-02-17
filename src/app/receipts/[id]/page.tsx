@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 
@@ -257,6 +257,79 @@ export default function ReceiptPage() {
 
   const docTitle = invoice?.doc_type === 'return' ? 'Return Receipt' : 'Payment Receipt';
 
+  /* ----------------- Print Preview state/refs ----------------- */
+  const [showPreview, setShowPreview] = useState(false);
+  const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
+
+  // Build a full HTML doc for the iframe using the current .print-area’s HTML.
+  const buildPreviewHtml = (): string => {
+    const area = document.querySelector('.print-area') as HTMLElement | null;
+    const content = area ? area.outerHTML : '<div class="p-4">Nothing to preview</div>';
+
+    // Collect the in-page <style> tags (to carry your print CSS & table fixes)
+    const styles = Array.from(document.querySelectorAll('style'))
+      .map(s => s.outerHTML)
+      .join('\n');
+
+    // Also carry linked stylesheets (Tailwind, etc.)
+    const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+      .map(l => l.outerHTML)
+      .join('\n');
+
+    return `
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    ${links}
+    ${styles}
+    <style>
+      /* Minimal reset for iframe */
+      html, body { background: white; }
+      /* Ensure preview shows the same area nicely centered */
+      .preview-wrap { max-width: 900px; margin: 12px auto; padding: 0 8px; }
+    </style>
+    <title>${docTitle || 'Preview'}</title>
+  </head>
+  <body>
+    <div class="preview-wrap">
+      ${content}
+    </div>
+  </body>
+</html>
+    `.trim();
+  };
+
+  const openPreview = async () => {
+    // Wait for fonts & images so preview captures the final layout
+    await waitForFontsIfSupported();
+    const area = document.querySelector('.print-area') as HTMLElement | null;
+    await waitForImages(area);
+    setShowPreview(true);
+
+    // After modal is visible, write HTML into iframe
+    setTimeout(() => {
+      const iframe = previewIframeRef.current;
+      if (!iframe) return;
+      const html = buildPreviewHtml();
+      const doc = iframe.contentDocument || iframe.contentWindow?.document;
+      if (!doc) return;
+      doc.open();
+      doc.write(html);
+      doc.close();
+    }, 0);
+  };
+
+  const printFromPreview = () => {
+    const iframe = previewIframeRef.current;
+    if (!iframe) return;
+    const win = iframe.contentWindow;
+    if (!win) return;
+    // Use a tiny delay to ensure the iframe fully laid out before print
+    setTimeout(() => win.print(), 50);
+  };
+
   return (
     <div className="min-h-screen bg-white p-4 print:p-0">
       <style>{`
@@ -309,10 +382,66 @@ export default function ReceiptPage() {
           /* Keep the same locking for print explicitly */
           .inv-table { table-layout: fixed !important; width: 100% !important; }
         }
+
+        /* ----- Preview Modal Styles (screen only) ----- */
+        .preview-backdrop {
+          position: fixed;
+          inset: 0;
+          background: rgba(0,0,0,0.45);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 9999;
+        }
+        .preview-dialog {
+          background: #fff;
+          width: 95vw;
+          max-width: 1024px;
+          height: 88vh;
+          display: flex;
+          flex-direction: column;
+          border-radius: 8px;
+          box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+        }
+        .preview-header {
+          padding: 10px 12px;
+          border-bottom: 1px solid #e5e7eb;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          justify-content: space-between;
+        }
+        .preview-actions {
+          display: flex;
+          gap: 8px;
+        }
+        .preview-iframe {
+          border: 0;
+          width: 100%;
+          flex: 1;
+          background: white;
+        }
+        .btn {
+          padding: 6px 10px;
+          border-radius: 6px;
+          font-size: 14px;
+          cursor: pointer;
+        }
+        .btn-primary { background:#111827; color:#fff; }
+        .btn-light { background:#e5e7eb; color:#111827; }
+        .btn-primary:hover { background:#0b1220; }
+        .btn-light:hover { background:#d1d5db; }
       `}</style>
 
       {/* Controls (not printed) */}
       <div className="no-print mb-4 flex gap-2">
+        <button
+          type="button"
+          onClick={openPreview}
+          className="px-3 py-2 rounded bg-white text-gray-900 border border-gray-300 hover:bg-gray-50"
+        >
+          Preview
+        </button>
         <button
           type="button"
           onClick={() => window.print()}
@@ -328,6 +457,22 @@ export default function ReceiptPage() {
           Close
         </button>
       </div>
+
+      {/* ---- Preview Modal ---- */}
+      {showPreview && (
+        <div className="preview-backdrop no-print" role="dialog" aria-modal="true">
+          <div className="preview-dialog">
+            <div className="preview-header">
+              <div className="font-semibold">{docTitle || 'Print Preview'}</div>
+              <div className="preview-actions">
+                <button className="btn btn-light" onClick={() => setShowPreview(false)}>Close</button>
+                <button className="btn btn-primary" onClick={printFromPreview}>Print</button>
+              </div>
+            </div>
+            <iframe ref={previewIframeRef} className="preview-iframe" title="Print Preview" />
+          </div>
+        </div>
+      )}
 
       <div className="print-area mx-auto max-w-4xl">
         {/* Brand header — logo on the LEFT */}
