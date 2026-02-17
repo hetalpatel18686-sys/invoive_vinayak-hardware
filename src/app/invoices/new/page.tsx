@@ -1,5 +1,3 @@
-// src/app/invoices/new/page.tsx
-
 'use client';
 
 export const dynamic = 'force-dynamic';
@@ -313,9 +311,39 @@ export default function NewInvoicePage() {
     }));
   };
 
+  // ===== Debounced SKU auto-lookup (per row)
+  const SKU_LOOKUP_DEBOUNCE_MS = 300;
+  const skuTimersRef = useRef<Record<string, any>>({});
+
+  useEffect(() => {
+    // Cleanup on unmount
+    return () => {
+      const timers = skuTimersRef.current || {};
+      Object.keys(timers).forEach(k => {
+        try { clearTimeout(timers[k]); } catch {}
+      });
+    };
+  }, []);
+
   // ----- row setters (respect rounding rule)
-  const setSkuInput = (rowId: string, text: string) =>
+  const setSkuInput = (rowId: string, text: string) => {
+    // Update the value immediately for UX
     setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text } : r));
+
+    // Debounce lookup (sale mode only; return mode has readOnly SKU)
+    if (docType !== 'return') {
+      const trimmed = (text || '').trim();
+      // Clear any existing pending timer for this row
+      if (skuTimersRef.current[rowId]) {
+        try { clearTimeout(skuTimersRef.current[rowId]); } catch {}
+      }
+      if (trimmed) {
+        skuTimersRef.current[rowId] = setTimeout(() => {
+          setItemBySku(rowId, trimmed);
+        }, SKU_LOOKUP_DEBOUNCE_MS);
+      }
+    }
+  };
 
   const setDescription = (rowId: string, desc: string) =>
     setRows(prev => prev.map(r => r.id === rowId ? { ...r, description: desc } : r));
@@ -785,15 +813,15 @@ export default function NewInvoicePage() {
 
         {/* Pure Invoice Area */}
         <div className="print-area">
-          {/* 🆕 Brand header (visible to customer) */}
-          <div className="mb-3 flex items-start justify-between">
+          {/* Brand header (visible to customer) - LOGO LEFT, TEXT RIGHT */}
+          <div className="mb-3 flex items-start gap-3">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            {brandLogo ? <img src={brandLogo} alt="logo" className="h-12 w-12 rounded bg-white object-contain" /> : null}
             <div>
               <div className="text-2xl font-bold text-orange-600">{brandName}</div>
               <div className="text-sm text-gray-700">{brandAddress}</div>
               <div className="text-sm text-gray-700">Phone: {brandPhone}</div>
             </div>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            {brandLogo ? <img src={brandLogo} alt="logo" className="h-12 w-12 rounded bg-white object-contain" /> : null}
           </div>
 
           {/* Minimal doc heading */}
@@ -1203,7 +1231,7 @@ export default function NewInvoicePage() {
                       <td>
                         <input
                           className="input"
-                          placeholder="Type/Scan SKU, then Enter"
+                          placeholder="Type/Scan SKU (auto-lookup) or press Enter"
                           value={r.sku_input}
                           onChange={(e) => setSkuInput(r.id, e.target.value)}
                           onKeyDown={(e) => {
