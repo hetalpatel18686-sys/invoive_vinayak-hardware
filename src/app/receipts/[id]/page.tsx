@@ -77,7 +77,7 @@ export default function ReceiptPage() {
   const [itemsById, setItemsById] = useState<Map<string, any>>(new Map());
   const [uomCodeById, setUomCodeById] = useState<Map<string, string>>(new Map());
 
-  // 🔥 All payments for the invoice (to compute Paid In/Out/Net/Balance like your first screenshot)
+  // 🔥 All payments for the invoice (to compute Paid In/Out/Net/Balance)
   const [allPayments, setAllPayments] = useState<any[]>([]);
 
   const dataReady = useMemo(
@@ -98,7 +98,7 @@ export default function ReceiptPage() {
     return { subtotal: ceilRupee(subtotal), tax: ceilRupee(tax), grand: ceilRupee(subtotal + tax) };
   }, [lines]);
 
-  // 🔢 Payment summary (like your first screenshot)
+  // 🔢 Payment summary
   const paymentSummary = useMemo(() => {
     const paidIn = allPayments
       .filter(p => p.direction === 'in' && !p.is_void)
@@ -262,18 +262,21 @@ export default function ReceiptPage() {
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
 
   // Build a full HTML doc for the iframe using the current .print-area’s HTML.
+  // This version filters out Next.js "hide FOUC" styles that can blank the preview.
   const buildPreviewHtml = (): string => {
     const area = document.querySelector('.print-area') as HTMLElement | null;
     const content = area ? area.outerHTML : '<div class="p-4">Nothing to preview</div>';
 
-    // Collect the in-page <style> tags (to carry your print CSS & table fixes)
+    // Copy styles but SKIP Next.js font/FOUC hiders
     const styles = Array.from(document.querySelectorAll('style'))
-      .map(s => s.outerHTML)
+      .filter((s) => !s.getAttribute('data-next-hide-fouc') && !s.getAttribute('data-next-font'))
+      .map((s) => s.outerHTML)
       .join('\n');
 
-    // Also carry linked stylesheets (Tailwind, etc.)
+    // Copy linked styles but SKIP Next.js font links
     const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
-      .map(l => l.outerHTML)
+      .filter((l) => !l.getAttribute('data-next-font'))
+      .map((l) => l.outerHTML)
       .join('\n');
 
     return `
@@ -285,12 +288,19 @@ export default function ReceiptPage() {
     ${links}
     ${styles}
     <style>
-      /* Minimal reset for iframe */
+      /* Ensure content is visible inside preview iframe */
       html, body { background: white; }
-      /* Ensure preview shows the same area nicely centered */
+      body { visibility: visible !important; opacity: 1 !important; display: block !important; }
+
+      /* Neutralize any hide‑FOUC styles if they slipped through */
+      [data-next-hide-fouc] { display: contents !important; }
+
+      /* Keep the same table behavior in preview */
+      .inv-table { table-layout: fixed !important; width: 100% !important; border-collapse: collapse; }
+      .col-right { text-align: right !important; white-space: nowrap !important; }
       .preview-wrap { max-width: 900px; margin: 12px auto; padding: 0 8px; }
     </style>
-    <title>${docTitle || 'Preview'}</title>
+    <title>${document.title || 'Preview'}</title>
   </head>
   <body>
     <div class="preview-wrap">
@@ -298,7 +308,7 @@ export default function ReceiptPage() {
     </div>
   </body>
 </html>
-    `.trim();
+`.trim();
   };
 
   const openPreview = async () => {
@@ -306,18 +316,14 @@ export default function ReceiptPage() {
     await waitForFontsIfSupported();
     const area = document.querySelector('.print-area') as HTMLElement | null;
     await waitForImages(area);
+
     setShowPreview(true);
 
-    // After modal is visible, write HTML into iframe
+    // After modal is visible, write HTML into iframe via srcdoc (more robust than doc.write)
     setTimeout(() => {
       const iframe = previewIframeRef.current;
       if (!iframe) return;
-      const html = buildPreviewHtml();
-      const doc = iframe.contentDocument || iframe.contentWindow?.document;
-      if (!doc) return;
-      doc.open();
-      doc.write(html);
-      doc.close();
+      iframe.srcdoc = buildPreviewHtml();
     }, 0);
   };
 
@@ -326,7 +332,7 @@ export default function ReceiptPage() {
     if (!iframe) return;
     const win = iframe.contentWindow;
     if (!win) return;
-    // Use a tiny delay to ensure the iframe fully laid out before print
+    // Small delay to ensure layout is ready
     setTimeout(() => win.print(), 50);
   };
 
