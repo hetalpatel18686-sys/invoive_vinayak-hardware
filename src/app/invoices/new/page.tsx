@@ -325,6 +325,26 @@ export default function NewInvoicePage() {
     };
   }, []);
 
+  // Map of refs for each row's SKU input (to focus new rows)
+  const skuInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const focusSku = (rowId: string) => {
+    // Two frames: ensure element is mounted
+    requestAnimationFrame(() => {
+      const el = skuInputRefs.current[rowId];
+      if (el) {
+        el.focus();
+        // Optional select helps overwrite quickly when scanning
+        try { el.select(); } catch {}
+      } else {
+        // Fallback in case it wasn't ready yet
+        setTimeout(() => {
+          const el2 = skuInputRefs.current[rowId];
+          if (el2) { el2.focus(); try { el2.select(); } catch {} }
+        }, 50);
+      }
+    });
+  };
+
   // ----- row setters (respect rounding rule)
   const setSkuInput = (rowId: string, text: string) => {
     // Update the value immediately for UX
@@ -372,7 +392,18 @@ export default function NewInvoicePage() {
       return { ...r, return_qty: clamped };
     }));
 
-  const addRow = () => setRows(prev => [...prev, makeEmptyRow()]);
+  // ---- Add row + auto-focus its SKU
+  const addRow = () => {
+    const newRow: Row = {
+      id: makeId(), sku_input: '', item_id: '', description: '', uom_code: '',
+      base_cost: 0, qty: 1, margin_pct: 0, tax_rate: 0, unit_price: 0,
+      issued_margin_pct: 0, return_qty: 0,
+    };
+    setRows(prev => [...prev, newRow]);
+    // Focus the new row's SKU input after it's rendered
+    setTimeout(() => focusSku(newRow.id), 0);
+  };
+
   const removeRow = (rowId: string) => setRows(prev => prev.filter(r => r.id !== rowId));
 
   // ----- Return: load items by invoice no
@@ -1237,6 +1268,7 @@ export default function NewInvoicePage() {
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') { e.preventDefault(); setItemBySku(r.id, r.sku_input); }
                           }}
+                          ref={(el) => { skuInputRefs.current[r.id] = el; }}
                         />
                       </td>
                       <td><input className="input" placeholder="Description" value={r.description} onChange={(e) => setDescription(r.id, e.target.value)} /></td>
