@@ -260,12 +260,54 @@ export default function ReceiptPage() {
   return (
     <div className="min-h-screen bg-white p-4 print:p-0">
       <style>{`
+        /* ====== Screen & Print: numeric columns and table behavior ====== */
+        .inv-table {
+          table-layout: fixed !important;
+          width: 100% !important;
+          border-collapse: collapse;
+          font-variant-numeric: tabular-nums;
+          -moz-font-feature-settings: "tnum";
+          -webkit-font-feature-settings: "tnum";
+          font-feature-settings: "tnum";
+        }
+        .inv-table th, .inv-table td {
+          padding: 4px 6px !important;
+          vertical-align: middle !important;
+        }
+        .col-right {
+          text-align: right !important;
+          white-space: nowrap !important;
+          font-variant-numeric: tabular-nums;
+          -moz-font-feature-settings: "tnum";
+          -webkit-font-feature-settings: "tnum";
+          font-feature-settings: "tnum";
+        }
+
+        /* Lock widths by column index (only for the invoice items table) */
+        .inv-table th:nth-child(1),
+        .inv-table td:nth-child(1) { width: 15% !important; }
+        .inv-table th:nth-child(2),
+        .inv-table td:nth-child(2) { width: 35% !important; }
+        .inv-table th:nth-child(3),
+        .inv-table td:nth-child(3) { width: 10% !important; }
+        .inv-table th:nth-child(4),
+        .inv-table td:nth-child(4) { width: 10% !important; }
+        .inv-table th:nth-child(5),
+        .inv-table td:nth-child(5) { width: 10% !important; }
+        .inv-table th:nth-child(6),
+        .inv-table td:nth-child(6) { width: 10% !important; }
+        .inv-table th:nth-child(7),
+        .inv-table td:nth-child(7) { width: 10% !important; }
+
         @media print {
           @page { margin: 8mm; }
           body * { visibility: hidden !important; }
           .print-area, .print-area * { visibility: visible !important; }
           .print-area { position: absolute; left: 0; top: 0; width: 100%; }
           .no-print { display: none !important; }
+
+          /* Keep the same locking for print explicitly */
+          .inv-table { table-layout: fixed !important; width: 100% !important; }
         }
       `}</style>
 
@@ -355,16 +397,27 @@ export default function ReceiptPage() {
                   <div className="text-sm text-gray-600">No items found for this invoice.</div>
                 ) : (
                   <div className="overflow-auto">
-                    <table className="table w-full">
+                    <table className="table inv-table w-full">
+                      {/* Hard column widths to guarantee print alignment */}
+                      <colgroup>
+                        <col style={{ width: '15%' }} />
+                        <col style={{ width: '35%' }} />
+                        <col style={{ width: '10%' }} />
+                        <col style={{ width: '10%' }} />
+                        <col style={{ width: '10%' }} />
+                        <col style={{ width: '10%' }} />
+                        <col style={{ width: '10%' }} />
+                      </colgroup>
+
                       <thead>
                         <tr>
                           <th>SKU</th>
                           <th style={{ minWidth: 220 }}>Description</th>
                           <th>UoM</th>
-                          <th className="text-right">Qty</th>
-                          <th className="text-right">Unit</th>
-                          <th className="text-right">Tax %</th>
-                          <th className="text-right">Line Total</th>
+                          <th className="col-right">Qty</th>
+                          <th className="col-right">Unit</th>
+                          <th className="col-right">Tax %</th>
+                          <th className="col-right">Line Total</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -376,10 +429,10 @@ export default function ReceiptPage() {
                               <td>{it?.sku || ''}</td>
                               <td>{ln.description || it?.name || ''}</td>
                               <td>{uomCode || '-'}</td>
-                              <td className="text-right">{Number(ln.qty || 0)}</td>
-                              <td className="text-right">{fmt(ceilRupee(ln.unit_price))}</td>
-                              <td className="text-right">{Number(ln.tax_rate || 0).toFixed(2)}</td>
-                              <td className="text-right">{fmt(ceilRupee(ln.line_total))}</td>
+                              <td className="col-right">{Number(ln.qty || 0)}</td>
+                              <td className="col-right">{fmt(ceilRupee(ln.unit_price))}</td>
+                              <td className="col-right">{Number(ln.tax_rate || 0).toFixed(2)}</td>
+                              <td className="col-right">{fmt(ceilRupee(ln.line_total))}</td>
                             </tr>
                           );
                         })}
@@ -387,18 +440,18 @@ export default function ReceiptPage() {
                       <tfoot>
                         <tr>
                           <td colSpan={5}></td>
-                          <td className="text-right font-medium">Subtotal</td>
-                          <td className="text-right">{fmt(computedTotals.subtotal)}</td>
+                          <td className="col-right font-medium">Subtotal</td>
+                          <td className="col-right">{fmt(computedTotals.subtotal)}</td>
                         </tr>
                         <tr>
                           <td colSpan={5}></td>
-                          <td className="text-right font-medium">Tax</td>
-                          <td className="text-right">{fmt(computedTotals.tax)}</td>
+                          <td className="col-right font-medium">Tax</td>
+                          <td className="col-right">{fmt(computedTotals.tax)}</td>
                         </tr>
                         <tr className="font-semibold">
                           <td colSpan={5}></td>
-                          <td className="text-right">Total</td>
-                          <td className="text-right">{fmt(invoice?.grand_total ?? computedTotals.grand)}</td>
+                          <td className="col-right">Total</td>
+                          <td className="col-right">{fmt(invoice?.grand_total ?? computedTotals.grand)}</td>
                         </tr>
                       </tfoot>
                     </table>
@@ -421,7 +474,7 @@ export default function ReceiptPage() {
                           <th>Method</th>
                           <th>Direction</th>
                           <th>Reference</th>
-                          <th className="text-right">Amount</th>
+                          <th className="col-right">Amount</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -431,7 +484,7 @@ export default function ReceiptPage() {
                             <td className="capitalize">{p.method}</td>
                             <td className="uppercase">{p.direction}</td>
                             <td>{p.reference || '—'}</td>
-                            <td className="text-right">{fmt(ceilRupee(p.amount))}</td>
+                            <td className="col-right">{fmt(ceilRupee(p.amount))}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -439,7 +492,7 @@ export default function ReceiptPage() {
                   </div>
                 )}
 
-                {/* Two summary cards below the table (like your first screenshot) */}
+                {/* Two summary cards below the table */}
                 <div className="mt-2 grid sm:grid-cols-2 gap-3">
                   <div className="border rounded p-2">
                     <div className="flex justify-between"><div>Paid In</div><div>{fmt(paymentSummary.paidIn)}</div></div>
