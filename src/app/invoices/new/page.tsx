@@ -43,6 +43,11 @@ interface Row {
   unit_price: number;
   issued_margin_pct?: number;
   return_qty?: number;
+
+  /** NEW: per-row location selection + balances */
+  location?: string; // selected location or typed "new" location
+  use_custom_location?: boolean; // for return: true when typing "Other/New"
+  loc_balances?: { name: string; qty: number }[]; // per-item balances
 }
 
 // -------- Helpers (always round up to next rupee) --------
@@ -210,6 +215,8 @@ export default function NewInvoicePage() {
       id: makeId(), sku_input: '', item_id: '', description: '', uom_code: '',
       base_cost: 0, qty: 1, margin_pct: 0, tax_rate: 0, unit_price: 0,
       issued_margin_pct: 0, return_qty: 0,
+      // NEW
+      location: '', use_custom_location: false, loc_balances: [],
     };
   }
 
@@ -279,6 +286,42 @@ export default function NewInvoicePage() {
     setShowCreateCustomer(false);
   };
 
+  /** NEW: per-item location balances loader (+cache for repeated items) */
+  const locCacheRef = useRef<Map<string, { name: string; qty: number }[]>>(new Map());
+  const loadLocBalances = async (itemId: string): Promise<{ name: string; qty: number }[]> => {
+    if (!itemId) return [];
+    if (locCacheRef.current.has(itemId)) return locCacheRef.current.get(itemId)!;
+
+    const { data, error } = await supabase
+      .from('stock_moves')
+      .select('move_type, qty, location, item_id')
+      .eq('item_id', itemId);
+
+    if (error) {
+      console.warn('loadLocBalances error', error);
+      return [];
+    }
+
+    const map = new Map<string, number>();
+    (data ?? []).forEach((r: any) => {
+      const mt = String(r.move_type || '').toLowerCase() as 'receive'|'issue'|'return'|'adjust';
+      const loc = (String(r.location ?? '').trim()) || '(unassigned)';
+      const qRaw = Number(r.qty ?? 0);
+      let delta = qRaw;
+      if (mt === 'issue') delta = -Math.abs(qRaw);
+      else if (mt === 'receive' || mt === 'return') delta = Math.abs(qRaw);
+      // adjust: use sign as-is
+      map.set(loc, (map.get(loc) ?? 0) + delta);
+    });
+
+    const balances = Array.from(map.entries())
+      .map(([name, qty]) => ({ name, qty }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    locCacheRef.current.set(itemId, balances);
+    return balances;
+  };
+
   // ----- set item by SKU (sale) — unit_price always ceil
   const setItemBySku = async (rowId: string, skuRaw: string) => {
     const sku = (skuRaw || '').trim();
@@ -293,6 +336,8 @@ export default function NewInvoicePage() {
     if (!rec) return alert(`No item found for SKU "${sku}"`);
 
     const uom_code = safeUomCode(rec.uom);
+    const balances = await loadLocBalances(rec.id);
+
     setRows(prev => prev.map(r => {
       if (r.id !== rowId) return r;
       const base = Number(rec.unit_cost || 0);
@@ -307,6 +352,10 @@ export default function NewInvoicePage() {
         base_cost: base,
         tax_rate: Number(rec.tax_rate || 0),
         unit_price: unit,
+        // NEW: reset location for this row + provide options
+        location: '',
+        use_custom_location: false,
+        loc_balances: balances,
       };
     }));
   };
@@ -316,7 +365,6 @@ export default function NewInvoicePage() {
   const skuTimersRef = useRef<Record<string, any>>({});
 
   useEffect(() => {
-    // Cleanup on unmount
     return () => {
       const timers = skuTimersRef.current || {};
       Object.keys(timers).forEach(k => {
@@ -328,15 +376,12 @@ export default function NewInvoicePage() {
   // Map of refs for each row's SKU input (to focus new rows)
   const skuInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const focusSku = (rowId: string) => {
-    // Two frames: ensure element is mounted
     requestAnimationFrame(() => {
       const el = skuInputRefs.current[rowId];
       if (el) {
         el.focus();
-        // Optional select helps overwrite quickly when scanning
         try { el.select(); } catch {}
       } else {
-        // Fallback in case it wasn't ready yet
         setTimeout(() => {
           const el2 = skuInputRefs.current[rowId];
           if (el2) { el2.focus(); try { el2.select(); } catch {} }
@@ -347,13 +392,9 @@ export default function NewInvoicePage() {
 
   // ----- row setters (respect rounding rule)
   const setSkuInput = (rowId: string, text: string) => {
-    // Update the value immediately for UX
     setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text } : r));
-
-    // Debounce lookup (sale mode only; return mode has readOnly SKU)
     if (docType !== 'return') {
       const trimmed = (text || '').trim();
-      // Clear any existing pending timer for this row
       if (skuTimersRef.current[rowId]) {
         try { clearTimeout(skuTimersRef.current[rowId]); } catch {}
       }
@@ -392,15 +433,21 @@ export default function NewInvoicePage() {
       return { ...r, return_qty: clamped };
     }));
 
+  // NEW: set row location selection / typing
+  const setRowLocation = (rowId: string, loc: string, isCustom: boolean) => {
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, location: loc, use_custom_location: isCustom } : r));
+  };
+
   // ---- Add row + auto-focus its SKU
   const addRow = () => {
     const newRow: Row = {
       id: makeId(), sku_input: '', item_id: '', description: '', uom_code: '',
       base_cost: 0, qty: 1, margin_pct: 0, tax_rate: 0, unit_price: 0,
       issued_margin_pct: 0, return_qty: 0,
+      // NEW:
+      location: '', use_custom_location: false, loc_balances: [],
     };
     setRows(prev => [...prev, newRow]);
-    // Focus the new row's SKU input after it's rendered
     setTimeout(() => focusSku(newRow.id), 0);
   };
 
@@ -455,6 +502,12 @@ export default function NewInvoicePage() {
       }
     } catch {}
 
+    // NEW: preload location balances per unique item (using cache)
+    const balByItem: Record<string, { name: string; qty: number }[]> = {};
+    await Promise.all(itemIds.map(async (id) => {
+      balByItem[id] = await loadLocBalances(id);
+    }));
+
     const prefilled: Row[] = (lines ?? []).map((ln: any) => {
       const it = byId.get(ln.item_id) || {};
       const uom_code = (it?.uom_id && uomMap.get(it.uom_id)) || '';
@@ -480,6 +533,10 @@ export default function NewInvoicePage() {
         unit_price: Number(ln.unit_price || 0),
         issued_margin_pct,
         return_qty: 0,
+        // NEW: populate per-item location balances; no default selection
+        location: '',
+        use_custom_location: false,
+        loc_balances: balByItem[ln.item_id] || [],
       };
     });
 
@@ -560,6 +617,47 @@ export default function NewInvoicePage() {
     payments, invoiceGrandTotalAtSave, invoiceNoJustSaved, notes
   ]);
 
+  // ---------- NEW: validation helpers for locations ----------
+  const getSelectedLocQty = (r: Row) => {
+    if (!r.location || !r.loc_balances?.length) return 0;
+    const found = r.loc_balances.find(l => l.name === r.location);
+    return found?.qty ?? 0;
+  };
+
+  const validateLocationsBeforeSave = (): string | null => {
+    if (docType === 'sale') {
+      for (const r of rows) {
+        const qtyToIssue = Number(r.qty || 0);
+        if (!r.item_id || qtyToIssue <= 0) continue;
+
+        if (!r.location) {
+          return `Please select a Location for item ${r.sku_input || r.description || r.item_id}.`;
+        }
+        const exists = (r.loc_balances || []).some(l => l.name === r.location);
+        if (!exists) {
+          return `Selected Location "${r.location}" does not exist for item ${r.sku_input || r.description}.`;
+        }
+        const available = getSelectedLocQty(r);
+        if (available < qtyToIssue) {
+          return `Insufficient qty at "${r.location}" for item ${r.sku_input || r.description}. Available: ${available}, Required: ${qtyToIssue}.`;
+        }
+      }
+    } else {
+      // return
+      for (const r of rows) {
+        const qtyToReturn = Number(r.return_qty || 0);
+        if (!r.item_id || qtyToReturn <= 0) continue;
+
+        if (!r.location) {
+          return `Please select/enter a Location for returned item ${r.sku_input || r.description || r.item_id}.`;
+        }
+        // For return, allow new custom locations, so no existence check required.
+        // If not custom, it's from dropdown and exists.
+      }
+    }
+    return null;
+  };
+
   // ----- save invoice/return
   const savingLatch = () => {
     if (savingRef.current || saving) return true;
@@ -577,6 +675,10 @@ export default function NewInvoicePage() {
       : rows.some(r => r.item_id && Number(r.qty || 0) > 0);
 
     if (!hasLine) { saveDone(); return alert('Add at least one line item'); }
+
+    // NEW: validate per-line location
+    const locErr = validateLocationsBeforeSave();
+    if (locErr) { saveDone(); return alert(locErr); }
 
     try {
       let invoiceNo = '';
@@ -640,6 +742,18 @@ export default function NewInvoicePage() {
           p_item_id: r.item_id, p_qty: qtyToMove, p_ref: invoiceNo, p_reason: docType, p_client_tx_id: client_tx_id,
         });
         if (error) throw error;
+
+        // NEW: attach per-line location to stock_moves via client_tx_id
+        if (r.location && r.location.trim()) {
+          try {
+            await supabase
+              .from('stock_moves')
+              .update({ location: r.location.trim() })
+              .eq('client_tx_id', client_tx_id);
+          } catch (e) {
+            console.warn('location post-update skipped:', e);
+          }
+        }
       }
 
       setInvoiceIdJustSaved(invId);
@@ -647,7 +761,6 @@ export default function NewInvoicePage() {
       setInvoiceGrandTotalAtSave(totals.grand);
       await refreshPayments(invId);
 
-      // Push update for Customer View
       try { live.post(buildLivePayload()); } catch {}
 
       alert(`${docType === 'return' ? 'Saved return #' : 'Saved invoice #'}${invoiceNo}`);
@@ -674,6 +787,7 @@ export default function NewInvoicePage() {
     setCustomerInvoices([]);
     setOriginalGrandTotal(0);
     setPayments([]);
+    locCacheRef.current.clear();
   };
 
   // ----- open customer views
@@ -769,18 +883,15 @@ export default function NewInvoicePage() {
 
       setShowPayModal(false);
 
-      // Editor: refresh payments in the table
       if (invoiceIdJustSaved) {
         await refreshPayments(effectiveInvoiceId);
         try { live.post(buildLivePayload()); } catch {}
       }
 
-      // Customer View: show immediately
       if (isCustomerView) {
         setCustPayments([...(custPayments ?? liveState?.payments ?? []), data]);
       }
 
-      // Open printable receipt
       if (data?.id) {
         const url = `${window.location.origin}/receipts/${data.id}`;
         window.open(url, '_blank', 'noopener,noreferrer');
@@ -803,7 +914,6 @@ export default function NewInvoicePage() {
 
     const docTitle = header.docType === 'return' ? 'Return' : 'Invoice';
 
-    // 🆕 Full-screen white surface to hide any site navbar / orange top bar
     return (
       <div className="fixed inset-0 bg-white p-4 print:p-0 overflow-auto">
         <style>{`
@@ -818,7 +928,6 @@ export default function NewInvoicePage() {
 
         {/* Controls (not printed) */}
         <div className="no-print mb-3 flex gap-2">
-          {/* 🆕 Pay button in Customer View */}
           <Button
             type="button"
             onClick={() => {
@@ -844,7 +953,7 @@ export default function NewInvoicePage() {
 
         {/* Pure Invoice Area */}
         <div className="print-area">
-          {/* Brand header (visible to customer) - LOGO LEFT, TEXT RIGHT */}
+          {/* Brand header */}
           <div className="mb-3 flex items-start gap-3">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             {brandLogo ? <img src={brandLogo} alt="logo" className="h-12 w-12 rounded bg-white object-contain" /> : null}
@@ -1094,6 +1203,78 @@ export default function NewInvoicePage() {
   const netPaid = useMemo(() => computePaymentSummary().netPaid, [payments, totals.grand, invoiceGrandTotalAtSave, docType]);
   const balance = useMemo(() => computePaymentSummary().balance,[payments, totals.grand, invoiceGrandTotalAtSave, docType]);
 
+  // --------- UI helper to render Location cell per row ----------
+  const LocationCell = ({ row }: { row: Row }) => {
+    const hasOptions = (row.loc_balances?.length || 0) > 0;
+    if (!isReturn) {
+      // SALE (Issue): must pick existing location
+      return (
+        <div>
+          <select
+            className="input"
+            value={row.location || ''}
+            onChange={(e) => setRowLocation(row.id, e.target.value, false)}
+            disabled={!row.item_id}
+            title="Select Location to issue from"
+          >
+            <option value="">Select location…</option>
+            {(row.loc_balances || []).map(l => (
+              <option key={l.name} value={l.name}>
+                {l.name} — {l.qty}
+              </option>
+            ))}
+          </select>
+          {row.location && (
+            <div className="text-xs text-gray-600 mt-1">
+              Available: <b>{getSelectedLocQty(row)}</b> {row.uom_code || ''}
+            </div>
+          )}
+          {!hasOptions && row.item_id && (
+            <div className="text-xs text-amber-600 mt-1">
+              No locations found for this item.
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // RETURN: choose existing or "Other/New"
+    const value = row.use_custom_location ? '__NEW__' : (row.location || '');
+    return (
+      <div className="grid grid-cols-2 gap-2">
+        <select
+          className="input"
+          value={value}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === '__NEW__') {
+              setRowLocation(row.id, '', true);
+            } else {
+              setRowLocation(row.id, v, false);
+            }
+          }}
+          disabled={!row.item_id}
+          title="Select Location to return to"
+        >
+          <option value="">{hasOptions ? 'Select existing…' : 'No locations yet'}</option>
+          {(row.loc_balances || []).map(l => (
+            <option key={l.name} value={l.name}>
+              {l.name} — {l.qty}
+            </option>
+          ))}
+          <option value="__NEW__">Other / New…</option>
+        </select>
+        <input
+          className="input"
+          placeholder="Type new location"
+          value={row.use_custom_location ? (row.location || '') : ''}
+          onChange={(e) => setRowLocation(row.id, e.target.value, true)}
+          disabled={!row.item_id || !row.use_custom_location}
+        />
+      </div>
+    );
+  };
+
   return (
     <Protected>
       {/* Editor Header */}
@@ -1120,7 +1301,7 @@ export default function NewInvoicePage() {
         <h1 className="text-xl font-semibold mb-4">New {isReturn ? 'Return' : 'Invoice'}</h1>
 
         {/* Top */}
-        <div className="grid md:grid-cols-3 gap-3 mb-4">
+        <div className="grid md-grid-cols-3 md:grid-cols-3 gap-3 mb-4">
           <div>
             <label className="label">Type</label>
             <select
@@ -1231,6 +1412,7 @@ export default function NewInvoicePage() {
                   <th style={{ minWidth: 220 }}>Description</th>
                   <th style={{ minWidth: 80 }}>UoM</th>
                   <th style={{ minWidth: 110 }}>Current Cost</th>
+                  <th style={{ minWidth: 140 }}>Location</th>{/* NEW */}
                   <th style={{ minWidth: 80 }}>Qty</th>
                   <th style={{ minWidth: 110 }}>Margin %</th>
                   <th style={{ minWidth: 80 }}>Tax %</th>
@@ -1246,6 +1428,7 @@ export default function NewInvoicePage() {
                   <th className="text-right" style={{ minWidth: 90 }}>Qty (Sold)</th>
                   <th className="text-right" style={{ minWidth: 80 }}>Tax %</th>
                   <th className="text-right" style={{ minWidth: 120 }}>Line Total</th>
+                  <th style={{ minWidth: 180 }}>Location</th>{/* NEW */}
                   <th className="text-right" style={{ minWidth: 110 }}>Return Qty</th>
                   <th className="text-right" style={{ minWidth: 130 }}>Return Amount</th>
                   <th className="text-right" style={{ minWidth: 130 }}>Remaining</th>
@@ -1274,6 +1457,10 @@ export default function NewInvoicePage() {
                       <td><input className="input" placeholder="Description" value={r.description} onChange={(e) => setDescription(r.id, e.target.value)} /></td>
                       <td><input className="input" value={r.uom_code || ''} readOnly placeholder="-" /></td>
                       <td><input className="input" value={ceilRupee(r.base_cost).toFixed(2)} readOnly /></td>
+
+                      {/* NEW: SALE Location cell */}
+                      <td><LocationCell row={r} /></td>
+
                       <td><input className="input" type="number" min={0} step="1" value={r.qty} onChange={(e) => setQty(r.id, parseFloat(e.target.value || '0'))} /></td>
                       <td><input className="input" type="number" step="0.01" value={r.margin_pct} onChange={(e) => setMargin(r.id, parseFloat(e.target.value || '0'))} /></td>
                       <td><input className="input" type="number" step="0.01" value={r.tax_rate} onChange={(e) => setTaxRate(r.id, parseFloat(e.target.value || '0'))} /></td>
@@ -1301,6 +1488,10 @@ export default function NewInvoicePage() {
                     <td className="text-right"><input className="input text-right" value={r.qty} readOnly /></td>
                     <td className="text-right"><input className="input text-right" value={Number(r.tax_rate).toFixed(2)} readOnly /></td>
                     <td className="text-right">₹ {soldLineTotal.toFixed(2)}</td>
+
+                    {/* NEW: RETURN Location cell */}
+                    <td><LocationCell row={r} /></td>
+
                     <td className="text-right">
                       <input className="input text-right" type="number" min={0} max={r.qty} step="1" value={retQty} onChange={(e) => setReturnQty(r.id, parseFloat(e.target.value || '0'))} />
                     </td>
@@ -1313,9 +1504,9 @@ export default function NewInvoicePage() {
 
             <tfoot>
               {!isReturn ? (
-                <tr><td colSpan={10}><Button type="button" onClick={addRow}>+ Add Line</Button></td></tr>
+                <tr><td colSpan={11}><Button type="button" onClick={addRow}>+ Add Line</Button></td></tr>
               ) : (
-                <tr><td colSpan={10} className="text-sm text-gray-600">All item details are read-only in Return mode. Enter <b>Return Qty</b> only.</td></tr>
+                <tr><td colSpan={11} className="text-sm text-gray-600">All item details are read-only in Return mode. Enter <b>Return Qty</b> and select <b>Location</b>.</td></tr>
               )}
             </tfoot>
           </table>
@@ -1525,3 +1716,4 @@ export default function NewInvoicePage() {
     </Protected>
   );
 }
+``
