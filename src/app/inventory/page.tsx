@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 
@@ -68,6 +68,71 @@ type LocationScope = 'all_items' | 'has_stock' | 'appears_any';
 // has_stock: only items with qty>0 at selected location
 // appears_any: items that have any movement at selected location (qty can be 0 after net)
 
+/* -------------------------------------------------------
+   ⭐ Small barcode component (uses JsBarcode dynamically)
+   ------------------------------------------------------- */
+function BarcodeSvg({
+  value,
+  options,
+  labelTop,
+  labelBottom,
+}: {
+  value: string;
+  options?: Partial<{
+    format: string; width: number; height: number; displayValue: boolean;
+    fontSize: number; textMargin: number; margin: number; lineColor: string;
+  }>;
+  labelTop?: string | null;
+  labelBottom?: string | null;
+}) {
+  const svgRef = useRef<SVGSVGElement | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!value || !svgRef.current) return;
+      try {
+        const mod: any = await import('jsbarcode');
+        const JsBarcode = (mod && mod.default) ? mod.default : mod;
+        if (!JsBarcode || cancelled) return;
+        // Clear before render
+        while (svgRef.current.firstChild) svgRef.current.removeChild(svgRef.current.firstChild);
+
+        JsBarcode(svgRef.current, value, {
+          format: 'CODE128',
+          width: 2,
+          height: 60,
+          displayValue: true,
+          fontSize: 12,
+          textMargin: 2,
+          margin: 6,
+          lineColor: '#000',
+          ...(options || {}),
+        });
+      } catch (e) {
+        console.warn('JsBarcode not available. Run: npm i jsbarcode', e);
+        if (!svgRef.current) return;
+        // fallback simple text
+        const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        txt.setAttribute('x', '0');
+        txt.setAttribute('y', '14');
+        txt.setAttribute('fill', '#000');
+        txt.textContent = value;
+        svgRef.current.appendChild(txt);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [value, options]);
+
+  return (
+    <div className="inline-flex flex-col items-center border rounded p-2 bg-white">
+      {labelTop ? <div className="text-xs font-medium mb-1 text-gray-700">{labelTop}</div> : null}
+      <svg ref={svgRef} className="max-w-full h-auto" />
+      {labelBottom ? <div className="text-[10px] mt-1 text-gray-600">{labelBottom}</div> : null}
+    </div>
+  );
+}
+
 export default function InventoryPage() {
   const [loading, setLoading] = useState<boolean>(true);
   const [rows, setRows] = useState<InvRow[]>([]);
@@ -82,6 +147,17 @@ export default function InventoryPage() {
   const [selectedLocation, setSelectedLocation] = useState<string>(''); // '' = no selection
   const [locationScope, setLocationScope] = useState<LocationScope>('all_items');
   const [showZeroQtyLocations, setShowZeroQtyLocations] = useState<boolean>(false);
+
+  /* -------------------------
+     ⭐ Barcode UI State
+     ------------------------- */
+  const [bcItemId, setBcItemId] = useState<string>('');           // selected item id
+  const [bcQty, setBcQty] = useState<number>(1);                  // no. of labels
+  const [bcOpts, setBcOpts] = useState({ width: 2, height: 60 }); // size controls
+  const previewRef = useRef<HTMLDivElement | null>(null);
+
+  const selectedItem = useMemo(() => rows.find(r => r.id === bcItemId) || null, [rows, bcItemId]);
+  const previewCount = useMemo(() => Math.max(0, Math.min(500, Math.floor(bcQty || 0))), [bcQty]); // cap to 500 for safety
 
   function toggleSort(k: SortKey) {
     setSortKey(prev => {
@@ -254,7 +330,7 @@ export default function InventoryPage() {
       switch (sortKey) {
         case 'sku':                 va = a.sku?.toLowerCase() ?? ''; vb = b.sku?.toLowerCase() ?? ''; break;
         case 'name':                va = a.name?.toLowerCase() ?? ''; vb = b.name?.toLowerCase() ?? ''; break;
-      case 'uom_code':            va = a.uom_code?.toLowerCase() ?? ''; vb = b.uom_code?.toLowerCase() ?? ''; break;
+        case 'uom_code':            va = a.uom_code?.toLowerCase() ?? ''; vb = b.uom_code?.toLowerCase() ?? ''; break;
         case 'stock_qty':           va = Number(a.stock_qty); vb = Number(b.stock_qty); break;
         case 'low_stock_threshold': va = Number(a.low_stock_threshold ?? -Infinity); vb = Number(b.low_stock_threshold ?? -Infinity); break;
         case 'unit_cost':           va = Number(a.unit_cost); vb = Number(b.unit_cost); break;
@@ -300,6 +376,36 @@ export default function InventoryPage() {
     });
     const date = new Date().toISOString().slice(0,10);
     downloadCsv(`inventory_${date}.csv`, [header.join(','), ...lines]);
+  };
+
+  /* -------------------------
+     ⭐ Print only barcodes
+     ------------------------- */
+  const handlePrintBarcodes = () => {
+    if (!selectedItem) return alert('Please select an item for barcode labels.');
+    const html = previewRef.current?.innerHTML || '';
+    if (!html) return alert('Nothing to print. Please generate a preview first.');
+
+    const w = window.open('', '_blank', 'noopener,noreferrer,width=800,height=600');
+    if (!w) return alert('Please allow pop-ups to print barcodes.');
+    const styles = `
+      <style>
+        @page { margin: 5mm; }
+        body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+        .label { display: inline-flex; flex-direction: column; align-items: center; border: 1px solid #ddd; border-radius: 6px; padding: 6px; }
+        .label svg { width: 100%; height: auto; }
+        .top { font-size: 11px; font-weight: 600; margin-bottom: 2px; }
+        .bottom { font-size: 10px; color: #555; margin-top: 2px; }
+        @media print { .noprint { display: none !important; } }
+      </style>
+    `;
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Barcodes</title>${styles}</head><body>`);
+    w.document.write(`<div class="grid">${html}</div>`);
+    w.document.write(`<div class="noprint" style="margin-top:12px"><button onclick="window.print()">Print</button></div>`);
+    w.document.write(`</body></html>`);
+    w.document.close();
+    w.focus();
   };
 
   return (
@@ -363,6 +469,106 @@ export default function InventoryPage() {
 
           <Button type="button" onClick={exportCsv}>Export CSV</Button>
           <Button type="button" onClick={loadInventory}>Refresh</Button>
+        </div>
+
+        {/* ------------------------------------------
+            ⭐ BARCODE GENERATOR (header preview area)
+           ------------------------------------------ */}
+        <div className="mb-4 border rounded p-3 bg-white">
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="font-semibold mr-2">Barcode Generator</div>
+
+            {/* Item picker */}
+            <div className="flex flex-col">
+              <label className="label text-xs">Item</label>
+              <select
+                className="input min-w-[260px]"
+                value={bcItemId}
+                onChange={(e) => setBcItemId(e.target.value)}
+                title="Select item to generate barcode"
+              >
+                <option value="">-- Choose Item --</option>
+                {rows.map(r => (
+                  <option key={r.id} value={r.id}>{r.sku} — {r.name}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Qty */}
+            <div className="flex flex-col">
+              <label className="label text-xs">Qty (labels)</label>
+              <input
+                className="input w-28"
+                type="number"
+                min={1}
+                max={500}
+                value={bcQty}
+                onChange={(e) => setBcQty(parseInt(e.target.value || '1', 10))}
+              />
+            </div>
+
+            {/* Size */}
+            <div className="flex items-center gap-2">
+              <div className="flex flex-col">
+                <label className="label text-xs">Bar width</label>
+                <input
+                  className="input w-24"
+                  type="number"
+                  min={1}
+                  max={4}
+                  step={0.5}
+                  value={bcOpts.width}
+                  onChange={(e) => setBcOpts(o => ({ ...o, width: parseFloat(e.target.value || '2') }))}
+                />
+              </div>
+              <div className="flex flex-col">
+                <label className="label text-xs">Height</label>
+                <input
+                  className="input w-24"
+                  type="number"
+                  min={30}
+                  max={120}
+                  value={bcOpts.height}
+                  onChange={(e) => setBcOpts(o => ({ ...o, height: parseInt(e.target.value || '60', 10) }))}
+                />
+              </div>
+            </div>
+
+            <div className="ml-auto flex gap-2">
+              <Button
+                type="button"
+                onClick={() => {
+                  if (!bcItemId) return alert('Select an item first.');
+                  // preview is reactive; this button just ensures state is applied.
+                }}
+              >
+                Generate Preview
+              </Button>
+              <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={handlePrintBarcodes}>
+                Print Barcodes
+              </Button>
+            </div>
+          </div>
+
+          {/* Preview grid */}
+          <div className="mt-3">
+            {!selectedItem ? (
+              <div className="text-sm text-gray-600">Choose an item and quantity to preview barcodes.</div>
+            ) : (
+              <div ref={previewRef} className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                {Array.from({ length: previewCount }).map((_, idx) => (
+                  <div key={idx} className="label inline-block">
+                    <BarcodeSvg
+                      value={selectedItem.sku}
+                      options={{ format: 'CODE128', width: bcOpts.width, height: bcOpts.height, displayValue: true }}
+                      labelTop={selectedItem.name}
+                      labelBottom={selectedItem.uom_code ? `UoM: ${selectedItem.uom_code}` : ''}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         {loading ? (
