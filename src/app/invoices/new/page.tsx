@@ -328,7 +328,8 @@ export default function NewInvoicePage() {
   };
 
   // ----- set item by SKU (sale) — unit_price always ceil
-  const setItemBySku = async (rowId: string, skuRaw: string) => {
+  // 🆕 added 'opts' to control alert behaviour
+  const setItemBySku = async (rowId: string, skuRaw: string, opts?: { silentNotFound?: boolean }) => {
     const sku = (skuRaw || '').trim();
     if (!sku) return;
     const { data, error } = await supabase
@@ -338,7 +339,10 @@ export default function NewInvoicePage() {
       .limit(1);
     if (error) return alert(error.message);
     const rec = (data ?? [])[0] as ItemDb | undefined;
-    if (!rec) return alert(`No item found for SKU "${sku}"`);
+    if (!rec) {
+      if (!opts?.silentNotFound) alert(`No item found for SKU "${sku}"`);
+      return;
+    }
 
     const uom_code = safeUomCode(rec.uom);
     const balances = await loadLocBalances(rec.id);
@@ -398,14 +402,22 @@ export default function NewInvoicePage() {
   // ----- row setters (respect rounding rule)
   const setSkuInput = (rowId: string, text: string) => {
     setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text } : r));
-    if (docType !== 'return') {
+
+    // Debounced lookup only in SALE + normal typing mode
+    if (docType !== 'return' && !barcodeMode) {
       const trimmed = (text || '').trim();
+
       if (skuTimersRef.current[rowId]) {
         try { clearTimeout(skuTimersRef.current[rowId]); } catch {}
       }
+
       if (trimmed) {
         skuTimersRef.current[rowId] = setTimeout(() => {
-          setItemBySku(rowId, trimmed);
+          // silent auto-lookup while typing; no alert if not found
+          // optionally trigger only when user typed 3+ chars to reduce noise
+          if (trimmed.length >= 3) {
+            setItemBySku(rowId, trimmed, { silentNotFound: true });
+          }
         }, SKU_LOOKUP_DEBOUNCE_MS);
       }
     }
@@ -1545,6 +1557,11 @@ export default function NewInvoicePage() {
                           onChange={(e) => setSkuInput(r.id, e.target.value)}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') { e.preventDefault(); setItemBySku(r.id, r.sku_input); }
+                          }}
+                          onBlur={() => {
+                            // Final attempt when leaving field: show alert if not found
+                            const v = (r.sku_input || '').trim();
+                            if (!r.item_id && v) setItemBySku(r.id, v);
                           }}
                           readOnly={barcodeMode}
                           title={barcodeMode ? 'Barcode Mode ON: SKU is read-only. Scan to add/increase.' : undefined}
