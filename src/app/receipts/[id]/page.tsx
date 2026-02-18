@@ -56,6 +56,11 @@ export default function ReceiptPage() {
   const id = String(params?.id || '');
   const autoprint = searchParams.get('autoprint') === '1';
 
+  // 🆕 compact/thermal toggles from query
+  const paperParam = (searchParams.get('paper') || '').toLowerCase();
+  const paper80 = paperParam === '80mm';
+  const autoClose = searchParams.get('autoclose') === '1';
+
   // Brand (same defaults as invoice page)
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
   const brandLogo    = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png';
@@ -223,7 +228,7 @@ export default function ReceiptPage() {
       }
     })();
 
-    return () => { cancelled = true; };
+  return () => { cancelled = true; };
   }, [id]);
 
   /* -------- Auto print when ready (fonts, logo, images) -------- */
@@ -255,6 +260,16 @@ export default function ReceiptPage() {
     return () => { cancelled = true; };
   }, [autoprint, dataReady, brandLogo, logoReady]);
 
+  // 🆕 Close tab after print (optional)
+  useEffect(() => {
+    if (!autoClose) return;
+    const handler = () => {
+      try { window.close(); } catch {}
+    };
+    window.addEventListener('afterprint', handler);
+    return () => window.removeEventListener('afterprint', handler);
+  }, [autoClose]);
+
   const docTitle = invoice?.doc_type === 'return' ? 'Return Receipt' : 'Payment Receipt';
 
   /* ----------------- Print Preview state/refs ----------------- */
@@ -279,6 +294,15 @@ export default function ReceiptPage() {
       .map((l) => l.outerHTML)
       .join('\n');
 
+    // Inject thermal rules if paper80 for preview to match print
+    const thermalStyle = paper80 ? `
+      .paper-80 {
+        max-width: 80mm !important;
+        font-size: 12px !important;
+      }
+      @page { size: 80mm auto; margin: 5mm; }
+    ` : '';
+
     return `
 <!doctype html>
 <html>
@@ -299,6 +323,8 @@ export default function ReceiptPage() {
       .inv-table { table-layout: fixed !important; width: 100% !important; border-collapse: collapse; }
       .col-right { text-align: right !important; white-space: nowrap !important; }
       .preview-wrap { max-width: 900px; margin: 12px auto; padding: 0 8px; }
+
+      ${thermalStyle}
     </style>
     <title>${document.title || 'Preview'}</title>
   </head>
@@ -336,8 +362,14 @@ export default function ReceiptPage() {
     setTimeout(() => win.print(), 50);
   };
 
+  // Read QR bits for convenience
+  const paymentMeta = payment?.meta || {};
+  const isQR = String(payment?.method || '').toLowerCase() === 'qr';
+  const qrThumb = paymentMeta?.qr_image_url || '';
+  const upiId = paymentMeta?.upi_id || process.env.NEXT_PUBLIC_UPI_ID || '';
+
   return (
-    <div className="min-h-screen bg-white p-4 print:p-0">
+    <div className={`min-h-screen bg-white p-4 print:p-0 ${paper80 ? 'paper-80' : ''}`}>
       <style>{`
         /* ====== Screen & Print: numeric columns and table behavior ====== */
         .inv-table {
@@ -378,8 +410,19 @@ export default function ReceiptPage() {
         .inv-table th:nth-child(7),
         .inv-table td:nth-child(7) { width: 10% !important; }
 
+        /* ----- Thermal/compact tweaks ----- */
+        .paper-80 {
+          max-width: 80mm;
+          margin: 0 auto;
+          font-size: 12px;
+          line-height: 1.25;
+        }
+        .paper-80 .print-area { padding-right: 0; padding-left: 0; }
+        .paper-80 .inv-table th, .paper-80 .inv-table td { padding: 2px 4px !important; }
+        .paper-80 .qr-box img { max-height: 120px; }
+
         @media print {
-          @page { margin: 8mm; }
+          ${paper80 ? '@page { size: 80mm auto; margin: 5mm; }' : '@page { margin: 8mm; }'}
           body * { visibility: hidden !important; }
           .print-area, .print-area * { visibility: visible !important; }
           .print-area { position: absolute; left: 0; top: 0; width: 100%; }
@@ -539,6 +582,30 @@ export default function ReceiptPage() {
                 {invoice?.notes ? (
                   <div className="text-sm text-gray-700 mt-1">Notes: {invoice.notes}</div>
                 ) : null}
+              </div>
+
+              {/* 🆕 Payment method summary (compact, good for receipts) */}
+              <div className="mt-4 grid sm:grid-cols-2 gap-3">
+                <div className="border rounded p-2">
+                  <div className="flex justify-between"><div>Method</div><div className="capitalize">{String(payment?.method || '').toLowerCase() || '—'}</div></div>
+                  <div className="flex justify-between"><div>Direction</div><div className="uppercase">{payment?.direction || '—'}</div></div>
+                  <div className="flex justify-between"><div>Reference</div><div>{payment?.reference || '—'}</div></div>
+                  <div className="flex justify-between font-semibold"><div>Amount</div><div>{fmt(ceilRupee(payment?.amount))}</div></div>
+                </div>
+                {isQR ? (
+                  <div className="border rounded p-2 qr-box flex items-center gap-2">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    {qrThumb ? <img src={qrThumb} alt="QR" className="h-28 w-auto object-contain" /> : null}
+                    <div className="text-xs text-gray-700">
+                      {upiId ? <>UPI ID: <b>{upiId}</b><br/></> : null}
+                      {paymentMeta?.qr_txn ? <>Txn: <b>{paymentMeta.qr_txn}</b></> : null}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="border rounded p-2">
+                    <div className="text-sm text-gray-700">Payment recorded successfully.</div>
+                  </div>
+                )}
               </div>
 
               {/* --- Invoice Items --- */}
