@@ -913,6 +913,13 @@ export default function NewInvoicePage() {
         const url = `${window.location.origin}/receipts/${data.id}`;
         window.open(url, '_blank', 'noopener,noreferrer');
       }
+
+      // 🆕 Auto-print on QR payments (both Editor & Customer View)
+      if (payMethod === 'qr') {
+        setTimeout(() => {
+          try { window.print(); } catch {}
+        }, 200);
+      }
     } catch (err: any) {
       console.error(err);
       alert(err?.message || String(err));
