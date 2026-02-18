@@ -209,6 +209,11 @@ export default function NewInvoicePage() {
   const [qrTxn, setQrTxn] = useState('');
   const [generatingQR, setGeneratingQR] = useState(false);
 
+  // 🆕 Barcode mode (scanner-only)
+  const [barcodeMode, setBarcodeMode] = useState(false);
+  const barcodeInputRef = useRef<HTMLInputElement | null>(null);
+  const [barcodeBuffer, setBarcodeBuffer] = useState('');
+
   useEffect(() => { setRows([makeEmptyRow()]); }, []);
   function makeEmptyRow(): Row {
     return {
@@ -902,6 +907,60 @@ export default function NewInvoicePage() {
     }
   };
 
+  // 🆕 BARCODE: focus hidden input whenever barcode mode ON
+  useEffect(() => {
+    if (!barcodeMode) return;
+    const t = setTimeout(() => barcodeInputRef.current?.focus(), 0);
+    return () => clearTimeout(t);
+  }, [barcodeMode]);
+
+  // 🆕 BARCODE: process scanned code
+  const processBarcode = async (codeRaw: string) => {
+    const code = (codeRaw || '').trim();
+    if (!code) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('items')
+        .select('id, sku, name, unit_cost, tax_rate, uom:units_of_measure ( code )')
+        .ilike('sku', code)
+        .limit(1);
+      if (error) throw error;
+      const rec = (data ?? [])[0] as ItemDb | undefined;
+
+      if (!rec) {
+        alert(`No item found for SKU "${code}"`);
+        return;
+      }
+
+      // If item row exists, increment qty
+      const existing = rows.find(r => r.item_id === rec.id);
+      if (existing) {
+        setQty(existing.id, Number(existing.qty || 0) + 1);
+        // Ensure balances are present for existing row if needed
+        if (!existing.loc_balances || existing.loc_balances.length === 0) {
+          const balances = await loadLocBalances(rec.id);
+          setRows(prev => prev.map(r => r.id === existing.id ? { ...r, loc_balances: balances } : r));
+        }
+      } else {
+        // Use first empty row or create new, set item and qty 1
+        let target = rows.find(r => !r.item_id);
+        if (!target) {
+          target = makeEmptyRow();
+          setRows(prev => [...prev, target!]);
+        }
+        await setItemBySku(target.id, code);
+        setQty(target.id, 1);
+      }
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.message || 'Scan failed');
+    } finally {
+      setBarcodeBuffer('');
+      setTimeout(() => barcodeInputRef.current?.focus(), 0);
+    }
+  };
+
   // =======================
   // Customer Screen only
   // =======================
@@ -917,6 +976,9 @@ export default function NewInvoicePage() {
     return (
       <div className="fixed inset-0 bg-white p-4 print:p-0 overflow-auto">
         <style>{`
+          /* Shared numeric alignment for screen & print */
+          .num { text-align: right; font-variant-numeric: tabular-nums; }
+
           @media print {
             @page { margin: 8mm; }
             body * { visibility: hidden !important; }
@@ -993,10 +1055,10 @@ export default function NewInvoicePage() {
                   <th>SKU</th>
                   <th style={{ minWidth: 220 }}>Description</th>
                   <th>UoM</th>
-                  <th className="text-right">Qty</th>
-                  <th className="text-right">Unit</th>
-                  <th className="text-right">Tax %</th>
-                  <th className="text-right">Line Total</th>
+                  <th className="num">Qty</th>
+                  <th className="num">Unit</th>
+                  <th className="num">Tax %</th>
+                  <th className="num">Line Total</th>
                 </tr>
               </thead>
               <tbody>
@@ -1005,28 +1067,28 @@ export default function NewInvoicePage() {
                     <td>{ln.sku}</td>
                     <td>{ln.description}</td>
                     <td>{ln.uom_code || '-'}</td>
-                    <td className="text-right">{ln.qty}</td>
-                    <td className="text-right">₹ {Number(ln.unit_price || 0).toFixed(2)}</td>
-                    <td className="text-right">{Number(ln.tax_rate || 0).toFixed(2)}</td>
-                    <td className="text-right">₹ {Number(ln.line_total || 0).toFixed(2)}</td>
+                    <td className="num">{ln.qty}</td>
+                    <td className="num">₹ {Number(ln.unit_price || 0).toFixed(2)}</td>
+                    <td className="num">{Number(ln.tax_rate || 0).toFixed(2)}</td>
+                    <td className="num">₹ {Number(ln.line_total || 0).toFixed(2)}</td>
                   </tr>
                 ))}
               </tbody>
               <tfoot>
                 <tr>
                   <td colSpan={5}></td>
-                  <td className="text-right font-medium">Subtotal</td>
-                  <td className="text-right">₹ {Number(liveTotals.subtotal || 0).toFixed(2)}</td>
+                  <td className="num font-medium">Subtotal</td>
+                  <td className="num">₹ {Number(liveTotals.subtotal || 0).toFixed(2)}</td>
                 </tr>
                 <tr>
                   <td colSpan={5}></td>
-                  <td className="text-right font-medium">Tax</td>
-                  <td className="text-right">₹ {Number(liveTotals.tax || 0).toFixed(2)}</td>
+                  <td className="num font-medium">Tax</td>
+                  <td className="num">₹ {Number(liveTotals.tax || 0).toFixed(2)}</td>
                 </tr>
                 <tr className="font-semibold">
                   <td colSpan={5}></td>
-                  <td className="text-right">Total</td>
-                  <td className="text-right">₹ {Number(liveTotals.grand || 0).toFixed(2)}</td>
+                  <td className="num">Total</td>
+                  <td className="num">₹ {Number(liveTotals.grand || 0).toFixed(2)}</td>
                 </tr>
               </tfoot>
             </table>
@@ -1046,7 +1108,7 @@ export default function NewInvoicePage() {
                       <th>Method</th>
                       <th>Direction</th>
                       <th>Reference</th>
-                      <th className="text-right">Amount</th>
+                      <th className="num">Amount</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1056,7 +1118,7 @@ export default function NewInvoicePage() {
                         <td className="capitalize">{p.method}</td>
                         <td className="uppercase">{p.direction}</td>
                         <td>{p.reference || '—'}</td>
-                        <td className="text-right">₹ {Number(p.amount || 0).toFixed(2)}</td>
+                        <td className="num">₹ {Number(p.amount || 0).toFixed(2)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1277,6 +1339,24 @@ export default function NewInvoicePage() {
 
   return (
     <Protected>
+      {/* Hidden input to capture barcode scans when Barcode Mode is ON */}
+      <input
+        ref={barcodeInputRef}
+        className="sr-only"
+        value={barcodeBuffer}
+        onChange={(e) => setBarcodeBuffer(e.target.value)}
+        onKeyDown={async (e) => {
+          if (!barcodeMode) return;
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            const code = barcodeBuffer;
+            await processBarcode(code);
+          }
+        }}
+        aria-hidden={!barcodeMode}
+        tabIndex={barcodeMode ? 0 : -1}
+      />
+
       {/* Editor Header */}
       <div className="card mb-4">
         <div className="flex items-center gap-4">
@@ -1287,7 +1367,22 @@ export default function NewInvoicePage() {
             <div className="text-sm text-gray-700">{brandAddress}</div>
             <div className="text-sm text-gray-700">Phone: {brandPhone}</div>
           </div>
-          <div className="ml-auto flex gap-2">
+          <div className="ml-auto flex gap-2 items-center flex-wrap">
+            {/* 🆕 Barcode Mode Toggle */}
+            <label className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
+              <input
+                type="checkbox"
+                checked={barcodeMode}
+                onChange={(e) => {
+                  setBarcodeMode(e.target.checked);
+                  if (e.target.checked) {
+                    setTimeout(() => barcodeInputRef.current?.focus(), 0);
+                  }
+                }}
+              />
+              <span className="text-sm font-medium">Barcode Mode</span>
+            </label>
+
             <Button type="button" onClick={openCustomerScreen}>Open Customer Screen</Button>
             <Button type="button" onClick={openCustomerPrint} className="bg-gray-700 hover:bg-gray-800">Print</Button>
             <Button type="button" onClick={handleNewInvoice} className="bg-gray-700 hover:bg-gray-800">
@@ -1445,12 +1540,14 @@ export default function NewInvoicePage() {
                       <td>
                         <input
                           className="input"
-                          placeholder="Type/Scan SKU (auto-lookup) or press Enter"
+                          placeholder={barcodeMode ? "Scan barcode…" : "Type/Scan SKU (auto-lookup) or press Enter"}
                           value={r.sku_input}
                           onChange={(e) => setSkuInput(r.id, e.target.value)}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') { e.preventDefault(); setItemBySku(r.id, r.sku_input); }
                           }}
+                          readOnly={barcodeMode}
+                          title={barcodeMode ? 'Barcode Mode ON: SKU is read-only. Scan to add/increase.' : undefined}
                           ref={(el) => { skuInputRefs.current[r.id] = el; }}
                         />
                       </td>
@@ -1716,4 +1813,3 @@ export default function NewInvoicePage() {
     </Protected>
   );
 }
-``
