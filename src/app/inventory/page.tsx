@@ -68,9 +68,46 @@ type LocationScope = 'all_items' | 'has_stock' | 'appears_any';
 // has_stock: only items with qty>0 at selected location
 // appears_any: items that have any movement at selected location (qty can be 0 after net)
 
-/* -------------------------------------------------------
-   ⭐ Small barcode component (uses JsBarcode dynamically)
-   ------------------------------------------------------- */
+/* ======================================================
+   ⭐ JsBarcode loader with Option C (static URL) support
+   ====================================================== */
+const JSBARCODE_STATIC_URL =
+  process.env.NEXT_PUBLIC_JSBARCODE_URL                 // 1) preferred: Supabase Storage or any static host
+  || '/vendor/jsbarcode.min.js'                         // 2) optional: ship file under /public/vendor
+  || 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js'; // 3) fallback CDN
+
+async function ensureJsBarcodeFromStatic(): Promise<any> {
+  if (typeof window !== 'undefined' && (window as any).JsBarcode) {
+    return (window as any).JsBarcode;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const id = 'injected-jsbarcode';
+    if (document.getElementById(id)) return resolve();
+    const s = document.createElement('script');
+    s.id = id;
+    s.src = JSBARCODE_STATIC_URL;
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => {
+      // final attempt: public CDN (in case custom static URL failed)
+      const fallbackId = 'injected-jsbarcode-cdn';
+      if (document.getElementById(fallbackId)) return resolve();
+      const f = document.createElement('script');
+      f.id = fallbackId;
+      f.src = 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js';
+      f.async = true;
+      f.onload = () => resolve();
+      f.onerror = () => reject(new Error('Failed to load JsBarcode from both static URL and CDN'));
+      document.head.appendChild(f);
+    };
+    document.head.appendChild(s);
+  });
+  return (window as any).JsBarcode;
+}
+
+/* ----------------------------------------------
+   ⭐ Lightweight barcode SVG component (no npm)
+   ---------------------------------------------- */
 function BarcodeSvg({
   value,
   options,
@@ -85,17 +122,17 @@ function BarcodeSvg({
   labelTop?: string | null;
   labelBottom?: string | null;
 }) {
-  const svgRef = useRef<SVGSVGElement | null>(null);
+  const svgRef = React.useRef<SVGSVGElement | null>(null);
 
-  useEffect(() => {
+  React.useEffect(() => {
     let cancelled = false;
     (async () => {
       if (!value || !svgRef.current) return;
       try {
-        const mod: any = await import('jsbarcode');
-        const JsBarcode = (mod && mod.default) ? mod.default : mod;
-        if (!JsBarcode || cancelled) return;
-        // Clear before render
+        const JsBarcode = await ensureJsBarcodeFromStatic();
+        if (cancelled || !svgRef.current) return;
+
+        // clear previous content
         while (svgRef.current.firstChild) svgRef.current.removeChild(svgRef.current.firstChild);
 
         JsBarcode(svgRef.current, value, {
@@ -110,9 +147,9 @@ function BarcodeSvg({
           ...(options || {}),
         });
       } catch (e) {
-        console.warn('JsBarcode not available. Run: npm i jsbarcode', e);
+        console.warn(e);
         if (!svgRef.current) return;
-        // fallback simple text
+        // fallback simple text to avoid broken UI
         const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         txt.setAttribute('x', '0');
         txt.setAttribute('y', '14');
@@ -148,16 +185,14 @@ export default function InventoryPage() {
   const [locationScope, setLocationScope] = useState<LocationScope>('all_items');
   const [showZeroQtyLocations, setShowZeroQtyLocations] = useState<boolean>(false);
 
-  /* -------------------------
-     ⭐ Barcode UI State
-     ------------------------- */
-  const [bcItemId, setBcItemId] = useState<string>('');           // selected item id
-  const [bcQty, setBcQty] = useState<number>(1);                  // no. of labels
-  const [bcOpts, setBcOpts] = useState({ width: 2, height: 60 }); // size controls
+  // ⭐ Barcode UI state
+  const [bcItemId, setBcItemId] = useState<string>('');  // selected item
+  const [bcQty, setBcQty] = useState<number>(1);         // number of labels
+  const [bcOpts, setBcOpts] = useState({ width: 2, height: 60 }); // size
   const previewRef = useRef<HTMLDivElement | null>(null);
 
   const selectedItem = useMemo(() => rows.find(r => r.id === bcItemId) || null, [rows, bcItemId]);
-  const previewCount = useMemo(() => Math.max(0, Math.min(500, Math.floor(bcQty || 0))), [bcQty]); // cap to 500 for safety
+  const previewCount = useMemo(() => Math.max(0, Math.min(500, Math.floor(bcQty || 0))), [bcQty]); // cap to 500
 
   function toggleSort(k: SortKey) {
     setSortKey(prev => {
@@ -244,8 +279,8 @@ export default function InventoryPage() {
           unit_cost: Number(it.unit_cost ?? 0),
           low_stock_threshold: it.low_stock_threshold ?? null,
           uom_code: it.uom_id ? (uomMap.get(it.uom_id) ?? '') : '',
-          locations: filteredLocs,          // initial (will be replaced by memo below to reflect toggle)
-          locations_all,                    // keep the full list
+          locations: filteredLocs,
+          locations_all,
           locations_text: filteredLocs.length
             ? filteredLocs.map(l => `${l.name}: ${l.qty}`).join(' | ')
             : '',
@@ -378,9 +413,9 @@ export default function InventoryPage() {
     downloadCsv(`inventory_${date}.csv`, [header.join(','), ...lines]);
   };
 
-  /* -------------------------
-     ⭐ Print only barcodes
-     ------------------------- */
+  /* --------------------------------
+     ⭐ Print barcodes from preview
+     -------------------------------- */
   const handlePrintBarcodes = () => {
     if (!selectedItem) return alert('Please select an item for barcode labels.');
     const html = previewRef.current?.innerHTML || '';
@@ -539,7 +574,7 @@ export default function InventoryPage() {
                 type="button"
                 onClick={() => {
                   if (!bcItemId) return alert('Select an item first.');
-                  // preview is reactive; this button just ensures state is applied.
+                  // Preview renders automatically based on state
                 }}
               >
                 Generate Preview
@@ -661,3 +696,4 @@ export default function InventoryPage() {
     </div>
   );
 }
+``
