@@ -15,11 +15,21 @@ interface InvRow {
 
   // per-location aggregates
   locations: { name: string; qty: number }[];
-  // original (unfiltered) per-location aggregates (for toggle behavior)
   locations_all: { name: string; qty: number }[];
-  // flattened text for UI/CSV/search (for the currently applied zero-qty toggle)
   locations_text: string;
 }
+
+type SortKey =
+  | 'sku'
+  | 'name'
+  | 'uom_code'
+  | 'stock_qty'
+  | 'low_stock_threshold'
+  | 'unit_cost'
+  | 'total_value'
+  | 'locations_text';
+
+type LocationScope = 'all_items' | 'has_stock' | 'appears_any';
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
@@ -32,16 +42,6 @@ function downloadCsv(filename: string, rows: string[]) {
   a.click();
   URL.revokeObjectURL(url);
 }
-
-type SortKey =
-  | 'sku'
-  | 'name'
-  | 'uom_code'
-  | 'stock_qty'
-  | 'low_stock_threshold'
-  | 'unit_cost'
-  | 'total_value'
-  | 'locations_text';
 
 function SortHeader({
   label, active, dir, onClick, alignRight = false, minWidth,
@@ -63,23 +63,17 @@ function SortHeader({
   );
 }
 
-type LocationScope = 'all_items' | 'has_stock' | 'appears_any'; 
-// all_items: ignore location selection on filtering
-// has_stock: only items with qty>0 at selected location
-// appears_any: items that have any movement at selected location (qty can be 0 after net)
-
 /* ======================================================
-   ⭐ JsBarcode loader with Option C (static URL) support
+   ⭐ JsBarcode loader with your Option C (static URL)
    ====================================================== */
 const JSBARCODE_STATIC_URL =
-  process.env.NEXT_PUBLIC_JSBARCODE_URL                 // 1) preferred: Supabase Storage or any static host
-  || '/vendor/jsbarcode.min.js'                         // 2) optional: ship file under /public/vendor
-  || 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js'; // 3) fallback CDN
+  process.env.NEXT_PUBLIC_JSBARCODE_URL
+  || '/vendor/jsbarcode.min.js'
+  || 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js';
 
-async function ensureJsBarcodeFromStatic(): Promise<any> {
-  if (typeof window !== 'undefined' && (window as any).JsBarcode) {
-    return (window as any).JsBarcode;
-  }
+async function ensureJsBarcode(): Promise<any> {
+  if (typeof window !== 'undefined' && (window as any).JsBarcode) return (window as any).JsBarcode;
+
   await new Promise<void>((resolve, reject) => {
     const id = 'injected-jsbarcode';
     if (document.getElementById(id)) return resolve();
@@ -89,11 +83,10 @@ async function ensureJsBarcodeFromStatic(): Promise<any> {
     s.async = true;
     s.onload = () => resolve();
     s.onerror = () => {
-      // final attempt: public CDN (in case custom static URL failed)
-      const fallbackId = 'injected-jsbarcode-cdn';
-      if (document.getElementById(fallbackId)) return resolve();
+      const fid = 'injected-jsbarcode-cdn';
+      if (document.getElementById(fid)) return resolve();
       const f = document.createElement('script');
-      f.id = fallbackId;
+      f.id = fid;
       f.src = 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js';
       f.async = true;
       f.onload = () => resolve();
@@ -106,54 +99,46 @@ async function ensureJsBarcodeFromStatic(): Promise<any> {
 }
 
 /* ----------------------------------------------
-   ⭐ Lightweight barcode SVG component (no npm)
+   ⭐ Small Barcode SVG renderer (no npm needed)
    ---------------------------------------------- */
 function BarcodeSvg({
   value,
   options,
-  labelTop,
-  labelBottom,
 }: {
   value: string;
   options?: Partial<{
     format: string; width: number; height: number; displayValue: boolean;
     fontSize: number; textMargin: number; margin: number; lineColor: string;
   }>;
-  labelTop?: string | null;
-  labelBottom?: string | null;
 }) {
   const svgRef = React.useRef<SVGSVGElement | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!value || !svgRef.current) return;
+      if (!svgRef.current || !value) return;
       try {
-        const JsBarcode = await ensureJsBarcodeFromStatic();
+        const JsBarcode = await ensureJsBarcode();
         if (cancelled || !svgRef.current) return;
 
-        // clear previous content
         while (svgRef.current.firstChild) svgRef.current.removeChild(svgRef.current.firstChild);
-
         JsBarcode(svgRef.current, value, {
           format: 'CODE128',
-          width: 2,
-          height: 60,
+          width: 1.4,            // set narrower bars to fit 2x1 labels
+          height: 12,            // ~12mm barcode area inside 25.4mm height
           displayValue: true,
-          fontSize: 12,
-          textMargin: 2,
-          margin: 6,
+          fontSize: 8,
+          textMargin: 0,
+          margin: 0,
           lineColor: '#000',
           ...(options || {}),
         });
       } catch (e) {
         console.warn(e);
         if (!svgRef.current) return;
-        // fallback simple text to avoid broken UI
         const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        txt.setAttribute('x', '0');
-        txt.setAttribute('y', '14');
-        txt.setAttribute('fill', '#000');
+        txt.setAttribute('x', '0'); txt.setAttribute('y', '10');
+        txt.setAttribute('fill', '#000'); txt.setAttribute('font-size', '8');
         txt.textContent = value;
         svgRef.current.appendChild(txt);
       }
@@ -161,11 +146,70 @@ function BarcodeSvg({
     return () => { cancelled = true; };
   }, [value, options]);
 
+  return <svg ref={svgRef} className="w-full h-auto" />;
+}
+
+/* ----------------------------------------------
+   ⭐ Thermal label (2×1 inch exact) template
+   ---------------------------------------------- */
+function ThermalLabel2x1({
+  brand,
+  name,
+  sku,
+  uom,
+}: {
+  brand?: string;
+  name: string;
+  sku: string;
+  uom?: string;
+}) {
+  // Keep content tight for 50.8mm x 25.4mm
   return (
-    <div className="inline-flex flex-col items-center border rounded p-2 bg-white">
-      {labelTop ? <div className="text-xs font-medium mb-1 text-gray-700">{labelTop}</div> : null}
-      <svg ref={svgRef} className="max-w-full h-auto" />
-      {labelBottom ? <div className="text-[10px] mt-1 text-gray-600">{labelBottom}</div> : null}
+    <div
+      className="thermal-label-2x1"
+      style={{
+        width: '50.8mm',
+        height: '25.4mm',
+        padding: '1.5mm',
+        boxSizing: 'border-box',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '0.6mm',
+        justifyContent: 'space-between',
+        border: '1px solid #ddd', // visible on-screen preview; printing ignores if needed
+        borderRadius: '1mm',
+        background: '#fff',
+      }}
+    >
+      {/* top line */}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'baseline',
+        gap: '1mm',
+      }}>
+        <div style={{ fontSize: '8px', fontWeight: 700, lineHeight: '10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '70%' }}>
+          {brand || ''}
+        </div>
+        {uom ? <div style={{ fontSize: '8px', lineHeight: '10px' }}>UoM: {uom}</div> : null}
+      </div>
+
+      {/* item name */}
+      <div style={{
+        fontSize: '9px',
+        lineHeight: '10px',
+        fontWeight: 600,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+      }}>
+        {name}
+      </div>
+
+      {/* barcode */}
+      <div style={{ width: '100%', flex: 1, display: 'flex', alignItems: 'center' }}>
+        <BarcodeSvg value={sku} options={{ height: 12, width: 1.4, displayValue: true, fontSize: 8 }} />
+      </div>
     </div>
   );
 }
@@ -175,100 +219,78 @@ export default function InventoryPage() {
   const [rows, setRows] = useState<InvRow[]>([]);
   const [search, setSearch] = useState<string>('');
   const [lowOnly, setLowOnly] = useState<boolean>(false);
-
   const [sortKey, setSortKey] = useState<SortKey>('sku');
   const [sortDir, setSortDir] = useState<'asc'|'desc'>('asc');
 
-  // NEW: UI state for location filtering and display options
+  // Location filter
   const [allLocations, setAllLocations] = useState<string[]>([]);
-  const [selectedLocation, setSelectedLocation] = useState<string>(''); // '' = no selection
+  const [selectedLocation, setSelectedLocation] = useState<string>('');
   const [locationScope, setLocationScope] = useState<LocationScope>('all_items');
   const [showZeroQtyLocations, setShowZeroQtyLocations] = useState<boolean>(false);
 
-  // ⭐ Barcode UI state
-  const [bcItemId, setBcItemId] = useState<string>('');  // selected item
-  const [bcQty, setBcQty] = useState<number>(1);         // number of labels
-  const [bcOpts, setBcOpts] = useState({ width: 2, height: 60 }); // size
+  // ⭐ Selections for multi-item labels
+  type Sel = Record<string, { checked: boolean; qty: number }>;
+  const [sel, setSel] = useState<Sel>({});
+  const [bulkQty, setBulkQty] = useState<number>(1);
+
+  // Brand for label top (optional env)
+  const brandName = process.env.NEXT_PUBLIC_BRAND_NAME || 'Vinayak Hardware';
+
+  // Preview mount
   const previewRef = useRef<HTMLDivElement | null>(null);
 
-  const selectedItem = useMemo(() => rows.find(r => r.id === bcItemId) || null, [rows, bcItemId]);
-  const previewCount = useMemo(() => Math.max(0, Math.min(500, Math.floor(bcQty || 0))), [bcQty]); // cap to 500
-
-  function toggleSort(k: SortKey) {
+  const toggleSort = (k: SortKey) => {
     setSortKey(prev => {
-      if (prev !== k) {
-        setSortDir('asc');
-        return k;
-      }
+      if (prev !== k) { setSortDir('asc'); return k; }
       setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
       return k;
     });
-  }
+  };
 
+  // Load inventory + locations
   const loadInventory = async () => {
     try {
       setLoading(true);
-
-      // 1) Load base items
       const { data: itemsData, error: itemsErr } = await supabase
         .from('items')
         .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id')
         .order('sku', { ascending: true });
-
       if (itemsErr) throw itemsErr;
 
-      // 2) Load UoMs for mapping
-      const { data: uoms } = await supabase
-        .from('units_of_measure')
-        .select('id, code');
-
+      const { data: uoms } = await supabase.from('units_of_measure').select('id, code');
       const uomMap = new Map<string, string>();
       (uoms ?? []).forEach((u: any) => uomMap.set(u.id, u.code));
 
-      // 3) Load stock_moves for per-location aggregation
       const { data: moves, error: movesErr } = await supabase
         .from('stock_moves')
         .select('item_id, move_type, qty, location');
-
       if (movesErr) throw movesErr;
 
-      // Build: itemId -> (location -> qty)
       const perItemLocMap = new Map<string, Map<string, number>>();
       const allLocSet = new Set<string>();
-
       (moves ?? []).forEach((m: any) => {
         const itemId = String(m.item_id);
         const mt = String(m.move_type || '').toLowerCase();
         const loc = (String(m.location ?? '').trim()) || '(unassigned)';
         const qRaw = Number(m.qty ?? 0);
-
         let delta = qRaw;
         if (mt === 'issue') delta = -Math.abs(qRaw);
         else if (mt === 'receive' || mt === 'return') delta = Math.abs(qRaw);
-        // adjust uses provided sign as-is
-
         if (!perItemLocMap.has(itemId)) perItemLocMap.set(itemId, new Map());
-        const locMap = perItemLocMap.get(itemId)!;
-        locMap.set(loc, (locMap.get(loc) ?? 0) + delta);
-
-        // Collect the location names for the filter dropdown
+        const map = perItemLocMap.get(itemId)!;
+        map.set(loc, (map.get(loc) ?? 0) + delta);
         allLocSet.add(loc);
       });
 
       const allLocArr = Array.from(allLocSet.values()).sort((a, b) => a.localeCompare(b));
       setAllLocations(allLocArr);
 
-      // 4) Map into rows
       const mapped: InvRow[] = (itemsData ?? []).map((it: any) => {
         const itemId = String(it.id);
         const locMap = perItemLocMap.get(itemId) ?? new Map<string, number>();
-
-        // all locations (including zero qty)
         const locations_all = Array.from(locMap.entries())
           .map(([name, qty]) => ({ name, qty }))
           .sort((a, b) => a.name.localeCompare(b.name));
-
-        // default visible locations (filtered by showZeroQtyLocations; we’ll re-apply later)
         const filteredLocs = locations_all.filter(l => l.qty !== 0);
 
         return {
@@ -296,17 +318,11 @@ export default function InventoryPage() {
     }
   };
 
-  useEffect(() => {
-    loadInventory();
-  }, []);
+  useEffect(() => { loadInventory(); }, []);
 
-  // NEW: Apply "showZeroQtyLocations" toggle at display-time
   const rowsWithDisplayLocations = useMemo(() => {
     return rows.map(row => {
-      const displayLocs = showZeroQtyLocations
-        ? row.locations_all
-        : row.locations_all.filter(l => l.qty !== 0);
-
+      const displayLocs = showZeroQtyLocations ? row.locations_all : row.locations_all.filter(l => l.qty !== 0);
       return {
         ...row,
         locations: displayLocs,
@@ -317,10 +333,9 @@ export default function InventoryPage() {
     });
   }, [rows, showZeroQtyLocations]);
 
-  // Filter by search + lowOnly first
   const prefiltered = useMemo(() => {
     const t = search.trim().toLowerCase();
-    return rowsWithDisplayLocations.filter((r) => {
+    return rowsWithDisplayLocations.filter(r => {
       const match =
         !t ||
         r.sku.toLowerCase().includes(t) ||
@@ -334,63 +349,44 @@ export default function InventoryPage() {
     });
   }, [rowsWithDisplayLocations, search, lowOnly]);
 
-  // NEW: Apply Location filter with scope
   const filtered = useMemo(() => {
     if (!selectedLocation || locationScope === 'all_items') return prefiltered;
-
     if (locationScope === 'has_stock') {
-      // Keep items that have qty > 0 at the selected location
       return prefiltered.filter(r => {
         const loc = r.locations_all.find(l => l.name === selectedLocation);
         return !!loc && Number(loc.qty) > 0;
       });
     }
-
-    // appears_any: Keep items that have this location in their map at all
-    return prefiltered.filter(r => {
-      const loc = r.locations_all.find(l => l.name === selectedLocation);
-      return !!loc; // qty may be 0
-    });
+    return prefiltered.filter(r => r.locations_all.some(l => l.name === selectedLocation));
   }, [prefiltered, selectedLocation, locationScope]);
 
   const sorted = useMemo(() => {
-    const cp = filtered.map(r => ({
-      ...r,
-      total_value: r.stock_qty * r.unit_cost,
-    }));
+    const cp = filtered.map(r => ({ ...r, total_value: r.stock_qty * r.unit_cost }));
     cp.sort((a: any, b: any) => {
       const dir = sortDir === 'asc' ? 1 : -1;
       let va: any; let vb: any;
-
       switch (sortKey) {
-        case 'sku':                 va = a.sku?.toLowerCase() ?? ''; vb = b.sku?.toLowerCase() ?? ''; break;
-        case 'name':                va = a.name?.toLowerCase() ?? ''; vb = b.name?.toLowerCase() ?? ''; break;
-        case 'uom_code':            va = a.uom_code?.toLowerCase() ?? ''; vb = b.uom_code?.toLowerCase() ?? ''; break;
-        case 'stock_qty':           va = Number(a.stock_qty); vb = Number(b.stock_qty); break;
+        case 'sku': va = a.sku?.toLowerCase() ?? ''; vb = b.sku?.toLowerCase() ?? ''; break;
+        case 'name': va = a.name?.toLowerCase() ?? ''; vb = b.name?.toLowerCase() ?? ''; break;
+        case 'uom_code': va = a.uom_code?.toLowerCase() ?? ''; vb = b.uom_code?.toLowerCase() ?? ''; break;
+        case 'stock_qty': va = Number(a.stock_qty); vb = Number(b.stock_qty); break;
         case 'low_stock_threshold': va = Number(a.low_stock_threshold ?? -Infinity); vb = Number(b.low_stock_threshold ?? -Infinity); break;
-        case 'unit_cost':           va = Number(a.unit_cost); vb = Number(b.unit_cost); break;
-        case 'total_value':         va = Number(a.total_value); vb = Number(b.total_value); break;
-        case 'locations_text':      va = (a.locations_text ?? '').toLowerCase(); vb = (b.locations_text ?? '').toLowerCase(); break;
-        default:                    va = 0; vb = 0;
+        case 'unit_cost': va = Number(a.unit_cost); vb = Number(b.unit_cost); break;
+        case 'total_value': va = Number(a.total_value); vb = Number(b.total_value); break;
+        case 'locations_text': va = (a.locations_text ?? '').toLowerCase(); vb = (b.locations_text ?? '').toLowerCase(); break;
+        default: va = 0; vb = 0;
       }
-
-      if (typeof va === 'number' && typeof vb === 'number') {
-        return (va - vb) * dir;
-      }
+      if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir;
       if (va < vb) return -1 * dir;
-      if (va > vb) return  1 * dir;
+      if (va > vb) return 1 * dir;
       return 0;
     });
     return cp as (InvRow & { total_value: number })[];
   }, [filtered, sortKey, sortDir]);
 
   const totals = useMemo(() => {
-    let qty = 0;
-    let value = 0;
-    for (const r of sorted) {
-      qty += r.stock_qty;
-      value += r.stock_qty * r.unit_cost;
-    }
+    let qty = 0; let value = 0;
+    for (const r of sorted) { qty += r.stock_qty; value += r.stock_qty * r.unit_cost; }
     return { qty: round2(qty), value: round2(value) };
   }, [sorted]);
 
@@ -413,43 +409,107 @@ export default function InventoryPage() {
     downloadCsv(`inventory_${date}.csv`, [header.join(','), ...lines]);
   };
 
-  /* --------------------------------
-     ⭐ Print barcodes from preview
-     -------------------------------- */
-  const handlePrintBarcodes = () => {
-    if (!selectedItem) return alert('Please select an item for barcode labels.');
-    const html = previewRef.current?.innerHTML || '';
-    if (!html) return alert('Nothing to print. Please generate a preview first.');
+  /* ------------------------------------------------
+     ⭐ Selection helpers
+     ------------------------------------------------ */
+  const setRowChecked = (id: string, checked: boolean) => {
+    setSel(prev => ({ ...prev, [id]: { checked, qty: prev[id]?.qty ?? 1 } }));
+  };
+  const setRowQty = (id: string, qty: number) => {
+    setSel(prev => ({ ...prev, [id]: { checked: prev[id]?.checked ?? false, qty: Math.max(1, Math.floor(qty || 1)) } }));
+  };
+  const selectAllVisibleWithStock = () => {
+    setSel(prev => {
+      const next: Sel = { ...prev };
+      for (const r of sorted) {
+        if ((r.stock_qty ?? 0) > 0 && r.sku) {
+          next[r.id] = { checked: true, qty: next[r.id]?.qty ?? 1 };
+        }
+      }
+      return next;
+    });
+  };
+  const clearSelection = () => setSel({});
 
-    const w = window.open('', '_blank', 'noopener,noreferrer,width=800,height=600');
-    if (!w) return alert('Please allow pop-ups to print barcodes.');
+  const applyBulkQty = () => {
+    setSel(prev => {
+      const next: Sel = { ...prev };
+      for (const r of sorted) {
+        if (next[r.id]?.checked) next[r.id] = { checked: true, qty: Math.max(1, Math.floor(bulkQty || 1)) };
+      }
+      return next;
+    });
+  };
+
+  /* ------------------------------------------------
+     ⭐ Build preview: labels for all selected items
+     ------------------------------------------------ */
+  const selectedItems = useMemo(() => {
+    const arr: { row: InvRow; qty: number }[] = [];
+    for (const r of sorted) {
+      const s = sel[r.id];
+      if (s?.checked && r.sku) {
+        arr.push({ row: r, qty: Math.max(1, Math.min(500, Math.floor(s.qty || 1))) });
+      }
+    }
+    return arr;
+  }, [sorted, sel]);
+
+  /* ------------------------------------------------
+     ⭐ Print Thermal 2×1 (each label = one page)
+     ------------------------------------------------ */
+  const handlePrintThermal = () => {
+    const count = selectedItems.reduce((sum, it) => sum + it.qty, 0);
+    if (count === 0) return alert('Please select items and set label quantities.');
+
+    // Ensure labels are rendered in preview (JsBarcode applied)
+    const html = previewRef.current?.innerHTML || '';
+    if (!html) return alert('Please click "Preview Labels" first.');
+
+    const w = window.open('', '_blank', 'noopener,noreferrer,width=900,height=700');
+    if (!w) return alert('Please allow pop-ups to print labels.');
+
     const styles = `
       <style>
-        @page { margin: 5mm; }
-        body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
-        .label { display: inline-flex; flex-direction: column; align-items: center; border: 1px solid #ddd; border-radius: 6px; padding: 6px; }
-        .label svg { width: 100%; height: auto; }
-        .top { font-size: 11px; font-weight: 600; margin-bottom: 2px; }
-        .bottom { font-size: 10px; color: #555; margin-top: 2px; }
-        @media print { .noprint { display: none !important; } }
+        @page {
+          size: 50.8mm 25.4mm;  /* exact 2×1 inches */
+          margin: 0;            /* no margin for thermal */
+        }
+        html, body { margin: 0; padding: 0; }
+        /* Every .sheet will be one label (page) */
+        .sheet {
+          width: 50.8mm;
+          height: 25.4mm;
+          page-break-after: always;
+        }
+        /* Copy of sizing from preview to keep consistency */
+        .thermal-label-2x1 { width: 50.8mm; height: 25.4mm; padding: 1.5mm; box-sizing: border-box; }
+        /* Remove preview borders in print if you prefer clean edges */
+        .thermal-label-2x1 { border: none !important; }
       </style>
     `;
-    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Barcodes</title>${styles}</head><body>`);
-    w.document.write(`<div class="grid">${html}</div>`);
-    w.document.write(`<div class="noprint" style="margin-top:12px"><button onclick="window.print()">Print</button></div>`);
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Thermal 2x1 Labels</title>${styles}</head><body>`);
+    // Wrap each label in a .sheet so it becomes one printed page on roll
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = html;
+    const labels = Array.from(wrapper.children);
+    labels.forEach(el => {
+      w.document.write(`<div class="sheet">${(el as HTMLElement).outerHTML}</div>`);
+    });
     w.document.write(`</body></html>`);
     w.document.close();
     w.focus();
+    // Give the browser a tick to paint SVGs before printing
+    setTimeout(() => w.print(), 200);
   };
 
   return (
     <div className="space-y-4">
       <div className="card">
+        {/* Top controls */}
         <div className="flex flex-wrap items-end gap-3 mb-3">
           <div className="text-lg font-semibold mr-auto">Inventory</div>
 
-          {/* Search */}
           <input
             className="input"
             placeholder="Search by SKU, Name, or Location…"
@@ -457,47 +517,25 @@ export default function InventoryPage() {
             onChange={(e) => setSearch(e.target.value)}
           />
 
-          {/* Low only */}
           <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={lowOnly}
-              onChange={(e) => setLowOnly(e.target.checked)}
-            />
+            <input type="checkbox" checked={lowOnly} onChange={(e) => setLowOnly(e.target.checked)} />
             Low stock only
           </label>
 
-          {/* NEW: Location Filter controls */}
           <div className="flex items-center gap-2">
-            <select
-              className="input"
-              value={selectedLocation}
-              onChange={(e) => setSelectedLocation(e.target.value)}
-              title="Filter by location"
-            >
+            <select className="input" value={selectedLocation} onChange={(e) => setSelectedLocation(e.target.value)} title="Filter by location">
               <option value="">All locations</option>
-              {allLocations.map((loc) => (
-                <option key={loc} value={loc}>{loc}</option>
-              ))}
+              {allLocations.map(loc => <option key={loc} value={loc}>{loc}</option>)}
             </select>
 
-            <select
-              className="input"
-              value={locationScope}
-              onChange={(e) => setLocationScope(e.target.value as LocationScope)}
-              title="Location filter scope"
-            >
+            <select className="input" value={locationScope} onChange={(e) => setLocationScope(e.target.value as LocationScope)} title="Location scope">
               <option value="all_items">Scope: All items</option>
               <option value="has_stock">Scope: Items with stock at location</option>
               <option value="appears_any">Scope: Items that appear at location</option>
             </select>
 
             <label className="flex items-center gap-2 text-sm" title="Show zero-qty locations in the Locations column">
-              <input
-                type="checkbox"
-                checked={showZeroQtyLocations}
-                onChange={(e) => setShowZeroQtyLocations(e.target.checked)}
-              />
+              <input type="checkbox" checked={showZeroQtyLocations} onChange={(e) => setShowZeroQtyLocations(e.target.checked)} />
               Show zero-qty
             </label>
           </div>
@@ -506,106 +544,71 @@ export default function InventoryPage() {
           <Button type="button" onClick={loadInventory}>Refresh</Button>
         </div>
 
-        {/* ------------------------------------------
-            ⭐ BARCODE GENERATOR (header preview area)
-           ------------------------------------------ */}
+        {/* ⭐ Thermal 2×1 Multi-Item Label Controls */}
         <div className="mb-4 border rounded p-3 bg-white">
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="font-semibold mr-2">Barcode Generator</div>
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="font-semibold">Thermal 2×1 Labels (50.8 mm × 25.4 mm)</div>
 
-            {/* Item picker */}
-            <div className="flex flex-col">
-              <label className="label text-xs">Item</label>
-              <select
-                className="input min-w-[260px]"
-                value={bcItemId}
-                onChange={(e) => setBcItemId(e.target.value)}
-                title="Select item to generate barcode"
-              >
-                <option value="">-- Choose Item --</option>
-                {rows.map(r => (
-                  <option key={r.id} value={r.id}>{r.sku} — {r.name}</option>
-                ))}
-              </select>
-            </div>
+            <Button type="button" onClick={selectAllVisibleWithStock}>Select all (stock &gt; 0)</Button>
+            <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={clearSelection}>Clear selection</Button>
 
-            {/* Qty */}
-            <div className="flex flex-col">
-              <label className="label text-xs">Qty (labels)</label>
-              <input
-                className="input w-28"
-                type="number"
-                min={1}
-                max={500}
-                value={bcQty}
-                onChange={(e) => setBcQty(parseInt(e.target.value || '1', 10))}
-              />
-            </div>
-
-            {/* Size */}
-            <div className="flex items-center gap-2">
+            <div className="ml-auto flex items-end gap-2">
               <div className="flex flex-col">
-                <label className="label text-xs">Bar width</label>
+                <label className="label text-xs">Labels per selected</label>
                 <input
                   className="input w-24"
                   type="number"
                   min={1}
-                  max={4}
-                  step={0.5}
-                  value={bcOpts.width}
-                  onChange={(e) => setBcOpts(o => ({ ...o, width: parseFloat(e.target.value || '2') }))}
+                  max={500}
+                  value={bulkQty}
+                  onChange={(e) => setBulkQty(Math.max(1, Math.min(500, parseInt(e.target.value || '1', 10))))}
                 />
               </div>
-              <div className="flex flex-col">
-                <label className="label text-xs">Height</label>
-                <input
-                  className="input w-24"
-                  type="number"
-                  min={30}
-                  max={120}
-                  value={bcOpts.height}
-                  onChange={(e) => setBcOpts(o => ({ ...o, height: parseInt(e.target.value || '60', 10) }))}
-                />
-              </div>
-            </div>
-
-            <div className="ml-auto flex gap-2">
+              <Button type="button" onClick={applyBulkQty}>Apply to selected</Button>
               <Button
                 type="button"
                 onClick={() => {
-                  if (!bcItemId) return alert('Select an item first.');
-                  // Preview renders automatically based on state
+                  // Preview is just rendering below; clicking ensures user explicitly triggers it.
+                  if (selectedItems.length === 0) alert('Select items and set quantities first.');
                 }}
               >
-                Generate Preview
+                Preview Labels
               </Button>
-              <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={handlePrintBarcodes}>
-                Print Barcodes
+              <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={handlePrintThermal}>
+                Print Thermal 2×1
               </Button>
             </div>
           </div>
 
-          {/* Preview grid */}
+          {/* Preview grid: we render each label the number of times requested */}
           <div className="mt-3">
-            {!selectedItem ? (
-              <div className="text-sm text-gray-600">Choose an item and quantity to preview barcodes.</div>
+            {selectedItems.length === 0 ? (
+              <div className="text-sm text-gray-600">Select items (or use “Select all (stock &gt; 0)”), set “Labels per selected”, then click “Preview Labels”.</div>
             ) : (
-              <div ref={previewRef} className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-                {Array.from({ length: previewCount }).map((_, idx) => (
-                  <div key={idx} className="label inline-block">
-                    <BarcodeSvg
-                      value={selectedItem.sku}
-                      options={{ format: 'CODE128', width: bcOpts.width, height: bcOpts.height, displayValue: true }}
-                      labelTop={selectedItem.name}
-                      labelBottom={selectedItem.uom_code ? `UoM: ${selectedItem.uom_code}` : ''}
+              <div
+                ref={previewRef}
+                className="grid gap-2"
+                style={{
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+                }}
+              >
+                {selectedItems.flatMap(({ row, qty }) =>
+                  Array.from({ length: qty }).map((_, i) => (
+                    <ThermalLabel2x1
+                      key={`${row.id}-${i}`}
+                      brand={brandName}
+                      name={row.name || row.sku}
+                      sku={row.sku}
+                      uom={row.uom_code}
                     />
-                  </div>
-                ))}
+                  ))
+                )}
               </div>
             )}
           </div>
         </div>
 
+        {/* Inventory table with selection column */}
         {loading ? (
           <p>Loading…</p>
         ) : rows.length === 0 ? (
@@ -615,8 +618,10 @@ export default function InventoryPage() {
             <table className="table w-full">
               <thead>
                 <tr>
-                  <th>
-                    <SortHeader label="SKU" active={sortKey==='sku'} dir={sortDir} onClick={() => toggleSort('sku')} minWidth={120} />
+                  {/* ⭐ selection & qty columns */}
+                  <th style={{ minWidth: 60 }}>Select</th>
+                  <th style={{ minWidth: 110 }}>
+                    <SortHeader label="SKU" active={sortKey==='sku'} dir={sortDir} onClick={() => toggleSort('sku')} minWidth={110} />
                   </th>
                   <th>
                     <SortHeader label="Item" active={sortKey==='name'} dir={sortDir} onClick={() => toggleSort('name')} minWidth={200} />
@@ -649,8 +654,31 @@ export default function InventoryPage() {
                     r.low_stock_threshold > 0 &&
                     r.stock_qty <= r.low_stock_threshold;
 
+                  const s = sel[r.id] || { checked: false, qty: 1 };
+
                   return (
                     <tr key={r.id} className={isLow ? 'bg-red-50' : ''}>
+                      {/* selection & per-row label qty */}
+                      <td>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={s.checked}
+                            onChange={(e) => setRowChecked(r.id, e.target.checked)}
+                            title="Select for barcode printing"
+                          />
+                          <input
+                            className="input w-16"
+                            type="number"
+                            min={1}
+                            max={500}
+                            value={s.qty}
+                            onChange={(e) => setRowQty(r.id, parseInt(e.target.value || '1', 10))}
+                            title="Labels for this item"
+                          />
+                        </div>
+                      </td>
+
                       <td>{r.sku}</td>
                       <td>{r.name}</td>
                       <td>{r.uom_code || '-'}</td>
@@ -681,7 +709,7 @@ export default function InventoryPage() {
               </tbody>
               <tfoot>
                 <tr className="font-semibold">
-                  <td colSpan={3} className="text-right">Totals:</td>
+                  <td colSpan={4} className="text-right">Totals:</td>
                   <td className="text-right" style={{ minWidth: 80, fontVariantNumeric: 'tabular-nums' }}>{totals.qty}</td>
                   <td className="text-right" style={{ minWidth: 90 }}>—</td>
                   <td className="text-right" style={{ minWidth: 120 }}>—</td>
@@ -696,4 +724,3 @@ export default function InventoryPage() {
     </div>
   );
 }
-``
