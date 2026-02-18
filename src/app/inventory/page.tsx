@@ -492,40 +492,105 @@ export default function InventoryPage() {
   /* --------------------------------
      PRINT (fixed blank page issue)
      -------------------------------- */
-  const handlePrintThermal = () => {
-    const totalLabels = selectedItems.reduce((sum, it) => sum + it.qty, 0);
-    if (totalLabels === 0) return alert('Please select items and set label quantities.');
-    const html = previewRef.current?.innerHTML || '';
-    if (!html) return alert('Please click "Preview Labels" first and wait a moment.');
+ // --- REPLACE your existing handlePrintThermal with this version ---
+const handlePrintThermal = () => {
+  // 1) Validate there is something to print
+  const totalLabels = selectedItems.reduce((sum, it) => sum + it.qty, 0);
+  if (totalLabels === 0) {
+    alert('Please select items and set label quantities.');
+    return;
+  }
+  const html = previewRef.current?.innerHTML || '';
+  if (!html) {
+    alert('Please click "Preview Labels" first and wait a moment.');
+    return;
+  }
 
-    const w = window.open('', '_blank', 'noopener,noreferrer,width=900,height=700');
-    if (!w) return alert('Please allow pop-ups to print labels.');
+  // 2) Compose a full HTML doc with exact 2×1 (50.8mm × 25.4mm) page size
+  const docHtml = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Thermal 2x1 Labels</title>
+  <style>
+    @page {
+      size: 50.8mm 25.4mm; /* exact 2×1 inches */
+      margin: 0;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #fff;
+    }
+    /* Each .sheet will be exactly one label "page" on the roll */
+    .sheet {
+      width: 50.8mm;
+      height: 25.4mm;
+      page-break-after: always;
+    }
+    /* Ensure the preview label style is identical in print */
+    .thermal-label-2x1 {
+      width: 50.8mm;
+      height: 25.4mm;
+      padding: 1.5mm;
+      box-sizing: border-box;
+      border: none !important; /* remove preview border in print */
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+  ${(() => {
+    // Wrap each label node from preview into a .sheet container
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    const items = Array.from(container.children);
+    return items.map(el => `<div class="sheet">${(el as HTMLElement).outerHTML}</div>`).join('');
+  })()}
+</body>
+</html>`;
 
-    const styles = `
-      <style>
-        @page { size: 50.8mm 25.4mm; margin: 0; }
-        html, body { margin: 0; padding: 0; background:#fff; }
-        .sheet { width: 50.8mm; height: 25.4mm; page-break-after: always; }
-        .thermal-label-2x1 { width: 50.8mm; height: 25.4mm; padding: 1.5mm; box-sizing: border-box; border:none !important; }
-      </style>
-    `;
+  // 3) Create a hidden iframe and print from it (more reliable than window.open)
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('style', 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;');
+  document.body.appendChild(iframe);
 
-    w.document.open();
-    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Thermal 2x1 Labels</title>${styles}</head><body>`);
-    // Wrap each label element into a page-sized .sheet
-    const temp = document.createElement('div');
-    temp.innerHTML = html;
-    const labels = Array.from(temp.children);
-    labels.forEach(el => {
-      w.document.write(`<div class="sheet">${(el as HTMLElement).outerHTML}</div>`);
-    });
-    w.document.write(`</body></html>`);
-    w.document.close();
+  const onFrameLoad = () => {
+    try {
+      const w = iframe.contentWindow!;
+      const d = w.document;
 
-    const doPrint = () => setTimeout(() => { try { w.focus(); w.print(); } catch {} }, 300);
-    if (w.document.readyState === 'complete') doPrint();
-    else w.onload = doPrint;
+      // Write the print HTML and wait for layout/paint
+      d.open();
+      d.write(docHtml);
+      d.close();
+
+      // Give the browser a short tick to render SVGs fully, then print
+      setTimeout(() => {
+        w.focus();
+        w.print();
+
+        // Clean up after printing (some browsers fire afterprint; fallback to timeout)
+        const cleanup = () => {
+          try { document.body.removeChild(iframe); } catch {}
+        };
+        w.addEventListener('afterprint', cleanup, { once: true });
+        setTimeout(cleanup, 1500);
+      }, 300);
+    } catch (err) {
+      console.error('Print failed:', err);
+      try { document.body.removeChild(iframe); } catch {}
+      alert('Printing failed. Please try again.');
+    }
   };
+
+  // Some browsers fire load even for empty iframe; attach then write
+  if (iframe.contentWindow?.document?.readyState === 'complete') {
+    onFrameLoad();
+  } else {
+    iframe.onload = onFrameLoad;
+  }
+};
 
   /* --------------------------------
      CSV export (same as before)
