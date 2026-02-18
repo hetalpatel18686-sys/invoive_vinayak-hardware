@@ -202,14 +202,12 @@ function QrSvg({
         const QR: any = await ensureQRCodeFromStatic();
         if (cancelled || !wrapRef.current) return;
 
-        // Convert mm to px @ 96dpi (approx) for sizing inside algorithm; actual print uses CSS mm anyway
-        const px = Math.max(40, Math.round((sizeMm / 25.4) * 96)); // floor lower bound
+        const px = Math.max(40, Math.round((sizeMm / 25.4) * 96)); // approximate sizing
         const toString = QR.toString || QR.default?.toString || QR?.toString;
         if (!toString) throw new Error('QR lib missing toString()');
 
         const svg = await toString(String(value), { type: 'svg', margin: 0, width: px });
-        wrapRef.current.innerHTML = svg; // inject SVG markup
-        // make sure it scales to box
+        wrapRef.current.innerHTML = svg;
         const svgEl = wrapRef.current.querySelector('svg') as SVGSVGElement | null;
         if (svgEl) {
           svgEl.setAttribute('width', '100%');
@@ -227,11 +225,7 @@ function QrSvg({
   return (
     <div
       ref={wrapRef}
-      style={{
-        width: `${sizeMm}mm`,
-        height: `${sizeMm}mm`,
-        display: 'block',
-      }}
+      style={{ width: `${sizeMm}mm`, height: `${sizeMm}mm`, display: 'block' }}
     />
   );
 }
@@ -285,7 +279,6 @@ function ThermalLabel2x1({
         <div style={{ flex: 1, minWidth: 0 }}>
           <BarcodeSvg value={sku} options={{ height: 12, width: 1.4, displayValue: true, fontSize: 8 }} />
         </div>
-        {/* ~11mm QR at right */}
         <QrSvg value={sku} sizeMm={11} />
       </div>
     </div>
@@ -309,9 +302,12 @@ export default function InventoryPage() {
   // multi selection for labels
   type Sel = Record<string, { checked: boolean; qty: number }>;
   const [sel, setSel] = useState<Sel>({});
-  const [bulkQty, setBulkQty] = useState<number>(1);
+  const [bulkQtyState, setBulkQtyState] = useState<number>(1); // ✅ renamed
+  const setBulkQtyInput = (n: number) => setBulkQtyState(Math.max(1, Math.min(500, Math.floor(n || 1)))); // ✅ renamed
 
   const brandName = process.env.NEXT_PUBLIC_BRAND_NAME || 'Vinayak Hardware';
+
+  // ✅ only one previewRef
   const previewRef = useRef<HTMLDivElement | null>(null);
 
   const toggleSort = (k: SortKey) => {
@@ -450,9 +446,9 @@ export default function InventoryPage() {
         case 'locations_text': va = (a.locations_text ?? '').toLowerCase(); vb = (b.locations_text ?? '').toLowerCase(); break;
         default: va = 0; vb = 0;
       }
-      if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * (sortDir === 'asc' ? 1 : -1);
-      if (va < vb) return -1 * (sortDir === 'asc' ? 1 : -1);
-      if (va > vb) return 1 * (sortDir === 'asc' ? 1 : -1);
+      if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir;
+      if (va < vb) return -1 * dir;
+      if (va > vb) return  1 * dir;
       return 0;
     });
     return cp as (InvRow & { total_value: number })[];
@@ -465,7 +461,6 @@ export default function InventoryPage() {
   }, [sorted]);
 
   // selection helpers
-  type Sel = Record<string, { checked: boolean; qty: number }>;
   const setRowChecked = (id: string, checked: boolean) =>
     setSel(prev => ({ ...prev, [id]: { checked, qty: prev[id]?.qty ?? 1 } }));
   const setRowQty = (id: string, qty: number) =>
@@ -477,12 +472,11 @@ export default function InventoryPage() {
       return next;
     });
   const clearSelection = () => setSel({});
-  const [bulkQty, setBulkQtyState] = useState<number>(1);
-  const setBulkQty = (n: number) => setBulkQtyState(Math.max(1, Math.min(500, Math.floor(n || 1))));
   const applyBulkQty = () =>
     setSel(prev => {
       const next: Sel = { ...prev };
-      for (const r of sorted) if (next[r.id]?.checked) next[r.id] = { checked: true, qty: bulkQtyState };
+      for (const r of sorted)
+        if (next[r.id]?.checked) next[r.id] = { checked: true, qty: bulkQtyState };
       return next;
     });
 
@@ -498,8 +492,6 @@ export default function InventoryPage() {
   /* --------------------------------
      PRINT (fixed blank page issue)
      -------------------------------- */
-  const previewRef = useRef<HTMLDivElement | null>(null);
-
   const handlePrintThermal = () => {
     const totalLabels = selectedItems.reduce((sum, it) => sum + it.qty, 0);
     if (totalLabels === 0) return alert('Please select items and set label quantities.');
@@ -530,10 +522,31 @@ export default function InventoryPage() {
     w.document.write(`</body></html>`);
     w.document.close();
 
-    // Wait for window load (and images/SVG attach) then print
     const doPrint = () => setTimeout(() => { try { w.focus(); w.print(); } catch {} }, 300);
     if (w.document.readyState === 'complete') doPrint();
     else w.onload = doPrint;
+  };
+
+  /* --------------------------------
+     CSV export (same as before)
+     -------------------------------- */
+  const exportCsv = () => {
+    const header = ['SKU','Item','UoM','Qty','Minimum','Avg Unit Cost','Total Value','Locations'];
+    const lines = sorted.map((r) => {
+      const total = r.stock_qty * r.unit_cost;
+      return [
+        r.sku,
+        (r.name ?? '').replaceAll('"','""'),
+        r.uom_code || '',
+        String(r.stock_qty),
+        r.low_stock_threshold != null ? String(r.low_stock_threshold) : '',
+        r.unit_cost.toFixed(2),
+        total.toFixed(2),
+        (r.locations_text ?? '').replaceAll('"','""'),
+      ].map(v => `"${v}"`).join(',');
+    });
+    const date = new Date().toISOString().slice(0,10);
+    downloadCsv(`inventory_${date}.csv`, [header.join(','), ...lines]);
   };
 
   return (
@@ -568,7 +581,7 @@ export default function InventoryPage() {
             </label>
           </div>
 
-          <Button type="button" onClick={downloadCsv as any /* kept for brevity */}>Export CSV</Button>
+          <Button type="button" onClick={exportCsv}>Export CSV</Button>
           <Button type="button" onClick={loadInventory}>Refresh</Button>
         </div>
 
@@ -582,7 +595,14 @@ export default function InventoryPage() {
             <div className="ml-auto flex items-end gap-2">
               <div className="flex flex-col">
                 <label className="label text-xs">Labels per selected</label>
-                <input className="input w-24" type="number" min={1} max={500} value={bulkQtyState} onChange={(e) => setBulkQty(parseInt(e.target.value || '1', 10))} />
+                <input
+                  className="input w-24"
+                  type="number"
+                  min={1}
+                  max={500}
+                  value={bulkQtyState}
+                  onChange={(e) => setBulkQtyInput(parseInt(e.target.value || '1', 10))}
+                />
               </div>
               <Button type="button" onClick={applyBulkQty}>Apply to selected</Button>
               <Button
