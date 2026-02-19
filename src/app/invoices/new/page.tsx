@@ -214,6 +214,9 @@ export default function NewInvoicePage() {
   const barcodeInputRef = useRef<HTMLInputElement | null>(null);
   const [barcodeBuffer, setBarcodeBuffer] = useState('');
 
+  // 🆕 NEW: per-scan quantity multiplier (manual control)
+  const [scanQty, setScanQty] = useState<number>(1);
+
   useEffect(() => { setRows([makeEmptyRow()]); }, []);
   function makeEmptyRow(): Row {
     return {
@@ -668,12 +671,18 @@ export default function NewInvoicePage() {
         if (!r.location) {
           return `Please select/enter a Location for returned item ${r.sku_input || r.description || r.item_id}.`;
         }
-        // For return, allow new custom locations, so no existence check required.
-        // If not custom, it's from dropdown and exists.
+        // For return, allow new custom locations.
       }
     }
     return null;
   };
+
+  // ---------- NEW helper: pick default location ----------
+  function pickDefaultLocation(balances: { name: string; qty: number }[]): string {
+    if (!balances || balances.length === 0) return '';
+    const withStock = balances.filter(b => Number(b.qty || 0) > 0);
+    return (withStock[0]?.name) ?? balances[0].name ?? '';
+  }
 
   // ----- save invoice/return
   const savingLatch = () => {
@@ -933,95 +942,97 @@ export default function NewInvoicePage() {
     return () => clearTimeout(t);
   }, [barcodeMode]);
 
- // 🆕 BARCODE: process scanned code + auto-select Location (can still change in UI)
-const processBarcode = async (codeRaw: string) => {
-  const code = (codeRaw || '').trim();
-  if (!code) return;
+  // 🆕 BARCODE: process scanned code + auto-select Location (can still change in UI)
+  const processBarcode = async (codeRaw: string) => {
+    const code = (codeRaw || '').trim();
+    if (!code) return;
 
-  try {
-    const { data, error } = await supabase
-      .from('items')
-      .select('id, sku, name, unit_cost, tax_rate, uom:units_of_measure ( code )')
-      .ilike('sku', code)
-      .limit(1);
+    // Sanitize scanQty (fallback to 1)
+    const addQty = Number.isFinite(Number(scanQty)) && Number(scanQty) > 0 ? Number(scanQty) : 1;
 
-    if (error) throw error;
-    const rec = (data ?? [])[0] as ItemDb | undefined;
+    try {
+      const { data, error } = await supabase
+        .from('items')
+        .select('id, sku, name, unit_cost, tax_rate, uom:units_of_measure ( code )')
+        .ilike('sku', code)
+        .limit(1);
 
-    if (!rec) {
-      alert(`No item found for SKU "${code}"`);
-      return;
-    }
+      if (error) throw error;
+      const rec = (data ?? [])[0] as ItemDb | undefined;
 
-    // Load balances for this item to pick a default location
-    const balances = await loadLocBalances(rec.id);
-    const defaultLoc = pickDefaultLocation(balances); // '' if none available
+      if (!rec) {
+        alert(`No item found for SKU "${code}"`);
+        return;
+      }
 
-    // If item row already exists, just increment qty
-    const existing = rows.find(r => r.item_id === rec.id);
-    if (existing) {
-      setQty(existing.id, Number(existing.qty || 0) + 1);
+      // Load balances for this item to pick a default location
+      const balances = await loadLocBalances(rec.id);
+      const defaultLoc = pickDefaultLocation(balances); // '' if none available
 
-      // Ensure balances are attached; if no location yet, set default automatically
+      // If item row already exists, just increment qty by scanQty
+      const existing = rows.find(r => r.item_id === rec.id);
+      if (existing) {
+        setQty(existing.id, Number(existing.qty || 0) + addQty);
+
+        // Ensure balances are attached; if no location yet, set default automatically
+        setRows(prev =>
+          prev.map(r => {
+            if (r.id !== existing.id) return r;
+            const hasBalances = (r.loc_balances && r.loc_balances.length > 0);
+            return {
+              ...r,
+              loc_balances: hasBalances ? r.loc_balances : balances,
+              location: r.location && r.location.trim() ? r.location : defaultLoc, // auto-pick but user can change
+            };
+          })
+        );
+        return;
+      }
+
+      // Otherwise, use first empty row or add a new one
+      let target = rows.find(r => !r.item_id);
+      if (!target) {
+        target = {
+          id: makeId(),
+          sku_input: '',
+          item_id: '',
+          description: '',
+          uom_code: '',
+          base_cost: 0,
+          qty: 1,
+          margin_pct: 0,
+          tax_rate: 0,
+          unit_price: 0,
+          issued_margin_pct: 0,
+          return_qty: 0,
+          location: '',
+          use_custom_location: false,
+          loc_balances: [],
+        };
+        setRows(prev => [...prev, target!]);
+      }
+
+      // Fill the row using existing setter (keeps your rounding/tax logic intact)
+      await setItemBySku(target.id, code);
+
+      // Set qty = scanQty and auto-select default location (if any)
+      setQty(target.id, addQty);
       setRows(prev =>
         prev.map(r => {
-          if (r.id !== existing.id) return r;
-          const hasBalances = (r.loc_balances && r.loc_balances.length > 0);
-          return {
-            ...r,
-            loc_balances: hasBalances ? r.loc_balances : balances,
-            location: r.location && r.location.trim() ? r.location : defaultLoc, // auto-pick but user can change
-          };
+          if (r.id !== target!.id) return r;
+          const locs = (r.loc_balances && r.loc_balances.length > 0) ? r.loc_balances : balances;
+          const autoLoc = r.location && r.location.trim() ? r.location : (defaultLoc || '');
+          return { ...r, loc_balances: locs, location: autoLoc };
         })
       );
-      return;
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.message || 'Scan failed');
+    } finally {
+      setBarcodeBuffer('');
+      setTimeout(() => barcodeInputRef.current?.focus(), 0);
     }
-
-    // Otherwise, use first empty row or add a new one
-    let target = rows.find(r => !r.item_id);
-    if (!target) {
-      target = {
-        id: makeId(),
-        sku_input: '',
-        item_id: '',
-        description: '',
-        uom_code: '',
-        base_cost: 0,
-        qty: 1,
-        margin_pct: 0,
-        tax_rate: 0,
-        unit_price: 0,
-        issued_margin_pct: 0,
-        return_qty: 0,
-        location: '',
-        use_custom_location: false,
-        loc_balances: [],
-      };
-      setRows(prev => [...prev, target!]);
-    }
-
-    // Fill the row using existing setter (keeps your rounding/tax logic intact)
-    await setItemBySku(target.id, code);
-
-    // Set qty = 1 and auto-select default location (if any)
-    setQty(target.id, 1);
-    setRows(prev =>
-      prev.map(r => {
-        if (r.id !== target!.id) return r;
-        // r.loc_balances was set by setItemBySku; if not, use our loaded balances
-        const locs = (r.loc_balances && r.loc_balances.length > 0) ? r.loc_balances : balances;
-        const autoLoc = r.location && r.location.trim() ? r.location : (defaultLoc || '');
-        return { ...r, loc_balances: locs, location: autoLoc };
-      })
-    );
-  } catch (e: any) {
-    console.error(e);
-    alert(e?.message || 'Scan failed');
-  } finally {
-    setBarcodeBuffer('');
-    setTimeout(() => barcodeInputRef.current?.focus(), 0);
-  }
-};
+  };
 
   // =======================
   // Customer Screen only
@@ -1455,6 +1466,24 @@ const processBarcode = async (codeRaw: string) => {
                 }}
               />
               <span className="text-sm font-medium">Barcode Mode</span>
+            </label>
+
+            {/* 🆕 Scan Qty control */}
+            <label className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
+              <span className="text-sm font-medium">Scan Qty</span>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                className="input w-20"
+                value={scanQty}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value || '1', 10);
+                  setScanQty(Number.isFinite(v) && v > 0 ? v : 1);
+                }}
+                disabled={!barcodeMode}
+                title="How many units to add per scan"
+              />
             </label>
 
             <Button type="button" onClick={openCustomerScreen}>Open Customer Screen</Button>
