@@ -933,52 +933,95 @@ export default function NewInvoicePage() {
     return () => clearTimeout(t);
   }, [barcodeMode]);
 
-  // 🆕 BARCODE: process scanned code
-  const processBarcode = async (codeRaw: string) => {
-    const code = (codeRaw || '').trim();
-    if (!code) return;
+ // 🆕 BARCODE: process scanned code + auto-select Location (can still change in UI)
+const processBarcode = async (codeRaw: string) => {
+  const code = (codeRaw || '').trim();
+  if (!code) return;
 
-    try {
-      const { data, error } = await supabase
-        .from('items')
-        .select('id, sku, name, unit_cost, tax_rate, uom:units_of_measure ( code )')
-        .ilike('sku', code)
-        .limit(1);
-      if (error) throw error;
-      const rec = (data ?? [])[0] as ItemDb | undefined;
+  try {
+    const { data, error } = await supabase
+      .from('items')
+      .select('id, sku, name, unit_cost, tax_rate, uom:units_of_measure ( code )')
+      .ilike('sku', code)
+      .limit(1);
 
-      if (!rec) {
-        alert(`No item found for SKU "${code}"`);
-        return;
-      }
+    if (error) throw error;
+    const rec = (data ?? [])[0] as ItemDb | undefined;
 
-      // If item row exists, increment qty
-      const existing = rows.find(r => r.item_id === rec.id);
-      if (existing) {
-        setQty(existing.id, Number(existing.qty || 0) + 1);
-        // Ensure balances are present for existing row if needed
-        if (!existing.loc_balances || existing.loc_balances.length === 0) {
-          const balances = await loadLocBalances(rec.id);
-          setRows(prev => prev.map(r => r.id === existing.id ? { ...r, loc_balances: balances } : r));
-        }
-      } else {
-        // Use first empty row or create new, set item and qty 1
-        let target = rows.find(r => !r.item_id);
-        if (!target) {
-          target = makeEmptyRow();
-          setRows(prev => [...prev, target!]);
-        }
-        await setItemBySku(target.id, code);
-        setQty(target.id, 1);
-      }
-    } catch (e: any) {
-      console.error(e);
-      alert(e?.message || 'Scan failed');
-    } finally {
-      setBarcodeBuffer('');
-      setTimeout(() => barcodeInputRef.current?.focus(), 0);
+    if (!rec) {
+      alert(`No item found for SKU "${code}"`);
+      return;
     }
-  };
+
+    // Load balances for this item to pick a default location
+    const balances = await loadLocBalances(rec.id);
+    const defaultLoc = pickDefaultLocation(balances); // '' if none available
+
+    // If item row already exists, just increment qty
+    const existing = rows.find(r => r.item_id === rec.id);
+    if (existing) {
+      setQty(existing.id, Number(existing.qty || 0) + 1);
+
+      // Ensure balances are attached; if no location yet, set default automatically
+      setRows(prev =>
+        prev.map(r => {
+          if (r.id !== existing.id) return r;
+          const hasBalances = (r.loc_balances && r.loc_balances.length > 0);
+          return {
+            ...r,
+            loc_balances: hasBalances ? r.loc_balances : balances,
+            location: r.location && r.location.trim() ? r.location : defaultLoc, // auto-pick but user can change
+          };
+        })
+      );
+      return;
+    }
+
+    // Otherwise, use first empty row or add a new one
+    let target = rows.find(r => !r.item_id);
+    if (!target) {
+      target = {
+        id: makeId(),
+        sku_input: '',
+        item_id: '',
+        description: '',
+        uom_code: '',
+        base_cost: 0,
+        qty: 1,
+        margin_pct: 0,
+        tax_rate: 0,
+        unit_price: 0,
+        issued_margin_pct: 0,
+        return_qty: 0,
+        location: '',
+        use_custom_location: false,
+        loc_balances: [],
+      };
+      setRows(prev => [...prev, target!]);
+    }
+
+    // Fill the row using existing setter (keeps your rounding/tax logic intact)
+    await setItemBySku(target.id, code);
+
+    // Set qty = 1 and auto-select default location (if any)
+    setQty(target.id, 1);
+    setRows(prev =>
+      prev.map(r => {
+        if (r.id !== target!.id) return r;
+        // r.loc_balances was set by setItemBySku; if not, use our loaded balances
+        const locs = (r.loc_balances && r.loc_balances.length > 0) ? r.loc_balances : balances;
+        const autoLoc = r.location && r.location.trim() ? r.location : (defaultLoc || '');
+        return { ...r, loc_balances: locs, location: autoLoc };
+      })
+    );
+  } catch (e: any) {
+    console.error(e);
+    alert(e?.message || 'Scan failed');
+  } finally {
+    setBarcodeBuffer('');
+    setTimeout(() => barcodeInputRef.current?.focus(), 0);
+  }
+};
 
   // =======================
   // Customer Screen only
