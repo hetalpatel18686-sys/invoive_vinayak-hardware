@@ -49,6 +49,114 @@ async function waitForImages(container: HTMLElement | null) {
   );
 }
 
+/* ----------------- Paper sizing helpers ----------------- */
+type PaperKey = 'a4' | 'a5' | 'a3' | '80mm' | '58mm' | '6x4' | '4x6';
+
+function normalizePaper(param?: string | null): PaperKey {
+  const p = String(param || '').toLowerCase().replace(/\s+/g, '');
+  if (p === 'a5') return 'a5';
+  if (p === 'a3') return 'a3';
+  if (p === '80mm' || p === '80') return '80mm';
+  if (p === '58mm' || p === '58') return '58mm';
+  if (p === '6x4' || p === '6"×4"' || p === '6in4in') return '6x4';
+  if (p === '4x6' || p === '4"×6"' || p === '4in6in') return '4x6';
+  return 'a4';
+}
+
+function buildPageCss(paper: PaperKey) {
+  // Defaults
+  let pageSize = 'A4';
+  let pageMargin = '8mm';
+  let areaWidth = '210mm';
+  let fontScale = '';
+  let extra = '';
+
+  switch (paper) {
+    case 'a3':
+      pageSize = 'A3';
+      areaWidth = '297mm';
+      break;
+    case 'a5':
+      pageSize = 'A5';
+      areaWidth = '148mm';
+      break;
+    case '80mm':
+      pageSize = '80mm auto';
+      pageMargin = '5mm';
+      areaWidth = '80mm';
+      fontScale = `
+        .paper-wrap { font-size: 12px; line-height: 1.25; }
+        .inv-table th, .inv-table td { padding: 2px 4px !important; }
+        .qr-box img { max-height: 120px; }
+      `;
+      break;
+    case '58mm':
+      pageSize = '58mm auto';
+      pageMargin = '5mm';
+      areaWidth = '58mm';
+      fontScale = `
+        .paper-wrap { font-size: 11px; line-height: 1.2; }
+        .inv-table th, .inv-table td { padding: 2px 3px !important; }
+        .qr-box img { max-height: 100px; }
+      `;
+      break;
+    case '6x4':
+      pageSize = '6in 4in';
+      pageMargin = '0.25in';
+      areaWidth = '6in';
+      fontScale = `
+        .paper-wrap { font-size: 12px; line-height: 1.25; }
+      `;
+      break;
+    case '4x6':
+      pageSize = '4in 6in';
+      pageMargin = '0.25in';
+      areaWidth = '4in';
+      fontScale = `
+        .paper-wrap { font-size: 12px; line-height: 1.25; }
+      `;
+      break;
+    default:
+      // a4
+      pageSize = 'A4';
+      areaWidth = '210mm';
+      break;
+  }
+
+  // @page must be a top-level rule. We inject it dynamically.
+  const pageRule = `
+    @page { size: ${pageSize}; margin: ${pageMargin}; }
+  `.trim();
+
+  // Screen width mimic + minor scale
+  const screenRule = `
+    /* Constrain print area width on screen to resemble the paper */
+    .paper-wrap { max-width: ${areaWidth}; margin-left: auto; margin-right: auto; }
+    ${fontScale}
+  `.trim();
+
+  // For print, ensure only print-area renders, and fix layout so no extra blank page
+  const printRules = `
+    @media print {
+      ${pageRule}
+      html, body { padding: 0; margin: 0; height: auto !important; overflow: visible !important; }
+      /* Hide everything by default */
+      body * { visibility: hidden !important; }
+      /* Show only the print area */
+      .print-area, .print-area * { visibility: visible !important; }
+      /* Detach from document flow so hidden siblings don't consume layout height */
+      .print-area { position: fixed !important; left: 0; top: 0; right: 0; width: 100%; margin: 0 auto; }
+      /* Remove min-height/vh effects */
+      .min-h-screen, .min-h-full, .h-screen { min-height: 0 !important; height: auto !important; }
+      .no-print { display: none !important; }
+      /* Table width locking for print */
+      .inv-table { table-layout: fixed !important; width: 100% !important; }
+    }
+  `.trim();
+
+  return { pageRule, screenRule, printRules, areaWidth };
+}
+
 /* ----------------- Page ----------------- */
 export default function ReceiptPage() {
   const params = useParams<{ id: string }>();
@@ -56,9 +164,11 @@ export default function ReceiptPage() {
   const id = String(params?.id || '');
   const autoprint = searchParams.get('autoprint') === '1';
 
-  // 🆕 compact/thermal toggles from query
-  const paperParam = (searchParams.get('paper') || '').toLowerCase();
-  const paper80 = paperParam === '80mm';
+  // Paper selection from query + state
+  const initialPaper = normalizePaper(searchParams.get('paper'));
+  const [paper, setPaper] = useState<PaperKey>(initialPaper);
+
+  // Optional: close tab after print
   const autoClose = searchParams.get('autoclose') === '1';
 
   // Brand (same defaults as invoice page)
@@ -228,7 +338,7 @@ export default function ReceiptPage() {
       }
     })();
 
-  return () => { cancelled = true; };
+    return () => { cancelled = true; };
   }, [id]);
 
   /* -------- Auto print when ready (fonts, logo, images) -------- */
@@ -276,8 +386,11 @@ export default function ReceiptPage() {
   const [showPreview, setShowPreview] = useState(false);
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
 
+  // Page CSS (dynamic per selected paper)
+  const { printRules, screenRule, pageRule } = useMemo(() => buildPageCss(paper), [paper]);
+
   // Build a full HTML doc for the iframe using the current .print-area’s HTML.
-  // This version filters out Next.js "hide FOUC" styles that can blank the preview.
+  // Includes the dynamic @page rule and screen rules for the selected paper.
   const buildPreviewHtml = (): string => {
     const area = document.querySelector('.print-area') as HTMLElement | null;
     const content = area ? area.outerHTML : '<div class="p-4">Nothing to preview</div>';
@@ -294,14 +407,17 @@ export default function ReceiptPage() {
       .map((l) => l.outerHTML)
       .join('\n');
 
-    // Inject thermal rules if paper80 for preview to match print
-    const thermalStyle = paper80 ? `
-      .paper-80 {
-        max-width: 80mm !important;
-        font-size: 12px !important;
-      }
-      @page { size: 80mm auto; margin: 5mm; }
-    ` : '';
+    // Build our paper rules for preview document
+    const ourStyles = `
+      <style>
+        ${screenRule}
+        ${printRules}
+        /* Ensure content is visible inside preview iframe */
+        html, body { background: white; }
+        body { visibility: visible !important; opacity: 1 !important; display: block !important; }
+        [data-next-hide-fouc] { display: contents !important; }
+      </style>
+    `;
 
     return `
 <!doctype html>
@@ -311,21 +427,7 @@ export default function ReceiptPage() {
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     ${links}
     ${styles}
-    <style>
-      /* Ensure content is visible inside preview iframe */
-      html, body { background: white; }
-      body { visibility: visible !important; opacity: 1 !important; display: block !important; }
-
-      /* Neutralize any hide‑FOUC styles if they slipped through */
-      [data-next-hide-fouc] { display: contents !important; }
-
-      /* Keep the same table behavior in preview */
-      .inv-table { table-layout: fixed !important; width: 100% !important; border-collapse: collapse; }
-      .col-right { text-align: right !important; white-space: nowrap !important; }
-      .preview-wrap { max-width: 900px; margin: 12px auto; padding: 0 8px; }
-
-      ${thermalStyle}
-    </style>
+    ${ourStyles}
     <title>${document.title || 'Preview'}</title>
   </head>
   <body>
@@ -345,7 +447,7 @@ export default function ReceiptPage() {
 
     setShowPreview(true);
 
-    // After modal is visible, write HTML into iframe via srcdoc (more robust than doc.write)
+    // After modal is visible, write HTML into iframe via srcdoc
     setTimeout(() => {
       const iframe = previewIframeRef.current;
       if (!iframe) return;
@@ -358,7 +460,6 @@ export default function ReceiptPage() {
     if (!iframe) return;
     const win = iframe.contentWindow;
     if (!win) return;
-    // Small delay to ensure layout is ready
     setTimeout(() => win.print(), 50);
   };
 
@@ -369,9 +470,9 @@ export default function ReceiptPage() {
   const upiId = paymentMeta?.upi_id || process.env.NEXT_PUBLIC_UPI_ID || '';
 
   return (
-    <div className={`min-h-screen bg-white p-4 print:p-0 ${paper80 ? 'paper-80' : ''}`}>
+    <div className="bg-white p-4 print:p-0">
       <style>{`
-        /* ====== Screen & Print: numeric columns and table behavior ====== */
+        /* ====== Screen & shared table behavior ====== */
         .inv-table {
           table-layout: fixed !important;
           width: 100% !important;
@@ -410,27 +511,11 @@ export default function ReceiptPage() {
         .inv-table th:nth-child(7),
         .inv-table td:nth-child(7) { width: 10% !important; }
 
-        /* ----- Thermal/compact tweaks ----- */
-        .paper-80 {
-          max-width: 80mm;
-          margin: 0 auto;
-          font-size: 12px;
-          line-height: 1.25;
-        }
-        .paper-80 .print-area { padding-right: 0; padding-left: 0; }
-        .paper-80 .inv-table th, .paper-80 .inv-table td { padding: 2px 4px !important; }
-        .paper-80 .qr-box img { max-height: 120px; }
+        /* Screen paper width mimic */
+        ${screenRule}
 
-        @media print {
-          ${paper80 ? '@page { size: 80mm auto; margin: 5mm; }' : '@page { margin: 8mm; }'}
-          body * { visibility: hidden !important; }
-          .print-area, .print-area * { visibility: visible !important; }
-          .print-area { position: absolute; left: 0; top: 0; width: 100%; }
-          .no-print { display: none !important; }
-
-          /* Keep the same locking for print explicitly */
-          .inv-table { table-layout: fixed !important; width: 100% !important; }
-        }
+        /* Print rules (includes dynamic @page size and blank-page fixes) */
+        ${printRules}
 
         /* ----- Preview Modal Styles (screen only) ----- */
         .preview-backdrop {
@@ -483,7 +568,26 @@ export default function ReceiptPage() {
       `}</style>
 
       {/* Controls (not printed) */}
-      <div className="no-print mb-4 flex gap-2">
+      <div className="no-print mb-4 flex gap-2 items-center flex-wrap">
+        {/* Paper selector */}
+        <label className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
+          <span className="text-sm font-medium">Paper</span>
+          <select
+            className="text-sm"
+            value={paper}
+            onChange={(e) => setPaper(e.target.value as PaperKey)}
+            title="Select paper size"
+          >
+            <option value="a4">A4 (210×297 mm)</option>
+            <option value="a5">A5 (148×210 mm)</option>
+            <option value="a3">A3 (297×420 mm)</option>
+            <option value="80mm">Thermal 80 mm roll</option>
+            <option value="58mm">Thermal 58 mm roll</option>
+            <option value="6x4">Label 6″×4″ (landscape)</option>
+            <option value="4x6">Label 4″×6″ (portrait)</option>
+          </select>
+        </label>
+
         <button
           type="button"
           onClick={openPreview}
@@ -523,7 +627,8 @@ export default function ReceiptPage() {
         </div>
       )}
 
-      <div className="print-area mx-auto max-w-4xl">
+      {/* PRINT AREA */}
+      <div className="print-area paper-wrap mx-auto">
         {/* Brand header — logo on the LEFT */}
         <div className="mb-3 flex items-center gap-3">
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -584,7 +689,7 @@ export default function ReceiptPage() {
                 ) : null}
               </div>
 
-              {/* 🆕 Payment method summary (compact, good for receipts) */}
+              {/* Payment method summary */}
               <div className="mt-4 grid sm:grid-cols-2 gap-3">
                 <div className="border rounded p-2">
                   <div className="flex justify-between"><div>Method</div><div className="capitalize">{String(payment?.method || '').toLowerCase() || '—'}</div></div>
