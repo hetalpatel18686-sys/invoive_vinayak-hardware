@@ -998,6 +998,18 @@ export default function NewInvoicePage() {
           /* Shared numeric alignment for screen & print */
           .num { text-align: right; font-variant-numeric: tabular-nums; }
 
+ /* Fix alignment of Qty, Unit, Tax%, Line Total */
+  table.table th,
+  table.table td {
+    padding: 4px 8px !important;
+    vertical-align: middle !important;
+  }
+
+  table.table .num {
+    text-align: right !important;
+    white-space: nowrap;
+  }
+
           @media print {
             @page { margin: 8mm; }
             body * { visibility: hidden !important; }
