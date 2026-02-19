@@ -120,11 +120,6 @@ export default function NewInvoicePage() {
     const sp = new URLSearchParams(window.location.search);
     return sp.get('display') === 'customer';
   });
-  const [autoPrint] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    const sp = new URLSearchParams(window.location.search);
-    return sp.get('autoprint') === '1' || sp.get('_print') === '1' || sp.get('print') === '1';
-  });
 
   // Customer view – listen for live payload
   const [liveState, setLiveState] = useState<any>(null);
@@ -139,19 +134,6 @@ export default function NewInvoicePage() {
     });
     return off;
   }, [isCustomerView]);
-
-  // Auto-print after first payload (or fallback)
-  useEffect(() => {
-    if (!isCustomerView || !autoPrint) return;
-    let printed = false;
-    const maybePrint = () => { if (!printed) { printed = true; window.print(); } };
-    if (hasLiveData) {
-      const t = setTimeout(maybePrint, 100);
-      return () => clearTimeout(t);
-    }
-    const t2 = setTimeout(maybePrint, 1500);
-    return () => clearTimeout(t2);
-  }, [isCustomerView, autoPrint, hasLiveData]);
 
   // Brand (🆕 will be SHOWN on Customer View too)
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
@@ -329,7 +311,6 @@ export default function NewInvoicePage() {
     locCacheRef.current.set(itemId, balances);
     return balances;
   };
-
   // ----- set item by SKU (sale) — unit_price always ceil
   // 🆕 added 'opts' to control alert behaviour
   const setItemBySku = async (rowId: string, skuRaw: string, opts?: { silentNotFound?: boolean }) => {
@@ -595,7 +576,7 @@ export default function NewInvoicePage() {
     };
   };
 
-  // ----- live payload (🆕 now also includes invoiceId so Customer View can pay)
+  // ----- live payload
   const buildLivePayload = () => {
     const pay = computePaymentSummary();
     return {
@@ -636,7 +617,6 @@ export default function NewInvoicePage() {
     isCustomerView, rows, totals, docType, issuedAt, customerName, customerAddress1Line,
     payments, invoiceGrandTotalAtSave, invoiceNoJustSaved, notes
   ]);
-
   // ---------- NEW: validation helpers for locations ----------
   const getSelectedLocQty = (r: Row) => {
     if (!r.location || !r.loc_balances?.length) return 0;
@@ -671,7 +651,7 @@ export default function NewInvoicePage() {
         if (!r.location) {
           return `Please select/enter a Location for returned item ${r.sku_input || r.description || r.item_id}.`;
         }
-        // For return, allow new custom locations.
+        // For return, allow new custom locations, so no existence check required.
       }
     }
     return null;
@@ -826,10 +806,10 @@ export default function NewInvoicePage() {
     if (!w) alert('Please allow pop-ups for this site to open the Customer Screen.');
   };
   const openCustomerPrint = () => {
+    // NOTE: auto print removed — just open the Customer View; user can click Print manually there
     try { live.post(buildLivePayload()); } catch {}
     const qs = new URLSearchParams();
     qs.set('display', 'customer');
-    qs.set('autoprint', '1');
     const final = `${window.location.pathname}?${qs.toString()}`;
     const w = window.open(final, '_blank');
     if (!w) alert('Please allow pop-ups for this site to open the Print view.');
@@ -923,12 +903,7 @@ export default function NewInvoicePage() {
         window.open(url, '_blank', 'noopener,noreferrer');
       }
 
-      // 🆕 Auto-print on QR payments (both Editor & Customer View)
-      if (payMethod === 'qr') {
-        setTimeout(() => {
-          try { window.print(); } catch {}
-        }, 200);
-      }
+      // ⚠️ Auto-print removed — no window.print() here
     } catch (err: any) {
       console.error(err);
       alert(err?.message || String(err));
@@ -1033,7 +1008,6 @@ export default function NewInvoicePage() {
       setTimeout(() => barcodeInputRef.current?.focus(), 0);
     }
   };
-
   // =======================
   // Customer Screen only
   // =======================
@@ -1302,31 +1276,6 @@ export default function NewInvoicePage() {
               <div className="mb-3">
                 <label className="label">Reference (txn no / note)</label>
                 <input className="input" value={payReference} onChange={(e) => setPayReference(e.target.value)} placeholder="Optional" />
-              </div>
-
-              <div className="flex items-center gap-2 mb-3">
-                <button
-                  type="button"
-                  className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm"
-                  onClick={() => setPayAmount(Number(liveTotals.grand || 0))}
-                >
-                  Full Amount
-                </button>
-                <button
-                  type="button"
-                  className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm"
-                  onClick={() => {
-                    const grandAtSave = Number(liveTotals.grand || 0);
-                    const paidInLive = Number(paySummary.paidIn || 0);
-                    const paidOutLive = Number(paySummary.paidOut || 0);
-                    const remaining = header.docType === 'return'
-                      ? grandAtSave - paidOutLive + paidInLive
-                      : grandAtSave - paidInLive + paidOutLive;
-                    setPayAmount(ceilRupee(Math.max(0, remaining)));
-                  }}
-                >
-                  Remaining
-                </button>
               </div>
 
               <div className="flex justify-end gap-2">
@@ -1650,7 +1599,6 @@ export default function NewInvoicePage() {
                             if (e.key === 'Enter') { e.preventDefault(); setItemBySku(r.id, r.sku_input); }
                           }}
                           onBlur={() => {
-                            // Final attempt when leaving field: show alert if not found
                             const v = (r.sku_input || '').trim();
                             if (!r.item_id && v) setItemBySku(r.id, v);
                           }}
@@ -1890,25 +1838,6 @@ export default function NewInvoicePage() {
             <div className="mb-3">
               <label className="label">Reference (txn no / note)</label>
               <input className="input" value={payReference} onChange={(e) => setPayReference(e.target.value)} placeholder="Optional" />
-            </div>
-
-            <div className="flex items-center gap-2 mb-3">
-              <button type="button" className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm" onClick={() => setPayAmount(Number((invoiceGrandTotalAtSave ?? totals.grand) || 0))}>
-                Full Amount
-              </button>
-              {invoiceIdJustSaved && (
-                <button
-                  type="button"
-                  className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm"
-                  onClick={() => {
-                    const grandAtSave = invoiceGrandTotalAtSave ?? totals.grand;
-                    const remaining = isReturn ? grandAtSave - paidOut + paidIn : grandAtSave - paidIn + paidOut;
-                    setPayAmount(ceilRupee(Math.max(0, remaining)));
-                  }}
-                >
-                  Remaining
-                </button>
-              )}
             </div>
 
             <div className="flex justify-end gap-2">
