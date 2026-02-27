@@ -393,7 +393,7 @@ export default function InventoryPage() {
   margin_value: Number(it.margin_value ?? 0),
   final_price: Number(it.final_price ?? 0),
 };
-
+try {
       setRows(mapped);
     } catch (e) {
       console.error(e);
