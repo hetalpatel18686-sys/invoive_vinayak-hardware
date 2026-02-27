@@ -802,5 +802,6 @@ const handlePrintThermal = () => {
         )}
       </div>
     </div>
-  )
+  );
 }
+export default InventoryPage;
