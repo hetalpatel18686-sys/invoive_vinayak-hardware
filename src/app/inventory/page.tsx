@@ -372,20 +372,27 @@ export default function InventoryPage() {
         const filteredLocs = locations_all.filter(l => l.qty !== 0);
 
         return {
-          id: it.id,
-          sku: it.sku,
-          name: it.name,
-          stock_qty: Number(it.stock_qty ?? 0),
-          unit_cost: Number(it.unit_cost ?? 0),
-          low_stock_threshold: it.low_stock_threshold ?? null,
-          uom_code: it.uom_id ? (uomMap.get(it.uom_id) ?? '') : '',
-          locations: filteredLocs,
-          locations_all,
-          locations_text: filteredLocs.length
-            ? filteredLocs.map(l => `${l.name}: ${l.qty}`).join(' | ')
-            : '',
-        };
-      });
+  id: it.id,
+  sku: it.sku,
+  name: it.name,
+  stock_qty: Number(it.stock_qty ?? 0),
+  unit_cost: Number(it.unit_cost ?? 0),
+  low_stock_threshold: it.low_stock_threshold ?? null,
+  uom_code: it.uom_id ? (uomMap.get(it.uom_id) ?? '') : '',
+  locations: filteredLocs,
+  locations_all,
+  locations_text: filteredLocs.length
+    ? filteredLocs.map(l => `${l.name}: ${l.qty}`).join(' | ')
+    : '',
+
+  // NEW FIELDS
+  purchase_price: Number(it.purchase_price ?? 0),
+  gst_percent: Number(it.gst_percent ?? 0),
+  gst_value: Number(it.gst_value ?? 0),
+  margin_percent: Number(it.margin_percent ?? 0),
+  margin_value: Number(it.margin_value ?? 0),
+  final_price: Number(it.final_price ?? 0),
+};
 
       setRows(mapped);
     } catch (e) {
