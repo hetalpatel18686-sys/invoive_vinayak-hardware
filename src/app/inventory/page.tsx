@@ -802,5 +802,5 @@ const handlePrintThermal = () => {
         )}
       </div>
     </div>
-  );
+  )
 }
