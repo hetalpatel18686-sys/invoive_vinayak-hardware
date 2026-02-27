@@ -15,13 +15,14 @@ interface InvRow {
   locations: { name: string; qty: number }[];
   locations_all: { name: string; qty: number }[];
   locations_text: string;
-  // NEW FIELDS (added for GST/Margin)
-  purchase_price: number;   // cost when received
-  gst_percent: number;      // GST % entered (like 5, 12, etc.)
-  gst_value: number;        // auto-calculated GST amount
-  margin_percent: number;   // Margin % entered (like 10, 20, etc.)
-  margin_value: number;     // auto-calculated margin amount
-  final_price: number;      // total price = purchase + GST + margin
+
+  // NEW FIELDS
+  purchase_price: number;
+  gst_percent: number;
+  gst_value: number;
+  margin_percent: number;
+  margin_value: number;
+  final_price: number;
 }
 
 type SortKey =
