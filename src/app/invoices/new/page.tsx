@@ -27,6 +27,10 @@ interface ItemDb {
   name: string;
   unit_cost: number;
   tax_rate: number;
+  // NEW: pull pricing fields so we can auto-fill Tax% and Margin%
+  purchase_price?: number | null;
+  gst_percent?: number | null;
+  margin_percent?: number | null;
   uom: { code?: string }[] | { code?: string } | null;
 }
 
@@ -311,30 +315,51 @@ export default function NewInvoicePage() {
     locCacheRef.current.set(itemId, balances);
     return balances;
   };
+
+  // refs to SKU inputs (for restoring focus after alert)
+  const skuInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
   // ----- set item by SKU (sale) — unit_price always ceil
-  // 🆕 added 'opts' to control alert behaviour
+  // 🆕 added 'opts' to control alert behaviour and restore focus if not found
   const setItemBySku = async (rowId: string, skuRaw: string, opts?: { silentNotFound?: boolean }) => {
     const sku = (skuRaw || '').trim();
     if (!sku) return;
     const { data, error } = await supabase
       .from('items')
-      .select('id, sku, name, unit_cost, tax_rate, uom:units_of_measure ( code )')
+      .select(
+        'id, sku, name, unit_cost, tax_rate, purchase_price, gst_percent, margin_percent, uom:units_of_measure ( code )'
+      )
       .ilike('sku', sku)
       .limit(1);
     if (error) return alert(error.message);
     const rec = (data ?? [])[0] as ItemDb | undefined;
+
     if (!rec) {
-      if (!opts?.silentNotFound) alert(`No item found for SKU "${sku}"`);
+      if (!opts?.silentNotFound) {
+        alert(`No item found for SKU "${sku}"`);
+        // Restore focus+select so user can correct immediately
+        setTimeout(() => {
+          const el = skuInputRefs.current[rowId];
+          if (el) { el.focus(); try { el.select(); } catch {} }
+        }, 0);
+      }
       return;
     }
 
     const uom_code = safeUomCode(rec.uom);
     const balances = await loadLocBalances(rec.id);
 
+    // Determine defaults (auto-fill) for GST and Margin
+    const autoGst = Number(
+      (rec.gst_percent ?? rec.tax_rate ?? 0)
+    );
+    const autoMargin = Number(rec.margin_percent ?? 0);
+
     setRows(prev => prev.map(r => {
       if (r.id !== rowId) return r;
       const base = Number(rec.unit_cost || 0);
-      const calc = base * (1 + (r.margin_pct || 0) / 100);
+      const margin = Number.isFinite(autoMargin) ? autoMargin : 0;
+      const calc = base * (1 + (margin || 0) / 100);
       const unit = ceilRupee(calc); // round up
       return {
         ...r,
@@ -343,7 +368,8 @@ export default function NewInvoicePage() {
         description: rec.name || '',
         uom_code,
         base_cost: base,
-        tax_rate: Number(rec.tax_rate || 0),
+        tax_rate: Number.isFinite(autoGst) ? autoGst : Number(rec.tax_rate || 0),
+        margin_pct: margin,                // <-- auto-filled, but still editable
         unit_price: unit,
         // NEW: reset location for this row + provide options
         location: '',
@@ -366,8 +392,6 @@ export default function NewInvoicePage() {
     };
   }, []);
 
-  // Map of refs for each row's SKU input (to focus new rows)
-  const skuInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const focusSku = (rowId: string) => {
     requestAnimationFrame(() => {
       const el = skuInputRefs.current[rowId];
@@ -398,7 +422,6 @@ export default function NewInvoicePage() {
       if (trimmed) {
         skuTimersRef.current[rowId] = setTimeout(() => {
           // silent auto-lookup while typing; no alert if not found
-          // optionally trigger only when user typed 3+ chars to reduce noise
           if (trimmed.length >= 3) {
             setItemBySku(rowId, trimmed, { silentNotFound: true });
           }
@@ -617,6 +640,7 @@ export default function NewInvoicePage() {
     isCustomerView, rows, totals, docType, issuedAt, customerName, customerAddress1Line,
     payments, invoiceGrandTotalAtSave, invoiceNoJustSaved, notes
   ]);
+
   // ---------- NEW: validation helpers for locations ----------
   const getSelectedLocQty = (r: Row) => {
     if (!r.location || !r.loc_balances?.length) return 0;
@@ -928,7 +952,9 @@ export default function NewInvoicePage() {
     try {
       const { data, error } = await supabase
         .from('items')
-        .select('id, sku, name, unit_cost, tax_rate, uom:units_of_measure ( code )')
+        .select(
+          'id, sku, name, unit_cost, tax_rate, purchase_price, gst_percent, margin_percent, uom:units_of_measure ( code )'
+        )
         .ilike('sku', code)
         .limit(1);
 
@@ -937,6 +963,8 @@ export default function NewInvoicePage() {
 
       if (!rec) {
         alert(`No item found for SKU "${code}"`);
+        // Keep barcode input focused for the next scan
+        setTimeout(() => barcodeInputRef.current?.focus(), 0);
         return;
       }
 
@@ -947,20 +975,26 @@ export default function NewInvoicePage() {
       // If item row already exists, just increment qty by scanQty
       const existing = rows.find(r => r.item_id === rec.id);
       if (existing) {
-        setQty(existing.id, Number(existing.qty || 0) + addQty);
-
-        // Ensure balances are attached; if no location yet, set default automatically
-        setRows(prev =>
-          prev.map(r => {
-            if (r.id !== existing.id) return r;
-            const hasBalances = (r.loc_balances && r.loc_balances.length > 0);
-            return {
-              ...r,
-              loc_balances: hasBalances ? r.loc_balances : balances,
-              location: r.location && r.location.trim() ? r.location : defaultLoc, // auto-pick but user can change
-            };
-          })
-        );
+        setRows(prev => prev.map(r => {
+          if (r.id !== existing.id) return r;
+          const base = Number(rec.unit_cost || r.base_cost || 0);
+          // If current margin/tax are not set, take from item
+          const autoGst = Number(rec.gst_percent ?? rec.tax_rate ?? r.tax_rate ?? 0);
+          const autoMargin = Number(rec.margin_percent ?? r.margin_pct ?? 0);
+          const calc = base * (1 + (autoMargin || 0) / 100);
+          const unit = ceilRupee(calc);
+          return {
+            ...r,
+            qty: Number(r.qty || 0) + addQty,
+            base_cost: base,
+            tax_rate: r.tax_rate ? r.tax_rate : autoGst,
+            margin_pct: r.margin_pct ? r.margin_pct : autoMargin,
+            unit_price: r.margin_pct ? r.unit_price : unit,
+            loc_balances: (r.loc_balances && r.loc_balances.length > 0) ? r.loc_balances : balances,
+            location: r.location && r.location.trim() ? r.location : defaultLoc,
+          };
+        }));
+        setTimeout(() => barcodeInputRef.current?.focus(), 0);
         return;
       }
 
@@ -987,8 +1021,8 @@ export default function NewInvoicePage() {
         setRows(prev => [...prev, target!]);
       }
 
-      // Fill the row using existing setter (keeps your rounding/tax logic intact)
-      await setItemBySku(target.id, code);
+      // Fill via the common setter (it sets GST/Margin + pricing)
+      await setItemBySku(target.id, code, { silentNotFound: true });
 
       // Set qty = scanQty and auto-select default location (if any)
       setQty(target.id, addQty);
@@ -1000,6 +1034,8 @@ export default function NewInvoicePage() {
           return { ...r, loc_balances: locs, location: autoLoc };
         })
       );
+
+      setTimeout(() => barcodeInputRef.current?.focus(), 0);
     } catch (e: any) {
       console.error(e);
       alert(e?.message || 'Scan failed');
@@ -1008,6 +1044,7 @@ export default function NewInvoicePage() {
       setTimeout(() => barcodeInputRef.current?.focus(), 0);
     }
   };
+
   // =======================
   // Customer Screen only
   // =======================
@@ -1596,7 +1633,10 @@ export default function NewInvoicePage() {
                           value={r.sku_input}
                           onChange={(e) => setSkuInput(r.id, e.target.value)}
                           onKeyDown={(e) => {
-                            if (e.key === 'Enter') { e.preventDefault(); setItemBySku(r.id, r.sku_input); }
+                            if (e.key === 'Enter') { 
+                              e.preventDefault(); 
+                              setItemBySku(r.id, r.sku_input); 
+                            }
                           }}
                           onBlur={() => {
                             const v = (r.sku_input || '').trim();
