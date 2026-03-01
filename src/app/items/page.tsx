@@ -1,4 +1,3 @@
-
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
@@ -13,23 +12,16 @@ interface Uom {
   name: string; // e.g., 'Each', 'Box'
 }
 
-/**
- * We store UoM as a simple string code (uom_code) after normalizing the join.
- * This avoids the array/object shape mismatch from Supabase.
- */
 interface Item {
   id: string;
   sku: string;
   name: string;
   description?: string | null;
-  unit_cost: number;
-  unit_price: number;
-  tax_rate: number;
   stock_qty: number;
   low_stock_threshold: number | null;
 
-  uom_id?: string | null;    // FK on items
-  uom_code?: string;         // normalized from relation ('' if missing)
+  uom_id?: string | null; // FK
+  uom_code?: string;      // normalized
 }
 
 export default function Items() {
@@ -37,32 +29,28 @@ export default function Items() {
   const [uoms, setUoms] = useState<Uom[]>([]);
   const [loading, setLoading] = useState(true);
 
+  /** Form state: no price/cost/margin fields anymore */
   const [form, setForm] = useState({
-    sku: '',
+    sku: '',             // will be auto-generated when "Add Item" is pressed
     name: '',
     description: '',
-    unit_cost: 0,
-    unit_price: 0,
-    tax_rate: 0,
     low_stock_threshold: 0,
     uom_id: '' as string | '',
   });
 
-  // --- Scanner/UX helpers ---
-  const [scanMode, setScanMode] = useState<boolean>(true); // return focus to SKU after add
-  const skuRef = useRef<HTMLInputElement | null>(null);
+  /** UI helpers */
+  const [isGeneratingSku, setIsGeneratingSku] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const nameRef = useRef<HTMLInputElement | null>(null);
-  const priceRef = useRef<HTMLInputElement | null>(null);
-  const formRef = useRef<HTMLFormElement | null>(null);
 
   const load = async () => {
     setLoading(true);
 
-    // 1) Load items + join UoM, then normalize to { uom_code: string }
+    // 1) Load items + join UoM, normalize to { uom_code: string }
     const { data: itemsData, error: itemsError } = await supabase
       .from('items')
       .select(`
-        id, sku, name, description, unit_cost, unit_price, tax_rate, stock_qty, low_stock_threshold, uom_id,
+        id, sku, name, description, stock_qty, low_stock_threshold, uom_id,
         uom:units_of_measure ( code )
       `)
       .order('created_at', { ascending: false });
@@ -75,19 +63,15 @@ export default function Items() {
         sku: d.sku,
         name: d.name,
         description: d.description,
-        unit_cost: Number(d.unit_cost ?? 0),
-        unit_price: Number(d.unit_price ?? 0),
-        tax_rate: Number(d.tax_rate ?? 0),
         stock_qty: Number(d.stock_qty ?? 0),
         low_stock_threshold: d.low_stock_threshold ?? null,
         uom_id: d.uom_id ?? null,
-        // if Supabase returns uom as array, take first element's code
         uom_code: Array.isArray(d.uom) ? (d.uom[0]?.code ?? '') : (d.uom?.code ?? ''),
       }));
       setItems(normalized);
     }
 
-    // 2) Load UoMs for the Add form dropdown
+    // 2) Load UoMs for the dropdown
     const { data: uomsData, error: uomsError } = await supabase
       .from('units_of_measure')
       .select('id, code, name')
@@ -102,120 +86,102 @@ export default function Items() {
     setLoading(false);
   };
 
-  // Initial load and focus to SKU for scanner
   useEffect(() => {
     load();
   }, []);
 
-  useEffect(() => {
-    // Auto-focus SKU on mount
-    tryFocusSku(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading]);
-
-  const tryFocusSku = (selectAll = false) => {
-    requestAnimationFrame(() => {
-      const el = skuRef.current;
-      if (el) {
-        el.focus();
-        if (selectAll) {
-          try { el.select(); } catch {}
-        }
+  /** Generate an item number (SKU) before saving.
+   *  This calls a Postgres function (RPC) `generate_item_sku`.
+   *  See SQL in the next section if you need to create it.
+   */
+  const onAddItem = async () => {
+    setIsGeneratingSku(true);
+    try {
+      const { data, error } = await supabase.rpc('generate_item_sku'); // <-- expects a text return
+      if (error) throw error;
+      const nextSku = String(data ?? '').trim();
+      if (!nextSku) {
+        alert('SKU generator returned empty value.');
+        return;
       }
-    });
+
+      // Prepare the form for a new item using the generated SKU
+      setForm({
+        sku: nextSku,
+        name: '',
+        description: '',
+        low_stock_threshold: 0,
+        uom_id: '',
+      });
+
+      // Move focus to Name
+      requestAnimationFrame(() => {
+        nameRef.current?.focus();
+        nameRef.current?.select?.();
+      });
+    } catch (err: any) {
+      alert(err?.message || 'Failed to generate item number.');
+    } finally {
+      setIsGeneratingSku(false);
+    }
   };
 
-  const validateRequireds = () => {
-    const nameOk = !!form.name.trim();
-    const priceOk = Number(form.unit_price) > 0;
-    return { nameOk, priceOk, allOk: nameOk && priceOk };
-  };
+  /** Save new item */
+  const onSave = async () => {
+    if (!form.sku.trim()) {
+      alert('Please click "Add Item" to generate Item Number first.');
+      return;
+    }
+    if (!form.name.trim()) {
+      alert('Name is required.');
+      return;
+    }
 
-  // Submit helper (submit programmatically)
-  const submitForm = () => {
-    if (!formRef.current) return;
-    // requestSubmit works better than formRef.current.submit() in React
-    (formRef.current as any).requestSubmit?.();
-  };
+    setIsSaving(true);
+    try {
+      const payload = {
+        sku: form.sku.trim(),
+        name: form.name.trim(),
+        description: form.description?.trim() || null,
+        low_stock_threshold: Number.isFinite(form.low_stock_threshold)
+          ? Number(form.low_stock_threshold)
+          : 0,
+        uom_id: form.uom_id || null,
+        // pricing fields removed entirely
+      };
 
-  const add = async (e: React.FormEvent) => {
-    e.preventDefault();
+      const { error } = await supabase.from('items').insert([payload]);
+      if (error) throw error;
 
-    const payload = {
-      sku: form.sku.trim(),
-      name: form.name.trim(),
-      description: form.description?.trim() || null,
-      unit_cost: Number(form.unit_cost || 0),
-      unit_price: Number(form.unit_price || 0),
-      tax_rate: Number(form.tax_rate || 0),
-      low_stock_threshold: Number.isFinite(form.low_stock_threshold)
-        ? Number(form.low_stock_threshold)
-        : 0,
-      uom_id: form.uom_id || null, // save selection
-    };
-
-    const { error } = await supabase.from('items').insert([payload]);
-    if (error) {
-      alert(error.message);
-    } else {
-      // Reset form
+      // Reset and reload
       setForm({
         sku: '',
         name: '',
         description: '',
-        unit_cost: 0,
-        unit_price: 0,
-        tax_rate: 0,
         low_stock_threshold: 0,
         uom_id: '',
       });
-      // Reload table
-      load();
-
-      // Return to SKU for continuous scanning
-      if (scanMode) tryFocusSku(true);
+      await load();
+      alert('Item saved.');
+    } catch (err: any) {
+      alert(err?.message || 'Failed to save item.');
+    } finally {
+      setIsSaving(false);
     }
   };
 
-  // -------- Key handlers to support scanner "Enter" workflow --------
-  const onSkuKeyDown: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
-    if (e.key !== 'Enter') return;
+  /** Delete item */
+  const onDelete = async (id: string, sku: string) => {
+    const ok = confirm(`Delete item ${sku}? This cannot be undone.`);
+    if (!ok) return;
 
-    e.preventDefault();
-    const { nameOk, priceOk, allOk } = validateRequireds();
-
-    // If all required fields are ready, submit immediately (scanner auto-enter)
-    if (allOk) {
-      submitForm();
-      return;
+    const { error } = await supabase.from('items').delete().eq('id', id);
+    if (error) {
+      alert(error.message);
+    } else {
+      // Refresh list
+      await load();
     }
-
-    // If Name missing, go to Name first; else if Price missing, go to Price
-    if (!nameOk) {
-      nameRef.current?.focus();
-      nameRef.current?.select?.();
-      return;
-    }
-    if (!priceOk) {
-      priceRef.current?.focus();
-      priceRef.current?.select?.();
-      return;
-    }
-  };
-
-  const onNameKeyDown: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
-    if (e.key !== 'Enter') return;
-    e.preventDefault();
-    // Move to Price
-    priceRef.current?.focus();
-    priceRef.current?.select?.();
-  };
-
-  const onPriceKeyDown: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
-    if (e.key !== 'Enter') return;
-    e.preventDefault();
-    // With Price done, submit (works nicely with scanners too)
-    submitForm();
   };
 
   return (
@@ -224,19 +190,7 @@ export default function Items() {
         {/* LEFT: Items table */}
         <div className="card md:col-span-2">
           <div className="flex items-center justify-between mb-3">
-            <h1 className="text-xl font-semibold">
-              Items &amp; Pricing <span className="text-xs text-gray-500">(UoM v2)</span>
-            </h1>
-
-            {/* Scan mode toggle */}
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={scanMode}
-                onChange={(e) => setScanMode(e.target.checked)}
-              />
-              <span>Scan Mode (auto focus SKU)</span>
-            </label>
+            <h1 className="text-xl font-semibold">Items (Stock)</h1>
           </div>
 
           {loading ? (
@@ -249,18 +203,12 @@ export default function Items() {
                     <th>SKU</th>
                     <th>Name</th>
                     <th>UoM</th>
-                    <th>Price</th>
-                    <th>Cost</th>
-                    <th>Margin</th>
                     <th>Stock</th>
+                    <th className="text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {items.map((it) => {
-                    const price = Number(it.unit_price || 0);
-                    const cost = Number(it.unit_cost || 0);
-                    const margin = price - cost;
-                    const pct = price > 0 ? (margin / price) * 100 : 0;
                     const low =
                       it.low_stock_threshold != null &&
                       it.low_stock_threshold > 0 &&
@@ -271,87 +219,71 @@ export default function Items() {
                         <td>{it.sku}</td>
                         <td>{it.name}</td>
                         <td>{it.uom_code || '-'}</td>
-                        <td>₹ {price.toFixed(2)}</td>
-                        <td>₹ {cost.toFixed(2)}</td>
-                        <td>
-                          {margin.toFixed(2)} ({pct.toFixed(1)}%)
-                        </td>
                         <td>{it.stock_qty ?? 0}</td>
+                        <td className="text-right">
+                          <Button
+                            onClick={() => onDelete(it.id, it.sku)}
+                            variant="danger"
+                          >
+                            Delete
+                          </Button>
+                        </td>
                       </tr>
                     );
                   })}
+                  {items.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="text-center text-gray-500 py-4">
+                        No items yet.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
           )}
         </div>
 
-        {/* RIGHT: Add item form */}
+        {/* RIGHT: Add item panel */}
         <div className="card">
-          <h2 className="font-semibold mb-2">Add New Item</h2>
+          <h2 className="font-semibold mb-2">New Item</h2>
 
-          <form ref={formRef} onSubmit={add} className="space-y-3">
+          <div className="space-y-3">
+            {/* Top row: two buttons */}
+            <div className="flex items-center gap-2">
+              <Button onClick={onAddItem} disabled={isGeneratingSku || isSaving}>
+                {isGeneratingSku ? 'Generating…' : 'Add Item'}
+              </Button>
+              <Button onClick={onSave} disabled={isSaving || !form.sku.trim()}>
+                {isSaving ? 'Saving…' : 'Save'}
+              </Button>
+            </div>
+
+            {/* Read-only SKU (auto-generated) */}
             <input
-              ref={skuRef}
               className="input"
-              placeholder="SKU (scan barcode here)"
+              placeholder="Item Number (auto)"
               value={form.sku}
-              onChange={(e) => setForm({ ...form, sku: e.target.value })}
-              onKeyDown={onSkuKeyDown}
-              required
+              onChange={() => {}}
+              readOnly
             />
+
+            {/* Name */}
             <input
               ref={nameRef}
               className="input"
               placeholder="Name"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
-              onKeyDown={onNameKeyDown}
               required
             />
+            {/* Description */}
             <textarea
               className="input"
               placeholder="Description"
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
             />
-
-            <div className="grid grid-cols-3 gap-2">
-              <input
-                className="input"
-                type="number"
-                step="0.01"
-                placeholder="Cost"
-                value={form.unit_cost}
-                onChange={(e) =>
-                  setForm({ ...form, unit_cost: parseFloat(e.target.value || '0') })
-                }
-              />
-              <input
-                ref={priceRef}
-                className="input"
-                type="number"
-                step="0.01"
-                placeholder="Price"
-                value={form.unit_price}
-                onChange={(e) =>
-                  setForm({ ...form, unit_price: parseFloat(e.target.value || '0') })
-                }
-                onKeyDown={onPriceKeyDown}
-                required
-                min={0}
-              />
-              <input
-                className="input"
-                type="number"
-                step="0.01"
-                placeholder="Tax %"
-                value={form.tax_rate}
-                onChange={(e) =>
-                  setForm({ ...form, tax_rate: parseFloat(e.target.value || '0') })
-                }
-              />
-            </div>
 
             {/* UoM SELECT */}
             <select
@@ -367,6 +299,7 @@ export default function Items() {
               ))}
             </select>
 
+            {/* Low stock threshold (optional) */}
             <input
               className="input"
               type="number"
@@ -379,8 +312,7 @@ export default function Items() {
                 })
               }
             />
-            <Button type="submit">Add Item</Button>
-          </form>
+          </div>
         </div>
       </div>
     </Protected>
