@@ -29,9 +29,12 @@ export default function Items() {
   const [uoms, setUoms] = useState<Uom[]>([]);
   const [loading, setLoading] = useState(true);
 
-  /** Form state: no price/cost/margin fields anymore */
+  /** When a draft is created by "Add Item", we keep its ID to update on "Save" */
+  const [draftId, setDraftId] = useState<string | null>(null);
+
+  /** Form state (no price/cost/margin) */
   const [form, setForm] = useState({
-    sku: '',             // will be auto-generated when "Add Item" is pressed
+    sku: '',             // read-only; filled after "Add Item" (from trigger)
     name: '',
     description: '',
     low_stock_threshold: 0,
@@ -39,14 +42,14 @@ export default function Items() {
   });
 
   /** UI helpers */
-  const [isGeneratingSku, setIsGeneratingSku] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const nameRef = useRef<HTMLInputElement | null>(null);
 
   const load = async () => {
     setLoading(true);
 
-    // 1) Load items + join UoM, normalize to { uom_code: string }
+    // 1) Load items with joined UoM (normalized uom_code)
     const { data: itemsData, error: itemsError } = await supabase
       .from('items')
       .select(`
@@ -71,7 +74,7 @@ export default function Items() {
       setItems(normalized);
     }
 
-    // 2) Load UoMs for the dropdown
+    // 2) Load UoMs for dropdown
     const { data: uomsData, error: uomsError } = await supabase
       .from('units_of_measure')
       .select('id, code, name')
@@ -90,45 +93,63 @@ export default function Items() {
     load();
   }, []);
 
-  /** Generate an item number (SKU) before saving.
-   *  Calls Postgres function (RPC) `generate_item_sku`.
-   */
+  /** "Add Item" now creates a draft row so the DB trigger assigns VH-xxx immediately */
   const onAddItem = async () => {
-    setIsGeneratingSku(true);
+    if (draftId) {
+      // Already have a draft; just focus name
+      nameRef.current?.focus();
+      nameRef.current?.select?.();
+      return;
+    }
+    setIsGenerating(true);
     try {
-      const { data, error } = await supabase.rpc('generate_item_sku'); // returns text
-      if (error) throw error;
-      const nextSku = String(data ?? '').trim();
-      if (!nextSku) {
-        alert('SKU generator returned empty value.');
-        return;
-      }
+      // If items.name is NOT NULL, use a placeholder that you'll overwrite on Save
+      const { data, error } = await supabase
+        .from('items')
+        .insert([
+          {
+            name: '(draft)',           // placeholder; will be updated on Save
+            description: null,
+            uom_id: null,
+            low_stock_threshold: 0,
+            // stock_qty will default to 0 if your trigger sets it; else leave out
+            // item_no/sku are set by BEFORE INSERT trigger
+          },
+        ])
+        .select('id, sku')
+        .single();
 
-      // Prepare the form for a new item using the generated SKU
+      if (error) throw error;
+
+      // Use the trigger-generated SKU (e.g., "VH-009")
+      setDraftId(data!.id);
       setForm({
-        sku: nextSku,
+        sku: data!.sku,
         name: '',
         description: '',
         low_stock_threshold: 0,
         uom_id: '',
       });
 
-      // Move focus to Name
+      // Focus Name for quick typing
       requestAnimationFrame(() => {
         nameRef.current?.focus();
         nameRef.current?.select?.();
       });
+
+      // Refresh table so you can see the draft row as well
+      await load();
     } catch (err: any) {
-      alert(err?.message || 'Failed to generate item number.');
+      alert(err?.message || 'Failed to create draft item.');
     } finally {
-      setIsGeneratingSku(false);
+      setIsGenerating(false);
     }
   };
 
-  /** Save new item */
+  /** Save updates the draft row (id = draftId) with real values */
   const onSave = async () => {
-    if (!form.sku.trim()) {
-      alert('Please click "Add Item" to generate Item Number first.');
+    if (!draftId) {
+      alert('Please click "Add Item" first to generate the item number.');
       return;
     }
     if (!form.name.trim()) {
@@ -139,7 +160,6 @@ export default function Items() {
     setIsSaving(true);
     try {
       const payload = {
-        sku: form.sku.trim(),
         name: form.name.trim(),
         description: form.description?.trim() || null,
         low_stock_threshold: Number.isFinite(form.low_stock_threshold)
@@ -148,10 +168,10 @@ export default function Items() {
         uom_id: form.uom_id || null,
       };
 
-      const { error } = await supabase.from('items').insert([payload]);
+      const { error } = await supabase.from('items').update(payload).eq('id', draftId);
       if (error) throw error;
 
-      // Reset and reload
+      setDraftId(null);
       setForm({
         sku: '',
         name: '',
@@ -168,7 +188,29 @@ export default function Items() {
     }
   };
 
-  /** Delete item */
+  /** Cancel removes the draft; your AFTER DELETE trigger returns the number to the free pool */
+  const onCancel = async () => {
+    if (!draftId) return;
+    const ok = confirm('Cancel this new item and release its number?');
+    if (!ok) return;
+
+    const { error } = await supabase.from('items').delete().eq('id', draftId);
+    if (error) {
+      alert(error.message);
+    } else {
+      setDraftId(null);
+      setForm({
+        sku: '',
+        name: '',
+        description: '',
+        low_stock_threshold: 0,
+        uom_id: '',
+      });
+      await load();
+    }
+  };
+
+  /** Delete any existing row */
   const onDelete = async (id: string, sku: string) => {
     const ok = confirm(`Delete item ${sku}? This cannot be undone.`);
     if (!ok) return;
@@ -241,27 +283,33 @@ export default function Items() {
           )}
         </div>
 
-        {/* RIGHT: Add item panel */}
+        {/* RIGHT: New item panel */}
         <div className="card">
           <h2 className="font-semibold mb-2">New Item</h2>
 
           <div className="space-y-3">
-            {/* Top row: two buttons */}
+            {/* Buttons row */}
             <div className="flex items-center gap-2">
-              <Button onClick={onAddItem} disabled={isGeneratingSku || isSaving}>
-                {isGeneratingSku ? 'Generating…' : 'Add Item'}
+              <Button onClick={onAddItem} disabled={isGenerating || isSaving}>
+                {isGenerating ? 'Generating…' : draftId ? 'Item Number Created' : 'Add Item'}
               </Button>
-              <Button onClick={onSave} disabled={isSaving || !form.sku.trim()}>
+              <Button onClick={onSave} disabled={isSaving || !draftId}>
                 {isSaving ? 'Saving…' : 'Save'}
+              </Button>
+              <Button
+                onClick={onCancel}
+                disabled={!draftId || isSaving}
+                className="bg-gray-200 hover:bg-gray-300 text-gray-900 px-3 py-2 rounded"
+              >
+                Cancel
               </Button>
             </div>
 
-            {/* Read-only SKU (auto-generated) */}
+            {/* Read-only SKU (auto from trigger) */}
             <input
               className="input"
               placeholder="Item Number (auto)"
               value={form.sku}
-              onChange={() => {}}
               readOnly
             />
 
@@ -274,6 +322,7 @@ export default function Items() {
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               required
             />
+
             {/* Description */}
             <textarea
               className="input"
@@ -315,4 +364,3 @@ export default function Items() {
     </Protected>
   );
 }
-``
