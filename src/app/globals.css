@@ -19,70 +19,54 @@
    Inventory table alignment helpers (header/body alignment)
    ======================================================= */
 
-/* Use this class on the Inventory table element */
-.inventory-table {
-  /* Make <colgroup> widths respected & keep widths stable */
-  table-layout: fixed;
-  width: 100%;
-  border-collapse: separate; /* keeps sticky header shadows crisp */
-  border-spacing: 0;
-  font-size: 0.875rem; /* same as text-sm */
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
-/* Cells: consistent padding, no wrapping (keeps header on one line) */
+/* Main table class for Inventory page */
+.inventory-table {
+  table-layout: fixed;     /* respects <colgroup> widths */
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.875rem;     /* text-sm */
+}
+
 .inventory-table th,
 .inventory-table td {
   padding: 8px 10px;
-  white-space: nowrap;
+  white-space: nowrap;     /* keep header on one line */
   vertical-align: middle;
 }
 
-/* Numeric cells: right align with tabular numerals so digits line up */
 .inventory-table .num {
   text-align: right;
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: tabular-nums;  /* neat digit alignment */
 }
 
-/* Optional: make the header stick to the top while scrolling */
 .inventory-table .sticky-head th {
   position: sticky;
   top: 0;
   z-index: 1;
-  background: #f8fafc; /* Tailwind slate-50-ish */
-  /* subtle bottom border so the header separates from rows when sticky */
+  background: #f8fafc; /* slate-50-ish */
   box-shadow: inset 0 -1px 0 rgba(0,0,0,0.06);
 }
 
-/* Keep the header label + sort icon on one line nicely */
+/* Header label + sort icon kept on one line */
 .inventory-table .th-label {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
-/* Prevent tiny jitter when a column content is longer */
 .inventory-table .truncate-cell {
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* Make the table horizontally scrollable on small screens */
-.table-scroll {
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-}
-
-/* Optional: tidy scrollbar (Chromium/Edge) */
-.table-scroll::-webkit-scrollbar {
-  height: 10px;
-}
-.table-scroll::-webkit-scrollbar-track {
-  background: #f1f5f9; /* slate-100 */
-}
-.table-scroll::-webkit-scrollbar-thumb {
-  background: #cbd5e1; /* slate-300 */
-  border-radius: 6px;
-}
-.table-scroll::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8; /* slate-400 */
-}
+/* Optional nicer horizontal scrollbar */
+.table-scroll::-webkit-scrollbar { height: 10px; }
+.table-scroll::-webkit-scrollbar-track { background: #f1f5f9; }
+.table-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 6px; }
+.table-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
