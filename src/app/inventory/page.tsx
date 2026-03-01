@@ -90,7 +90,7 @@ function SortHeader({
 }
 
 /* ======================================================
-   Barcode + QR (same as your version)
+   Barcode + QR loaders (same approach)
    ====================================================== */
 const JSBARCODE_STATIC_URL =
   process.env.NEXT_PUBLIC_JSBARCODE_URL
@@ -116,7 +116,7 @@ async function ensureJsBarcode(): Promise<any> {
       f.src = 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js';
       f.async = true;
       f.onload = () => resolve();
-      f.onerror = () => reject(new Error('Failed to load JsBarcode from static URL and CDN'));
+      f.onerror = () => reject(new Error('Failed to load JsBarcode'));
       document.head.appendChild(f);
     };
     document.head.appendChild(s);
@@ -149,7 +149,7 @@ async function ensureQRCodeFromStatic(): Promise<any> {
       f.src = 'https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js';
       f.async = true;
       f.onload = () => resolve();
-      f.onerror = () => reject(new Error('Failed to load QRCode library from static URL and CDN'));
+      f.onerror = () => reject(new Error('Failed to load QRCode'));
       document.head.appendChild(f);
     };
     document.head.appendChild(s);
@@ -238,33 +238,81 @@ function QrSvg({ value, sizeMm = 11 }: { value: string; sizeMm?: number }) {
   );
 }
 
+/* ----------------------------------------------
+   Thermal 2×1 label with QR + Barcode (layout-safe)
+   ---------------------------------------------- */
 function ThermalLabel2x1({
-  brand, name, sku, uom,
-}: { brand?: string; name: string; sku: string; uom?: string }) {
+  brand,
+  name,
+  sku,
+  uom,
+}: {
+  brand?: string;
+  name: string;
+  sku: string;
+  uom?: string;
+}) {
   return (
     <div
       className="thermal-label-2x1"
       style={{
-        width: '50.8mm', height: '25.4mm', padding: '1.5mm',
-        boxSizing: 'border-box', display: 'flex', flexDirection: 'column',
-        gap: '0.6mm', justifyContent: 'space-between',
-        border: '1px solid #e5e7eb', borderRadius: '1mm', background: '#fff',
+        width: '50.8mm',
+        height: '25.4mm',
+        padding: '1.5mm',
+        boxSizing: 'border-box',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '0.6mm',
+        justifyContent: 'space-between',
+        border: '1px solid #e5e7eb', // preview only
+        borderRadius: '1mm',
+        background: '#fff',
       }}
     >
+      {/* Top line */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '1mm' }}>
         <div style={{ fontSize: '8px', fontWeight: 700, lineHeight: '10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '70%' }}>
           {brand || ''}
         </div>
         {uom ? <div style={{ fontSize: '8px', lineHeight: '10px' }}>UoM: {uom}</div> : null}
       </div>
+
+      {/* Name */}
       <div style={{ fontSize: '9px', lineHeight: '10px', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {name}
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '1mm', width: '100%', flex: 1 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <BarcodeSvg value={sku} options={{ height: 12, width: 1.4, displayValue: true, fontSize: 8 }} />
+
+      {/* Barcode + QR row (layout-safe) */}
+      <div
+        className="label-row"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '1mm',
+          width: '100%',
+          flex: 1,
+          minHeight: 0,
+        }}
+      >
+        {/* Barcode stretches to remaining width */}
+        <div className="barcode-wrap" style={{ flex: 1, minWidth: 0 }}>
+          <BarcodeSvg
+            value={sku}
+            options={{
+              height: 12,
+              width: 1.4,
+              displayValue: true,
+              fontSize: 8,
+              textMargin: 0,
+              margin: 0,
+            }}
+          />
         </div>
-        <QrSvg value={sku} sizeMm={11} />
+
+        {/* QR has fixed physical size */}
+        <div className="qr-wrap" style={{ width: '11mm', height: '11mm', flex: '0 0 11mm' }}>
+          <QrSvg value={sku} sizeMm={11} />
+        </div>
       </div>
     </div>
   );
@@ -473,6 +521,7 @@ export default function InventoryPage() {
      PRINT thermal labels
      -------------------------------- */
   const handlePrintThermal = () => {
+    // Build selected items from current selection map
     const selectedItems = (() => {
       const arr: { row: InvRow; qty: number }[] = [];
       for (const r of sorted) {
@@ -502,10 +551,26 @@ export default function InventoryPage() {
     @page { size: 50.8mm 25.4mm; margin: 0; }
     html, body { margin: 0; padding: 0; background: #fff; }
     .sheet { width: 50.8mm; height: 25.4mm; page-break-after: always; }
+
     .thermal-label-2x1 {
       width: 50.8mm; height: 25.4mm; padding: 1.5mm;
       box-sizing: border-box; border: none !important; background: #fff;
+      display: flex; flex-direction: column; gap: 0.6mm; justify-content: space-between;
     }
+
+    /* ---- Layout-safe row ---- */
+    .thermal-label-2x1 .label-row { display: flex; align-items: center; gap: 1mm; width: 100%; flex: 1; min-height: 0; }
+    .thermal-label-2x1 .label-row .barcode-wrap { flex: 1 1 auto; min-width: 0; }
+    .thermal-label-2x1 .label-row .qr-wrap { flex: 0 0 11mm; width: 11mm; height: 11mm; }
+
+    .thermal-label-2x1 .label-row .barcode-wrap svg {
+      display: block; width: 100% !important; height: auto !important;
+    }
+    .thermal-label-2x1 .label-row .qr-wrap svg {
+      display: block; width: 100% !important; height: 100% !important;
+    }
+
+    svg text { font-size: 8px; }
   </style>
 </head>
 <body>
@@ -602,9 +667,7 @@ export default function InventoryPage() {
 
           <Button type="button" onClick={exportCsv}>Export CSV</Button>
           <Button type="button" onClick={loadInventory}>Refresh</Button>
-          <Link href="/estimate/new" className="rounded bg-emerald-600 text-white px-3 py-2 hover:bg-emerald-700">
-            Estimate
-          </Link>
+          <Link href="/estimate/new" className="rounded bg-emerald-600 text-white px-3 py-2 hover:bg-emerald-700">Estimate</Link>
         </div>
 
         {/* Thermal labels controls */}
@@ -614,7 +677,6 @@ export default function InventoryPage() {
             <Button type="button" onClick={() => {
               setSel(prev => {
                 const next: Sel = { ...prev };
-                // select all visible with stock
                 for (const r of sorted) if ((r.stock_qty ?? 0) > 0 && r.sku) next[r.id] = { checked: true, qty: next[r.id]?.qty ?? 1 };
                 return next;
               });
@@ -643,15 +705,8 @@ export default function InventoryPage() {
               <Button
                 type="button"
                 onClick={() => {
-                  const selectedItems = (() => {
-                    const arr: { row: InvRow; qty: number }[] = [];
-                    for (const r of sorted) {
-                      const s = sel[r.id];
-                      if (s?.checked && r.sku) arr.push({ row: r, qty: Math.max(1, Math.min(500, Math.floor(s.qty || 1))) });
-                    }
-                    return arr;
-                  })();
-                  if (selectedItems.length === 0) alert('Select items and set quantities first.');
+                  const any = Object.values(sel).some(s => s?.checked);
+                  if (!any) alert('Select items and set quantities first.');
                 }}
               >
                 Preview Labels
@@ -662,7 +717,6 @@ export default function InventoryPage() {
 
           {/* Preview grid */}
           <div className="mt-3">
-            {/* Render selected items previews */}
             <div
               ref={previewRef}
               className="grid gap-2"
@@ -686,7 +740,7 @@ export default function InventoryPage() {
           </div>
         </div>
 
-        {/* Inventory table with alignment */}
+        {/* Inventory table with alignment + delete + estimate */}
         <div className="table-scroll">
           <table className="inventory-table">
             {/* Exact widths per column */}
@@ -742,8 +796,21 @@ export default function InventoryPage() {
                     <tr key={r.id} className={isLow ? 'bg-red-50' : ''}>
                       <td>
                         <div className="flex items-center gap-2">
-                          <input type="checkbox" checked={s.checked} onChange={(e) => setSel(prev => ({ ...prev, [r.id]: { checked: e.target.checked, qty: prev[r.id]?.qty ?? 1 } }))} title="Select" />
-                          <input className="input w-16" type="number" min={1} max={500} value={s.qty} onChange={(e) => setSel(prev => ({ ...prev, [r.id]: { checked: prev[r.id]?.checked ?? false, qty: Math.max(1, Math.floor(parseInt(e.target.value || '1', 10))) } }))} title="Labels for this item" />
+                          <input
+                            type="checkbox"
+                            checked={s.checked}
+                            onChange={(e) => setSel(prev => ({ ...prev, [r.id]: { checked: e.target.checked, qty: prev[r.id]?.qty ?? 1 } }))}
+                            title="Select"
+                          />
+                          <input
+                            className="input w-16"
+                            type="number"
+                            min={1}
+                            max={500}
+                            value={s.qty}
+                            onChange={(e) => setSel(prev => ({ ...prev, [r.id]: { checked: prev[r.id]?.checked ?? false, qty: Math.max(1, Math.floor(parseInt(e.target.value || '1', 10))) } }))}
+                            title="Labels for this item"
+                          />
                         </div>
                       </td>
                       <td>{r.sku}</td>
@@ -761,7 +828,10 @@ export default function InventoryPage() {
 
                       <td>
                         <div className="flex gap-2">
-                          <Link href={`/estimate/new?sku=${encodeURIComponent(r.sku)}`} className="rounded bg-emerald-600 text-white px-2 py-1 text-sm hover:bg-emerald-700">
+                          <Link
+                            href={`/estimate/new?sku=${encodeURIComponent(r.sku)}&qty=1`}
+                            className="rounded bg-emerald-600 text-white px-2 py-1 text-sm hover:bg-emerald-700"
+                          >
                             Estimate
                           </Link>
                           <button
