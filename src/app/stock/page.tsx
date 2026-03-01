@@ -4,6 +4,56 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 
+/* -------------------------------- Modal -------------------------------- */
+
+function Modal({
+  title,
+  open,
+  onClose,
+  children,
+  maxWidth = 520,
+}: {
+  title: string;
+  open: boolean;
+  onClose: () => void;
+  children: React.ReactNode;
+  maxWidth?: number;
+}) {
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      aria-modal="true"
+      role="dialog"
+    >
+      <div
+        className="absolute inset-0 bg-black/40"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div
+        className="relative bg-white rounded shadow-lg w-[95vw] p-4"
+        style={{ maxWidth }}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-semibold">{title}</h3>
+          <button
+            type="button"
+            aria-label="Close"
+            onClick={onClose}
+            className="px-2 py-1 rounded bg-gray-100 hover:bg-gray-200"
+          >
+            ✕
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------- Types ---------------------------------- */
+
 type MoveType = 'receive' | 'adjust' | 'issue' | 'return';
 
 interface FoundItem {
@@ -29,19 +79,11 @@ interface MoveRow {
   item: { sku: string; name: string } | null;
 }
 
-/* ---------- New: Per-location balance type ---------- */
 type LocBalance = { name: string; qty: number };
+type Uom = { code: string; name: string };
 
-/* ---------- Safe type helpers for UoM ---------- */
-type Uom = { code?: string; name?: string };
-type UomField = Uom | Uom[] | null | undefined;
+/* ---------------------------- Small helpers ----------------------------- */
 
-function getUomCode(u: UomField): string {
-  if (Array.isArray(u)) return u[0]?.code ?? '';
-  return u?.code ?? '';
-}
-
-// Simple UUID fallback if crypto.randomUUID is unavailable
 function makeClientTxId(): string {
   try {
     // @ts-ignore
@@ -54,7 +96,6 @@ function makeClientTxId(): string {
   });
 }
 
-/* ---------- Small helpers ---------- */
 function downloadCsv(filename: string, rows: string[]) {
   const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
@@ -65,99 +106,70 @@ function downloadCsv(filename: string, rows: string[]) {
   URL.revokeObjectURL(url);
 }
 
-type MoveSortKey =
-  | 'created_at'
-  | 'sku'
-  | 'name'
-  | 'move_type'
-  | 'qty'
-  | 'uom_code'
-  | 'unit_cost'
-  | 'total_cost'
-  | 'ref'
-  | 'location';
-
-function SortHeader({
-  label, active, dir, onClick, alignRight = false, minWidth,
-}: {
-  label: string;
-  active: boolean;
-  dir: 'asc' | 'desc';
-  onClick: () => void;
-  alignRight?: boolean;
-  minWidth?: number;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`w-full flex items-center gap-1 ${alignRight ? 'justify-end' : 'justify-start'} font-semibold`}
-      style={{ minWidth }}
-      title={`Sort by ${label}`}
-    >
-      <span>{label}</span>
-      <span className="text-xs opacity-70">{active ? (dir === 'asc' ? '▲' : '▼') : '↕'}</span>
-    </button>
-  );
-}
+/* ------------------------------ Component ------------------------------- */
 
 export default function Stock() {
-  // Left panel state
+  /* -------- Global state -------- */
   const [sku, setSku] = useState<string>('');
   const [found, setFound] = useState<FoundItem | null>(null);
-  const [moveType, setMoveType] = useState<MoveType>('receive');
-  const [qty, setQty] = useState<number>(0);
-  const [unitCost, setUnitCost] = useState<number>(0);
-  const [ref, setRef] = useState<string>('');
-  const [reason, setReason] = useState<string>('');
-  const [location, setLocation] = useState<string>(''); // Selected or typed location
+  const [locBalances, setLocBalances] = useState<LocBalance[]>([]);
+  const [allUoms, setAllUoms] = useState<Uom[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
 
-  // New: location balances + UI mode
-  const [locBalances, setLocBalances] = useState<LocBalance[]>([]);
-  const [useCustomLocation, setUseCustomLocation] = useState<boolean>(false); // only allowed for receive
+  // scanner focus
+  const [scanMode, setScanMode] = useState<boolean>(true);
+  const skuRef = useRef<HTMLInputElement | null>(null);
 
-  // Min qty editor
+  // history
+  const [history, setHistory] = useState<MoveRow[]>([]);
+  const [movesLoading, setMovesLoading] = useState<boolean>(false);
+  const [movesSearch, setMovesSearch] = useState<string>('');
+  const [movesLimit, setMovesLimit] = useState<number>(100);
+  const [sortKey, setSortKey] = useState<
+    'created_at' | 'sku' | 'name' | 'move_type' | 'qty' | 'uom_code' | 'unit_cost' | 'total_cost' | 'ref' | 'location'
+  >('created_at');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+
+  // Minimum qty
   const [minQty, setMinQty] = useState<number>(0);
   const [savingMin, setSavingMin] = useState<boolean>(false);
 
-  // Movements data + UX
-  const [history, setHistory] = useState<MoveRow[]>([]);
-  const [movesLoading, setMovesLoading] = useState<boolean>(false);
-  const [movesSearch, setMovesSearch] = useState<string>(''); // quick search (SKU/Item/Type/Ref/Location)
-  const [movesLimit, setMovesLimit] = useState<number>(100);  // how many rows to load
-
-  const [sortKey, setSortKey] = useState<MoveSortKey>('created_at');
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-
-  function toggleSort(k: MoveSortKey) {
-    setSortKey(prev => {
-      if (prev !== k) {
-        setSortDir('asc');
-        return k;
-      }
-      setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
-      return k;
-    });
-  }
-
-  // Barcode-friendly UX: focus
-  const [scanMode, setScanMode] = useState<boolean>(true);
-  const skuRef = useRef<HTMLInputElement | null>(null);
-  const qtyRef = useRef<HTMLInputElement | null>(null);
-  const unitCostRef = useRef<HTMLInputElement | null>(null);
-
-  // Extra double-submit guard
+  // Guard
   const submittingRef = useRef(false);
 
+  /* -------- Modal visibility -------- */
+  const [showReceive, setShowReceive] = useState(false);
+  const [showAdjust, setShowAdjust] = useState(false);
+  const [showIssue, setShowIssue] = useState(false);
+  const [showReturn, setShowReturn] = useState(false);
+
+  /* -------- Receive form (modal) -------- */
+  const [rcvQty, setRcvQty] = useState<number>(0);
+  const [rcvUom, setRcvUom] = useState<string>(''); // code
+  const [purchasePrice, setPurchasePrice] = useState<number>(0);
+  const [gstPct, setGstPct] = useState<number>(0);
+  const [marginPct, setMarginPct] = useState<number>(0);
+  const [salePrice, setSalePrice] = useState<number>(0);
+  const [rcvRef, setRcvRef] = useState<string>('');
+  const [rcvReason, setRcvReason] = useState<string>('');
+  const [rcvLocation, setRcvLocation] = useState<string>('');
+  const [useCustomLocation, setUseCustomLocation] = useState<boolean>(false);
+
+  /* -------- Issue / Return / Adjust forms (modals) -------- */
+  const [mQty, setMQty] = useState<number>(0);
+  const [mRef, setMRef] = useState<string>('');
+  const [mReason, setMReason] = useState<string>('');
+  const [mLocation, setMLocation] = useState<string>('');
+
+  /* ---------------- Effects ---------------- */
   useEffect(() => {
     loadHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [movesLimit]); // reload when limit changes
+  }, [movesLimit]);
 
   useEffect(() => {
-    // Auto-focus SKU on mount
     tryFocusSku(true);
+    loadUoms();
   }, []);
 
   const tryFocusSku = (selectAll = false) => {
@@ -166,13 +178,28 @@ export default function Stock() {
       if (el) {
         el.focus();
         if (selectAll) {
-          try { el.select(); } catch {}
+          try {
+            el.select();
+          } catch {}
         }
       }
     });
   };
 
-  // ---------- Loads ----------
+  const loadUoms = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('units_of_measure')
+        .select('code, name')
+        .order('code', { ascending: true });
+      if (error) throw error;
+      setAllUoms((data as Uom[]) ?? []);
+    } catch (e) {
+      console.warn('loadUoms failed:', e);
+      setAllUoms([]);
+    }
+  };
+
   const loadHistory = async () => {
     try {
       setMovesLoading(true);
@@ -206,7 +233,6 @@ export default function Stock() {
     }
   };
 
-  // ---------- New: Load per-location balances for a found item ----------
   const loadItemLocations = async (itemId: string) => {
     try {
       const { data, error } = await supabase
@@ -223,15 +249,10 @@ export default function Stock() {
         const loc = (String(r.location ?? '').trim()) || '(unassigned)';
         const qRaw = Number(r.qty ?? 0);
 
-        // Calculate delta:
-        // - receive: +qty
-        // - return:  +qty
-        // - issue:   -qty
-        // - adjust:  qty is already delta (+/-)
         let delta = qRaw;
         if (mt === 'issue') delta = -Math.abs(qRaw);
         else if (mt === 'receive' || mt === 'return') delta = Math.abs(qRaw);
-        // adjust uses the value as-is (could be negative or positive)
+        // adjust uses the value as-is
 
         map.set(loc, (map.get(loc) ?? 0) + delta);
       });
@@ -247,7 +268,6 @@ export default function Stock() {
     }
   };
 
-  // ---------- Find by SKU (case-insensitive exact) ----------
   const findBySku = async () => {
     setFound(null);
     setLocBalances([]);
@@ -258,7 +278,7 @@ export default function Stock() {
     const { data, error } = await supabase
       .from('items')
       .select(
-        'id, sku, name, description, stock_qty, unit_cost, low_stock_threshold, uom:units_of_measure ( code )'
+        'id, sku, name, description, stock_qty, unit_cost, low_stock_threshold, tax_rate, unit_price, uom:units_of_measure ( code )'
       )
       .ilike('sku', trimmed)
       .limit(1);
@@ -267,7 +287,7 @@ export default function Stock() {
     const row: any = (data ?? [])[0];
     if (!row) return alert('No item found for this SKU');
 
-    const uom_code = getUomCode(row.uom as UomField);
+    const uom_code = Array.isArray(row.uom) ? (row.uom?.[0]?.code ?? '') : (row.uom?.code ?? '');
 
     const foundItem: FoundItem = {
       id: row.id,
@@ -282,243 +302,44 @@ export default function Stock() {
 
     setFound(foundItem);
     setMinQty(Number(row.low_stock_threshold ?? 0));
-    setQty(0);
-    setUnitCost(0);
-    setRef('');
-    setReason('');
-    setLocation(''); // reset location for fresh operation
+    // Prime Receive modal defaults
+    setRcvQty(0);
+    setRcvUom(uom_code || '');
+    setPurchasePrice(0);
+    setGstPct(Number(row.tax_rate ?? 0)); // use existing GST if any
+    setMarginPct(0);
+    setSalePrice(Number(row.unit_price ?? 0));
+    setRcvRef('');
+    setRcvReason('');
+    setRcvLocation('');
     setUseCustomLocation(false);
 
-    // Load per-location balances for this item
+    // Other modals
+    setMQty(0);
+    setMRef('');
+    setMReason('');
+    setMLocation('');
+
     await loadItemLocations(foundItem.id);
 
-    // After we find an item, go straight to Qty for speed
-    requestAnimationFrame(() => qtyRef.current?.focus());
+    requestAnimationFrame(() => skuRef.current?.focus());
   };
 
-  // ---------- Preview helpers ----------
-  const autoUnitCost = found?.unit_cost ?? 0;
-  const costToUse = moveType === 'receive' ? unitCost : autoUnitCost;
-  const qtyLabel =
-    moveType === 'adjust'
-      ? 'Adjust Qty (use negative for lost, positive for found)'
-      : 'Qty';
+  /* ----------------- History view helpers (search/sort/export) ----------- */
 
-  const preview = useMemo(() => {
-    if (!found) return null;
-    const q = Number(qty || 0);
-    const unit = Number(costToUse || 0);
-    const total = q * unit;
-
-    if (moveType === 'receive' && q > 0) {
-      const oldQty = Number(found.stock_qty || 0);
-      const oldCost = Number(found.unit_cost || 0);
-      const newQty = oldQty + q;
-      const newAvg =
-        newQty === 0 ? unit : ((oldQty * oldCost) + (q * unit)) / newQty;
-      return { total, newAvg, oldQty, oldCost, newQty };
-    }
-    return { total };
-  }, [found, qty, costToUse, moveType]);
-
-  // New: computed available qty for the currently selected location
-  const selectedLocQty = useMemo(() => {
-    if (!location) return 0;
-    const foundLoc = locBalances.find(l => l.name === location);
-    return foundLoc?.qty ?? 0;
-  }, [locBalances, location]);
-
-  // ---------- Submit ----------
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    // Double-submit guards
-    if (loading) return;
-    if (submittingRef.current) return;
-    submittingRef.current = true;
-
-    if (!found) {
-      submittingRef.current = false;
-      return alert('Please find an item by SKU first');
-    }
-
-    // Validate qty semantics by move type
-    if (moveType === 'adjust') {
-      if (!qty || qty === 0) {
-        submittingRef.current = false;
-        return alert('For adjust, delta cannot be 0');
-      }
-    } else {
-      if (!qty || qty <= 0) {
-        submittingRef.current = false;
-        return alert('Quantity must be > 0');
-      }
-    }
-
-    // Validate location rules
-    if (moveType === 'issue' || moveType === 'return' || moveType === 'adjust') {
-      // For these types, location must be selected from existing options
-      if (!location) {
-        submittingRef.current = false;
-        return alert(`Please select a location for ${moveType}.`);
-      }
-      const exists = locBalances.some(l => l.name === location);
-      if (!exists) {
-        submittingRef.current = false;
-        return alert(`Please choose an existing location for ${moveType}.`);
-      }
-
-      // Prevent issuing more than available at location
-      if (moveType === 'issue' && selectedLocQty < qty) {
-        submittingRef.current = false;
-        return alert(`Insufficient quantity at "${location}". Available: ${selectedLocQty}`);
-      }
-
-      // For adjust (negative), don't allow location to go below zero
-      if (moveType === 'adjust' && qty < 0 && (selectedLocQty + qty) < 0) {
-        submittingRef.current = false;
-        return alert(
-          `Adjustment would make "${location}" negative. Available: ${selectedLocQty}, delta: ${qty}`
-        );
-      }
-    } else if (moveType === 'receive') {
-      // For receive, allow custom location or existing selection (optional)
-      if (useCustomLocation && !location.trim()) {
-        submittingRef.current = false;
-        return alert('Please enter a new location name.');
-      }
-      // If not using custom and not selected, we allow empty (unassigned) if you prefer.
-      // To force selection, uncomment the next lines:
-      // if (!useCustomLocation && !location) {
-      //   submittingRef.current = false;
-      //   return alert('Please select an existing location or choose "Other / New".');
-      // }
-    }
-
-    setLoading(true);
-    try {
-      const clientTxId = makeClientTxId();
-
-      if (moveType === 'receive') {
-        if (unitCost < 0) {
-          submittingRef.current = false;
-          setLoading(false);
-          return alert('Unit cost must be >= 0');
-        }
-        const { error } = await supabase.rpc('receive_stock_avg', {
-          p_item_id: found.id,
-          p_qty: qty,
-          p_unit_cost: unitCost,
-          p_uom_code: found.uom_code || null,
-          p_ref: ref || null,
-          p_reason: reason || null,
-          p_client_tx_id: clientTxId,
-        });
-        if (error) throw error;
-
-      } else if (moveType === 'issue') {
-        const { error } = await supabase.rpc('issue_stock', {
-          p_item_id: found.id,
-          p_qty: qty,
-          p_ref: ref || null,
-          p_reason: reason || null,
-          p_client_tx_id: clientTxId,
-        });
-        if (error) throw error;
-
-      } else if (moveType === 'return') {
-        const { error } = await supabase.rpc('return_stock', {
-          p_item_id: found.id,
-          p_qty: qty,
-          p_ref: ref || null,
-          p_reason: reason || null,
-          p_client_tx_id: clientTxId,
-        });
-        if (error) throw error;
-
-      } else if (moveType === 'adjust') {
-        const { error } = await supabase.rpc('adjust_stock_delta', {
-          p_item_id: found.id,
-          p_delta: qty,
-          p_ref: ref || null,
-          p_reason: reason || null,
-          p_client_tx_id: clientTxId,
-        });
-        if (error) throw error;
-      }
-
-      // --- Attach location to the new stock_moves row (by client_tx_id) ---
-      if ((location && location.trim()) || (useCustomLocation && location.trim())) {
-        try {
-          await supabase
-            .from('stock_moves')
-            .update({ location: location.trim() })
-            .eq('client_tx_id', clientTxId);
-        } catch (e) {
-          // If the column doesn't exist or RLS prevents update, ignore silently.
-          console.warn('location update skipped:', e);
-        }
-      }
-
-      await findBySku();        // refresh item + per-location
-      await loadHistory();      // refresh history
-
-      setQty(0);
-      if (moveType === 'receive') setUnitCost(0);
-      setRef('');
-      setReason('');
-      setLocation('');
-      setUseCustomLocation(false);
-
-      if (scanMode) {
-        tryFocusSku(true); // back to SKU for next scan
-      }
-      alert('Saved successfully.');
-    } catch (err: any) {
-      alert(err?.message || String(err));
-    } finally {
-      setLoading(false);
-      submittingRef.current = false;
-    }
-  };
-
-  // ---------- Save Minimum ----------
-  const saveMinimum = async () => {
-    if (!found) return;
-    setSavingMin(true);
-    try {
-      const { error } = await supabase
-        .from('items')
-        .update({ low_stock_threshold: Number.isFinite(minQty) ? minQty : 0 })
-        .eq('id', found.id);
-      if (error) throw error;
-
-      await findBySku();
-      alert('Minimum qty saved.');
-    } catch (err: any) {
-      alert(err?.message || String(err));
-    } finally {
-      setSavingMin(false);
-    }
-  };
-
-  /* ===== Movements: search → sort → render ===== */
-
-  // 1) Filter by quick search
   const movesFiltered = useMemo(() => {
     const t = movesSearch.trim().toLowerCase();
     if (!t) return history;
     return history.filter((m) => {
       const sku = m.item?.sku?.toLowerCase() ?? '';
-      const nm  = m.item?.name?.toLowerCase() ?? '';
-      const ty  = m.move_type?.toLowerCase() ?? '';
-      const rf  = m.ref?.toLowerCase() ?? '';
-      const lc  = m.location?.toLowerCase() ?? '';
+      const nm = m.item?.name?.toLowerCase() ?? '';
+      const ty = m.move_type?.toLowerCase() ?? '';
+      const rf = m.ref?.toLowerCase() ?? '';
+      const lc = m.location?.toLowerCase() ?? '';
       return sku.includes(t) || nm.includes(t) || ty.includes(t) || rf.includes(t) || lc.includes(t);
     });
   }, [history, movesSearch]);
 
-  // 2) Sort by selected column and direction
   const movesSorted = useMemo(() => {
     const cp = [...movesFiltered];
     cp.sort((a, b) => {
@@ -553,7 +374,6 @@ export default function Stock() {
     return cp;
   }, [movesFiltered, sortKey, sortDir]);
 
-  // 3) Export CSV (current filtered + sorted)
   const exportMovesCsv = () => {
     const header = ['Date','SKU','Item','Type','Qty','UoM','Unit Cost','Total Cost','Ref','Location'];
     const rows = movesSorted.map(m => [
@@ -572,329 +392,414 @@ export default function Stock() {
     downloadCsv(`stock_movements_${date}.csv`, [header.join(','), ...rows]);
   };
 
-  // Helper to render location selector
-  const renderLocationSelector = () => {
-    const hasLocations = locBalances.length > 0;
+  const toggleSort = (k: typeof sortKey) => {
+    setSortKey(prev => {
+      if (prev !== k) {
+        setSortDir('asc');
+        return k;
+      }
+      setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
+      return k;
+    });
+  };
 
-    if (moveType === 'issue' || moveType === 'return' || moveType === 'adjust') {
-      // Must select existing location
-      return (
-        <div>
-          <label className="label">Location</label>
-          <select
-            className="input"
-            value={location}
-            onChange={(e) => setLocation(e.target.value)}
-            disabled={!found}
-          >
-            <option value="">Select location…</option>
-            {locBalances.map((l) => (
-              <option key={l.name} value={l.name}>
-                {l.name} — {l.qty} {found?.uom_code || ''}
-              </option>
-            ))}
-          </select>
-          {location && (
-            <div className="text-xs text-gray-600 mt-1">
-              Available at <b>{location}</b>: <b>{selectedLocQty}</b> {found?.uom_code || ''}
-            </div>
-          )}
-          {!hasLocations && (
-            <div className="text-xs text-amber-600 mt-1">
-              No existing locations found for this item.
-            </div>
-          )}
-        </div>
-      );
+  /* ----------------------------- Handlers -------------------------------- */
+
+  // Save minimum
+  const saveMinimum = async () => {
+    if (!found) return;
+    setSavingMin(true);
+    try {
+      const { error } = await supabase
+        .from('items')
+        .update({ low_stock_threshold: Number.isFinite(minQty) ? minQty : 0 })
+        .eq('id', found.id);
+      if (error) throw error;
+
+      await findBySku();
+      alert('Minimum qty saved.');
+    } catch (err: any) {
+      alert(err?.message || String(err));
+    } finally {
+      setSavingMin(false);
+    }
+  };
+
+  // Receive submit
+  const submitReceive = async () => {
+    if (!found) return alert('Find an item first.');
+    if (!rcvQty || rcvQty <= 0) return alert('Quantity must be > 0.');
+    const uomCode = rcvUom || found.uom_code || null;
+
+    setLoading(true);
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+
+    try {
+      const clientTxId = makeClientTxId();
+
+      // 1) Record the stock receive with avg costing
+      {
+        const { error } = await supabase.rpc('receive_stock_avg', {
+          p_item_id: found.id,
+          p_qty: rcvQty,
+          p_unit_cost: purchasePrice, // purchase price per UoM
+          p_uom_code: uomCode,
+          p_ref: rcvRef || null,
+          p_reason: rcvReason || null,
+          p_client_tx_id: clientTxId,
+        });
+        if (error) throw error;
+      }
+
+      // 2) Attach location to that move via client_tx_id (if provided)
+      if (rcvLocation && rcvLocation.trim()) {
+        try {
+          await supabase
+            .from('stock_moves')
+            .update({ location: rcvLocation.trim() })
+            .eq('client_tx_id', clientTxId);
+        } catch (e) {
+          console.warn('location update skipped:', e);
+        }
+      }
+
+      // 3) Update item pricing fields so your second page reflects it automatically
+      //    - tax_rate := GST %
+      //    - unit_price := selling price (purchase * (1+gst) * (1+margin))
+      //    NOTE: unit_cost (avg) will be updated by the receive RPC; we only set tax & selling price here.
+      {
+        const computedSale =
+          salePrice && salePrice > 0
+            ? salePrice
+            : (purchasePrice * (1 + (gstPct || 0) / 100) * (1 + (marginPct || 0) / 100));
+
+        const { error } = await supabase
+          .from('items')
+          .update({
+            tax_rate: Number.isFinite(gstPct) ? gstPct : 0,
+            unit_price: Number.isFinite(computedSale) ? computedSale : 0,
+          })
+          .eq('id', found.id);
+        if (error) throw error;
+      }
+
+      // Refresh
+      await findBySku();
+      await loadHistory();
+      alert('Receive saved.');
+      // Close modal & reset
+      setShowReceive(false);
+      setRcvQty(0);
+      setPurchasePrice(0);
+      setSalePrice(0);
+      setRcvRef('');
+      setRcvReason('');
+      setRcvLocation('');
+      setUseCustomLocation(false);
+      if (scanMode) tryFocusSku(true);
+    } catch (err: any) {
+      alert(err?.message || String(err));
+    } finally {
+      setLoading(false);
+      submittingRef.current = false;
+    }
+  };
+
+  // Issue / Return / Adjust submitters
+  const submitIssue = async () => {
+    if (!found) return alert('Find an item first.');
+    if (!mLocation) return alert('Please select a location to issue from.');
+    if (!mQty || mQty <= 0) return alert('Quantity must be > 0.');
+    const loc = locBalances.find(l => l.name === mLocation);
+    if (!loc) return alert('Invalid location.');
+    if (loc.qty < mQty) return alert(`Insufficient qty at ${mLocation}. Available: ${loc.qty}`);
+
+    setLoading(true);
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+
+    try {
+      const clientTxId = makeClientTxId();
+      const { error } = await supabase.rpc('issue_stock', {
+        p_item_id: found.id,
+        p_qty: mQty,
+        p_ref: mRef || null,
+        p_reason: mReason || null,
+        p_client_tx_id: clientTxId,
+      });
+      if (error) throw error;
+
+      // attach location
+      await supabase
+        .from('stock_moves')
+        .update({ location: mLocation })
+        .eq('client_tx_id', clientTxId);
+
+      await findBySku();
+      await loadHistory();
+      alert('Issue saved.');
+      setShowIssue(false);
+      setMQty(0);
+      setMRef('');
+      setMReason('');
+      setMLocation('');
+      if (scanMode) tryFocusSku(true);
+    } catch (err: any) {
+      alert(err?.message || String(err));
+    } finally {
+      setLoading(false);
+      submittingRef.current = false;
+    }
+  };
+
+  const submitReturn = async () => {
+    if (!found) return alert('Find an item first.');
+    if (!mLocation) return alert('Please select a location for return.');
+    if (!mQty || mQty <= 0) return alert('Quantity must be > 0.');
+
+    setLoading(true);
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+
+    try {
+      const clientTxId = makeClientTxId();
+      const { error } = await supabase.rpc('return_stock', {
+        p_item_id: found.id,
+        p_qty: mQty,
+        p_ref: mRef || null,
+        p_reason: mReason || null,
+        p_client_tx_id: clientTxId,
+      });
+      if (error) throw error;
+
+      // attach location
+      await supabase
+        .from('stock_moves')
+        .update({ location: mLocation })
+        .eq('client_tx_id', clientTxId);
+
+      await findBySku();
+      await loadHistory();
+      alert('Return saved.');
+      setShowReturn(false);
+      setMQty(0);
+      setMRef('');
+      setMReason('');
+      setMLocation('');
+      if (scanMode) tryFocusSku(true);
+    } catch (err: any) {
+      alert(err?.message || String(err));
+    } finally {
+      setLoading(false);
+      submittingRef.current = false;
+    }
+  };
+
+  const submitAdjust = async () => {
+    if (!found) return alert('Find an item first.');
+    if (!mLocation) return alert('Please select a location for adjust.');
+    if (!mQty || mQty === 0) return alert('Adjustment delta cannot be 0.');
+
+    const loc = locBalances.find(l => l.name === mLocation);
+    if (!loc) return alert('Invalid location.');
+
+    if (mQty < 0 && loc.qty + mQty < 0) {
+      return alert(`This would make "${mLocation}" negative. Available: ${loc.qty}, delta: ${mQty}`);
     }
 
-    // Receive: can select existing or type new
-    return (
-      <div>
-        <label className="label">Location (optional)</label>
-        <div className="grid grid-cols-2 gap-2">
-          <select
-            className="input"
-            value={useCustomLocation ? '__NEW__' : (location || '')}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v === '__NEW__') {
-                setUseCustomLocation(true);
-                setLocation('');
-              } else {
-                setUseCustomLocation(false);
-                setLocation(v);
-              }
-            }}
-            disabled={!found}
-          >
-            <option value="">{hasLocations ? 'Select existing…' : 'No locations yet'}</option>
-            {locBalances.map((l) => (
-              <option key={l.name} value={l.name}>
-                {l.name} — {l.qty} {found?.uom_code || ''}
-              </option>
-            ))}
-            <option value="__NEW__">Other / New…</option>
-          </select>
+    setLoading(true);
+    if (submittingRef.current) return;
+    submittingRef.current = true;
 
-          <input
-            className="input"
-            placeholder="Type new location (e.g., Rack A3 / Shelf 2)"
-            value={useCustomLocation ? location : ''}
-            onChange={(e) => setLocation(e.target.value)}
-            disabled={!found || !useCustomLocation}
-          />
-        </div>
-        {(!useCustomLocation && location) && (
-          <div className="text-xs text-gray-600 mt-1">
-            Selected: <b>{location}</b> — Available: <b>{selectedLocQty}</b> {found?.uom_code || ''}
-          </div>
-        )}
-      </div>
-    );
+    try {
+      const clientTxId = makeClientTxId();
+      const { error } = await supabase.rpc('adjust_stock_delta', {
+        p_item_id: found.id,
+        p_delta: mQty,
+        p_ref: mRef || null,
+        p_reason: mReason || null,
+        p_client_tx_id: clientTxId,
+      });
+      if (error) throw error;
+
+      // attach location
+      await supabase
+        .from('stock_moves')
+        .update({ location: mLocation })
+        .eq('client_tx_id', clientTxId);
+
+      await findBySku();
+      await loadHistory();
+      alert('Adjustment saved.');
+      setShowAdjust(false);
+      setMQty(0);
+      setMRef('');
+      setMReason('');
+      setMLocation('');
+      if (scanMode) tryFocusSku(true);
+    } catch (err: any) {
+      alert(err?.message || String(err));
+    } finally {
+      setLoading(false);
+      submittingRef.current = false;
+    }
   };
+
+  /* ------------------------- Derived values ------------------------------ */
+
+  // Receive: live sale price calculation when editing purchase/gst/margin
+  useEffect(() => {
+    const calc = purchasePrice * (1 + (gstPct || 0) / 100) * (1 + (marginPct || 0) / 100);
+    if (!Number.isFinite(calc)) return;
+    setSalePrice((prev) => {
+      // only auto-overwrite if user hasn't manually changed to a non-matching value recently:
+      // small tolerance
+      const tol = 0.00001;
+      if (Math.abs((prev || 0) - calc) < tol) return prev;
+      return Number(calc.toFixed(2));
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [purchasePrice, gstPct, marginPct]);
+
+  const selectedLocQty = useMemo(() => {
+    if (!mLocation) return 0;
+    const foundLoc = locBalances.find(l => l.name === mLocation);
+    return foundLoc?.qty ?? 0;
+  }, [locBalances, mLocation]);
+
+  /* ------------------------------ UI ------------------------------------ */
 
   return (
     <div className="grid md:grid-cols-3 gap-4">
-      {/* LEFT: Entry form */}
+      {/* LEFT: SKU + Actions */}
       <div className="card">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="font-semibold">Receive / Adjust / Issue / Return</h2>
-          {/* Scan mode toggle */}
+          <h2 className="font-semibold">Stock Operations</h2>
           <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={scanMode}
-              onChange={(e) => setScanMode(e.target.checked)}
-            />
+            <input type="checkbox" checked={scanMode} onChange={(e) => setScanMode(e.target.checked)} />
             <span>Scan Mode (auto focus SKU)</span>
           </label>
         </div>
 
-        <form onSubmit={submit} className="space-y-3">
-          {/* SKU + Find */}
-          <div className="flex gap-2">
-            <input
-              ref={skuRef}
-              className="input"
-              placeholder="SKU (scan barcode here)"
-              value={sku}
-              onChange={(e) => setSku(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  findBySku();
-                }
-              }}
-            />
-            <Button type="button" onClick={findBySku}>Find</Button>
-          </div>
-
-          {/* Item preview */}
-          <div>
-            <label className="label">Item</label>
-            <input
-              className="input"
-              value={
-                found
-                  ? `${found.name ?? ''}${found.description ? ' — ' + found.description : ''}`
-                  : ''
+        {/* SKU row */}
+        <div className="flex gap-2 mb-3">
+          <input
+            ref={skuRef}
+            className="input"
+            placeholder="SKU (scan or type)"
+            value={sku}
+            onChange={(e) => setSku(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                findBySku();
               }
-              placeholder="(description will appear after Find)"
-              readOnly
-            />
-            <div className="text-xs text-gray-600 mt-1">
-              {found ? (
-                <>
-                  UoM: <b>{found.uom_code || '-'}</b> • Current Qty: <b>{found.stock_qty ?? 0}</b> •{' '}
-                  Avg Cost: <b>₹ {(found.unit_cost ?? 0).toFixed(2)}</b>
-                </>
-              ) : (
-                <>UoM: — • Current Qty: — • Avg Cost: —</>
-              )}
-            </div>
-          </div>
+            }}
+          />
+          <Button type="button" onClick={findBySku}>Find</Button>
+        </div>
 
-          {/* New: Per-location stock snapshot */}
-          {found && (
-            <div className="rounded border p-2 bg-gray-50">
-              <div className="text-sm font-medium mb-1">Per-location Stock</div>
-              {locBalances.length === 0 ? (
-                <div className="text-xs text-gray-600">No location splits yet.</div>
-              ) : (
-                <ul className="text-xs text-gray-800 space-y-0.5">
-                  {locBalances.map(l => (
-                    <li key={l.name} className="flex justify-between">
-                      <span>{l.name}</span>
-                      <span style={{ fontVariantNumeric: 'tabular-nums' }}>
-                        {l.qty} {found?.uom_code || ''}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-
-          {/* Minimum qty */}
-          <div className="grid grid-cols-3 gap-2">
-            <div className="col-span-2">
-              <label className="label">Minimum Qty (low-stock threshold)</label>
-              <input
-                className="input"
-                type="number"
-                min={0}
-                value={minQty}
-                onChange={(e) => setMinQty(parseInt(e.target.value || '0', 10))}
-                disabled={!found}
-              />
-            </div>
-            <div className="flex items-end">
-              <Button type="button" onClick={saveMinimum} disabled={!found || savingMin}>
-                {savingMin ? 'Saving…' : 'Save Min'}
-              </Button>
-            </div>
-          </div>
-
-          {/* Type */}
-          <div>
-            <label className="label">Type</label>
-            <select
-              className="input"
-              value={moveType}
-              onChange={(e) => {
-                const mt = e.target.value as MoveType;
-                setMoveType(mt);
-
-                // When switching to issue/return/adjust, enforce existing selection
-                if (mt === 'issue' || mt === 'return' || mt === 'adjust') {
-                  setUseCustomLocation(false);
-                  // keep previously selected existing location if it still exists; otherwise clear
-                  if (location && !locBalances.some(l => l.name === location)) {
-                    setLocation('');
-                  }
-                }
-              }}
-            >
-              <option value="receive">Receive</option>
-              <option value="adjust">Adjust</option>
-              <option value="issue">Issue</option>
-              <option value="return">Return</option>
-            </select>
-          </div>
-
-          {/* Qty + Unit Cost */}
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="label">
-                {qtyLabel}
-              </label>
-              <input
-                ref={qtyRef}
-                className="input"
-                type="number"
-                step="1"
-                min={moveType === 'adjust' ? undefined : 1}
-                value={qty}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  const n = v === '' ? 0 : Number(v);
-                  setQty(Number.isFinite(n) ? n : 0);
-                }}
-                placeholder={moveType === 'adjust' ? 'e.g., -2 (lost) or 3 (found)' : 'e.g., 5'}
-                onKeyDown={(e) => {
-                  if (e.key !== 'Enter') return;
-                  e.preventDefault();
-                  if (moveType === 'receive') {
-                    unitCostRef.current?.focus();
-                    unitCostRef.current?.select?.();
-                  } else {
-                    // For issue/return/adjust, Enter on Qty submits directly
-                    (e.currentTarget.form as HTMLFormElement)?.requestSubmit?.();
-                  }
-                }}
-              />
-              {(moveType === 'issue' || moveType === 'adjust') && location && (
-                <div className="text-xs text-gray-600 mt-1">
-                  Available at <b>{location}</b>: <b>{selectedLocQty}</b> {found?.uom_code || ''}
-                </div>
-              )}
-            </div>
-
-            {moveType === 'receive' ? (
-              <div>
-                <label className="label">Unit Cost (per {found?.uom_code || 'UoM'})</label>
-                <input
-                  ref={unitCostRef}
-                  className="input"
-                  type="number"
-                  step="0.01"
-                  min={0}
-                  value={unitCost}
-                  onChange={(e) => setUnitCost(parseFloat(e.target.value || '0'))}
-                  onKeyDown={(e) => {
-                    if (e.key !== 'Enter') return;
-                    e.preventDefault();
-                    (e.currentTarget.form as HTMLFormElement)?.requestSubmit?.();
-                  }}
-                />
-              </div>
+        {/* Item preview */}
+        <div className="mb-3">
+          <label className="label">Item</label>
+          <input
+            className="input"
+            value={
+              found
+                ? `${found.name ?? ''}${found.description ? ' — ' + found.description : ''}`
+                : ''
+            }
+            placeholder="(description will appear after Find)"
+            readOnly
+          />
+          <div className="text-xs text-gray-600 mt-1">
+            {found ? (
+              <>
+                SKU: <b>{found.sku}</b> • UoM: <b>{found.uom_code || '-'}</b> • Current Qty: <b>{found.stock_qty ?? 0}</b> •{' '}
+                Avg Cost: <b>₹ {(found.unit_cost ?? 0).toFixed(2)}</b>
+              </>
             ) : (
-              <div>
-                <label className="label">Unit Cost (auto)</label>
-                <input className="input" value={(found?.unit_cost ?? 0).toFixed(2)} readOnly />
-              </div>
+              <>UoM: — • Current Qty: — • Avg Cost: —</>
             )}
           </div>
+        </div>
 
-          {/* Preview */}
-          <div className="text-sm text-gray-700">
-            <div>
-              Total Cost:&nbsp;
-              <b>₹ {Number(preview?.total ?? 0).toFixed(2)}</b>
-              {moveType !== 'receive' && ' (auto: Qty × current Avg Cost)'}
-            </div>
-            {moveType === 'receive' && preview && typeof (preview as any).newAvg === 'number' && (
-              <div>
-                New Avg Cost after Receive:&nbsp;
-                <b>₹ {(preview as any).newAvg.toFixed(2)}</b>
-                <span className="text-xs text-gray-500">
-                  {' '}
-                  [old: {(preview as any).oldQty} @ ₹{(preview as any).oldCost.toFixed(2)} → new: {(preview as any).newQty}]
-                </span>
-              </div>
+        {/* Per-location stock */}
+        {found && (
+          <div className="rounded border p-2 bg-gray-50 mb-3">
+            <div className="text-sm font-medium mb-1">Per-location Stock</div>
+            {locBalances.length === 0 ? (
+              <div className="text-xs text-gray-600">No location splits yet.</div>
+            ) : (
+              <ul className="text-xs text-gray-800 space-y-0.5">
+                {locBalances.map(l => (
+                  <li key={l.name} className="flex justify-between">
+                    <span>{l.name}</span>
+                    <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                      {l.qty} {found?.uom_code || ''}
+                    </span>
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
+        )}
 
-          {/* Ref / Reason */}
-          <input
-            className="input"
-            placeholder="Reference (PO# etc.)"
-            value={ref}
-            onChange={(e) => setRef(e.target.value)}
-          />
-          <input
-            className="input"
-            placeholder="Reason / Note"
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-          />
+        {/* Minimum qty */}
+        <div className="grid grid-cols-3 gap-2 mb-4">
+          <div className="col-span-2">
+            <label className="label">Minimum Qty (low-stock threshold)</label>
+            <input
+              className="input"
+              type="number"
+              min={0}
+              value={minQty}
+              onChange={(e) => setMinQty(parseInt(e.target.value || '0', 10))}
+              disabled={!found}
+            />
+          </div>
+          <div className="flex items-end">
+            <Button type="button" onClick={saveMinimum} disabled={!found || savingMin}>
+              {savingMin ? 'Saving…' : 'Save Min'}
+            </Button>
+          </div>
+        </div>
 
-          {/* NEW: Location selector (smart) */}
-          {renderLocationSelector()}
-
-          <Button type="submit" disabled={loading || !found}>
-            {loading ? 'Saving...' : 'Save'}
+        {/* Action buttons */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+          <Button type="button" onClick={() => (found ? setShowReceive(true) : alert('Find an item first.'))}>
+            Receive
           </Button>
-        </form>
+          <Button
+            type="button"
+            onClick={() => (found ? setShowAdjust(true) : alert('Find an item first.'))}
+            className="bg-amber-500 hover:bg-amber-600 text-white"
+          >
+            Adjust
+          </Button>
+          <Button
+            type="button"
+            onClick={() => (found ? setShowIssue(true) : alert('Find an item first.'))}
+            className="bg-red-600 hover:bg-red-700 text-white"
+          >
+            Issue
+          </Button>
+          <Button
+            type="button"
+            onClick={() => (found ? setShowReturn(true) : alert('Find an item first.'))}
+            className="bg-green-600 hover:bg-green-700 text-white"
+          >
+            Return
+          </Button>
+        </div>
       </div>
 
-      {/* RIGHT: Recent Stock Movements with Search + Sort + CSV */}
+      {/* RIGHT: Movements table */}
       <div className="md:col-span-2 card">
         <div className="flex flex-wrap items-end gap-3 mb-3">
           <div className="text-lg font-semibold mr-auto">Recent Stock Movements</div>
 
-          {/* Quick search */}
           <input
             className="input"
             placeholder="Search (SKU / Item / Type / Ref / Location)…"
@@ -902,7 +807,6 @@ export default function Stock() {
             onChange={(e) => setMovesSearch(e.target.value)}
           />
 
-          {/* Limit */}
           <select
             className="input"
             value={movesLimit}
@@ -924,88 +828,31 @@ export default function Stock() {
             <thead>
               <tr>
                 <th>
-                  <SortHeader
-                    label="Date"
-                    active={sortKey==='created_at'}
-                    dir={sortDir}
-                    onClick={() => toggleSort('created_at')}
-                    minWidth={160}
-                  />
+                  <button className="w-full text-left font-semibold" onClick={() => toggleSort('created_at')}>Date {sortKey==='created_at' ? (sortDir==='asc'?'▲':'▼'):'↕'}</button>
                 </th>
                 <th>
-                  <SortHeader
-                    label="Item"
-                    active={sortKey==='sku' || sortKey==='name'}
-                    dir={sortDir}
-                    onClick={() => toggleSort('sku')}
-                    minWidth={220}
-                  />
+                  <button className="w-full text-left font-semibold" onClick={() => toggleSort('sku')}>Item {sortKey==='sku'?'▲/▼':'↕'}</button>
                 </th>
                 <th>
-                  <SortHeader
-                    label="Type"
-                    active={sortKey==='move_type'}
-                    dir={sortDir}
-                    onClick={() => toggleSort('move_type')}
-                    minWidth={80}
-                  />
+                  <button className="w-full text-left font-semibold" onClick={() => toggleSort('move_type')}>Type {sortKey==='move_type' ? (sortDir==='asc'?'▲':'▼'):'↕'}</button>
                 </th>
                 <th className="text-right">
-                  <SortHeader
-                    label="Qty"
-                    active={sortKey==='qty'}
-                    dir={sortDir}
-                    onClick={() => toggleSort('qty')}
-                    alignRight
-                    minWidth={80}
-                  />
+                  <button className="w-full text-right font-semibold" onClick={() => toggleSort('qty')}>Qty {sortKey==='qty' ? (sortDir==='asc'?'▲':'▼'):'↕'}</button>
                 </th>
                 <th>
-                  <SortHeader
-                    label="UoM"
-                    active={sortKey==='uom_code'}
-                    dir={sortDir}
-                    onClick={() => toggleSort('uom_code')}
-                    minWidth={60}
-                  />
+                  <button className="w-full text-left font-semibold" onClick={() => toggleSort('uom_code')}>UoM {sortKey==='uom_code' ? (sortDir==='asc'?'▲':'▼'):'↕'}</button>
                 </th>
                 <th className="text-right">
-                  <SortHeader
-                    label="Unit Cost"
-                    active={sortKey==='unit_cost'}
-                    dir={sortDir}
-                    onClick={() => toggleSort('unit_cost')}
-                    alignRight
-                    minWidth={110}
-                  />
+                  <button className="w-full text-right font-semibold" onClick={() => toggleSort('unit_cost')}>Unit Cost {sortKey==='unit_cost' ? (sortDir==='asc'?'▲':'▼'):'↕'}</button>
                 </th>
                 <th className="text-right">
-                  <SortHeader
-                    label="Total Cost"
-                    active={sortKey==='total_cost'}
-                    dir={sortDir}
-                    onClick={() => toggleSort('total_cost')}
-                    alignRight
-                    minWidth={120}
-                  />
+                  <button className="w-full text-right font-semibold" onClick={() => toggleSort('total_cost')}>Total Cost {sortKey==='total_cost' ? (sortDir==='asc'?'▲':'▼'):'↕'}</button>
                 </th>
                 <th>
-                  <SortHeader
-                    label="Ref"
-                    active={sortKey==='ref'}
-                    dir={sortDir}
-                    onClick={() => toggleSort('ref')}
-                    minWidth={120}
-                  />
+                  <button className="w-full text-left font-semibold" onClick={() => toggleSort('ref')}>Ref {sortKey==='ref' ? (sortDir==='asc'?'▲':'▼'):'↕'}</button>
                 </th>
                 <th>
-                  <SortHeader
-                    label="Location"
-                    active={sortKey==='location'}
-                    dir={sortDir}
-                    onClick={() => toggleSort('location')}
-                    minWidth={120}
-                  />
+                  <button className="w-full text-left font-semibold" onClick={() => toggleSort('location')}>Location {sortKey==='location' ? (sortDir==='asc'?'▲':'▼'):'↕'}</button>
                 </th>
               </tr>
             </thead>
@@ -1037,6 +884,344 @@ export default function Stock() {
           </table>
         </div>
       </div>
+
+      {/* ------------------------ RECEIVE MODAL ------------------------- */}
+      <Modal
+        title={`Receive — ${found?.sku || ''}`}
+        open={showReceive}
+        onClose={() => setShowReceive(false)}
+      >
+        {!found ? (
+          <div className="text-sm text-gray-600">Find an item first.</div>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="label">Qty</label>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  step="1"
+                  value={rcvQty}
+                  onChange={(e) => setRcvQty(parseInt(e.target.value || '0', 10))}
+                />
+              </div>
+              <div>
+                <label className="label">UoM</label>
+                <select
+                  className="input"
+                  value={rcvUom}
+                  onChange={(e) => setRcvUom(e.target.value)}
+                >
+                  <option value="">(use default {found.uom_code || '-'})</option>
+                  {allUoms.map((u) => (
+                    <option key={u.code} value={u.code}>
+                      {u.code} — {u.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="label">Purchase Price (per {rcvUom || found.uom_code || 'UoM'})</label>
+                <input
+                  className="input"
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  value={purchasePrice}
+                  onChange={(e) => setPurchasePrice(parseFloat(e.target.value || '0'))}
+                />
+              </div>
+              <div>
+                <label className="label">GST %</label>
+                <input
+                  className="input"
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  value={gstPct}
+                  onChange={(e) => setGstPct(parseFloat(e.target.value || '0'))}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="label">Margin %</label>
+                <input
+                  className="input"
+                  type="number"
+                  step="0.01"
+                  value={marginPct}
+                  onChange={(e) => setMarginPct(parseFloat(e.target.value || '0'))}
+                />
+              </div>
+              <div>
+                <label className="label">Selling Price (auto, editable)</label>
+                <input
+                  className="input"
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  value={salePrice}
+                  onChange={(e) => setSalePrice(parseFloat(e.target.value || '0'))}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="label">Reference (PO# etc.)</label>
+                <input className="input" value={rcvRef} onChange={(e) => setRcvRef(e.target.value)} />
+              </div>
+              <div>
+                <label className="label">Reason / Note</label>
+                <input className="input" value={rcvReason} onChange={(e) => setRcvReason(e.target.value)} />
+              </div>
+            </div>
+
+            {/* Location: existing or new */}
+            <div>
+              <label className="label">Location</label>
+              <div className="grid grid-cols-2 gap-2">
+                <select
+                  className="input"
+                  value={useCustomLocation ? '__NEW__' : (rcvLocation || '')}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === '__NEW__') {
+                      setUseCustomLocation(true);
+                      setRcvLocation('');
+                    } else {
+                      setUseCustomLocation(false);
+                      setRcvLocation(v);
+                    }
+                  }}
+                >
+                  <option value="">{locBalances.length ? 'Select existing…' : 'No locations yet'}</option>
+                  {locBalances.map((l) => (
+                    <option key={l.name} value={l.name}>
+                      {l.name} — {l.qty} {found.uom_code || ''}
+                    </option>
+                  ))}
+                  <option value="__NEW__">Other / New…</option>
+                </select>
+                <input
+                  className="input"
+                  placeholder="Type new location"
+                  value={useCustomLocation ? rcvLocation : ''}
+                  onChange={(e) => setRcvLocation(e.target.value)}
+                  disabled={!useCustomLocation}
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2">
+              <Button type="button" onClick={() => setShowReceive(false)} className="bg-gray-200 hover:bg-gray-300 text-gray-900">
+                Cancel
+              </Button>
+              <Button type="button" onClick={submitReceive} disabled={loading}>
+                {loading ? 'Saving…' : 'Save'}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ------------------------ ISSUE MODAL --------------------------- */}
+      <Modal
+        title={`Issue — ${found?.sku || ''}`}
+        open={showIssue}
+        onClose={() => setShowIssue(false)}
+      >
+        {!found ? (
+          <div className="text-sm text-gray-600">Find an item first.</div>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="label">Qty</label>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  step="1"
+                  value={mQty}
+                  onChange={(e) => setMQty(parseInt(e.target.value || '0', 10))}
+                />
+              </div>
+              <div>
+                <label className="label">Location</label>
+                <select
+                  className="input"
+                  value={mLocation}
+                  onChange={(e) => setMLocation(e.target.value)}
+                >
+                  <option value="">Select location…</option>
+                  {locBalances.map((l) => (
+                    <option key={l.name} value={l.name}>
+                      {l.name} — {l.qty} {found.uom_code || ''}
+                    </option>
+                  ))}
+                </select>
+                {mLocation && (
+                  <div className="text-xs text-gray-600 mt-1">
+                    Available at <b>{mLocation}</b>: <b>{selectedLocQty}</b> {found?.uom_code || ''}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="label">Reference</label>
+                <input className="input" value={mRef} onChange={(e) => setMRef(e.target.value)} />
+              </div>
+              <div>
+                <label className="label">Reason / Note</label>
+                <input className="input" value={mReason} onChange={(e) => setMReason(e.target.value)} />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2">
+              <Button type="button" onClick={() => setShowIssue(false)} className="bg-gray-200 hover:bg-gray-300 text-gray-900">
+                Cancel
+              </Button>
+              <Button type="button" onClick={submitIssue} disabled={loading}>
+                {loading ? 'Saving…' : 'Save'}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ------------------------ RETURN MODAL -------------------------- */}
+      <Modal
+        title={`Return — ${found?.sku || ''}`}
+        open={showReturn}
+        onClose={() => setShowReturn(false)}
+      >
+        {!found ? (
+          <div className="text-sm text-gray-600">Find an item first.</div>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="label">Qty</label>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  step="1"
+                  value={mQty}
+                  onChange={(e) => setMQty(parseInt(e.target.value || '0', 10))}
+                />
+              </div>
+              <div>
+                <label className="label">Location</label>
+                <select
+                  className="input"
+                  value={mLocation}
+                  onChange={(e) => setMLocation(e.target.value)}
+                >
+                  <option value="">Select location…</option>
+                  {locBalances.map((l) => (
+                    <option key={l.name} value={l.name}>
+                      {l.name} — {l.qty} {found.uom_code || ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="label">Reference</label>
+                <input className="input" value={mRef} onChange={(e) => setMRef(e.target.value)} />
+              </div>
+              <div>
+                <label className="label">Reason / Note</label>
+                <input className="input" value={mReason} onChange={(e) => setMReason(e.target.value)} />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2">
+              <Button type="button" onClick={() => setShowReturn(false)} className="bg-gray-200 hover:bg-gray-300 text-gray-900">
+                Cancel
+              </Button>
+              <Button type="button" onClick={submitReturn} disabled={loading}>
+                {loading ? 'Saving…' : 'Save'}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ------------------------ ADJUST MODAL -------------------------- */}
+      <Modal
+        title={`Adjust — ${found?.sku || ''}`}
+        open={showAdjust}
+        onClose={() => setShowAdjust(false)}
+      >
+        {!found ? (
+          <div className="text-sm text-gray-600">Find an item first.</div>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="label">Delta Qty (use negative to reduce)</label>
+                <input
+                  className="input"
+                  type="number"
+                  step="1"
+                  value={mQty}
+                  onChange={(e) => setMQty(parseInt(e.target.value || '0', 10))}
+                  placeholder="-2 (lost) or 3 (found)"
+                />
+              </div>
+              <div>
+                <label className="label">Location</label>
+                <select
+                  className="input"
+                  value={mLocation}
+                  onChange={(e) => setMLocation(e.target.value)}
+                >
+                  <option value="">Select location…</option>
+                  {locBalances.map((l) => (
+                    <option key={l.name} value={l.name}>
+                      {l.name} — {l.qty} {found.uom_code || ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="label">Reference</label>
+                <input className="input" value={mRef} onChange={(e) => setMRef(e.target.value)} />
+              </div>
+              <div>
+                <label className="label">Reason / Note</label>
+                <input className="input" value={mReason} onChange={(e) => setMReason(e.target.value)} />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2">
+              <Button type="button" onClick={() => setShowAdjust(false)} className="bg-gray-200 hover:bg-gray-300 text-gray-900">
+                Cancel
+              </Button>
+              <Button type="button" onClick={submitAdjust} disabled={loading}>
+                {loading ? 'Saving…' : 'Save'}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
