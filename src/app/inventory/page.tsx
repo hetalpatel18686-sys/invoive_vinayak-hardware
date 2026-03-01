@@ -25,14 +25,14 @@ interface InvRow {
   sku: string;
   name: string;
   stock_qty: number;
-  unit_cost: number; // old avg unit cost (fallback)
+  unit_cost: number; // fallback average cost
   uom_code: string;
   low_stock_threshold: number | null;
   locations: { name: string; qty: number }[];
   locations_all: { name: string; qty: number }[];
   locations_text: string;
 
-  // NEW pricing fields from DB
+  // pricing fields from DB
   purchase_price: number | null;
   gst_percent: number | null;
   margin_percent: number | null;
@@ -90,7 +90,7 @@ function SortHeader({
 }
 
 /* ======================================================
-   Barcode + QR loaders (same approach)
+   Barcode + QR loaders
    ====================================================== */
 const JSBARCODE_STATIC_URL =
   process.env.NEXT_PUBLIC_JSBARCODE_URL
@@ -354,7 +354,7 @@ export default function InventoryPage() {
   const loadInventory = async () => {
     try {
       setLoading(true);
-      // Pull 3 pricing fields too
+      // Pull pricing fields too
       const { data: itemsData, error: itemsErr } = await supabase
         .from('items')
         .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id, purchase_price, gst_percent, margin_percent')
@@ -513,7 +513,6 @@ export default function InventoryPage() {
       alert('Delete failed: ' + error.message);
       return;
     }
-    // Remove locally (faster than refetch)
     setRows(prev => prev.filter(r => r.id !== row.id));
   };
 
@@ -538,7 +537,7 @@ export default function InventoryPage() {
     }
     const html = previewRef.current?.innerHTML || '';
     if (!html) {
-      alert('Please click "Preview Labels" first and wait a moment.');
+      alert('Please select items (checkbox) and set quantities first.');
       return;
     }
 
@@ -667,7 +666,7 @@ export default function InventoryPage() {
 
           <Button type="button" onClick={exportCsv}>Export CSV</Button>
           <Button type="button" onClick={loadInventory}>Refresh</Button>
-          <Link href="/estimate/new" className="rounded bg-emerald-600 text-white px-3 py-2 hover:bg-emerald-700">Estimate</Link>
+          <Link href="/estimate/new" className="rounded border px-3 py-2 hover:bg-neutral-50">Estimate</Link>
         </div>
 
         {/* Thermal labels controls */}
@@ -702,20 +701,11 @@ export default function InventoryPage() {
                   return next;
                 });
               }}>Apply to selected</Button>
-              <Button
-                type="button"
-                onClick={() => {
-                  const any = Object.values(sel).some(s => s?.checked);
-                  if (!any) alert('Select items and set quantities first.');
-                }}
-              >
-                Preview Labels
-              </Button>
               <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={handlePrintThermal}>Print Thermal 2×1</Button>
             </div>
           </div>
 
-          {/* Preview grid */}
+          {/* Preview grid (renders selected labels) */}
           <div className="mt-3">
             <div
               ref={previewRef}
