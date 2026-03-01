@@ -25,14 +25,14 @@ interface InvRow {
   sku: string;
   name: string;
   stock_qty: number;
-  unit_cost: number; // your old avg unit cost (kept as fallback)
+  unit_cost: number; // old avg unit cost (fallback)
   uom_code: string;
   low_stock_threshold: number | null;
   locations: { name: string; qty: number }[];
   locations_all: { name: string; qty: number }[];
   locations_text: string;
 
-  // NEW pricing fields pulled from DB
+  // NEW pricing fields from DB
   purchase_price: number | null;
   gst_percent: number | null;
   margin_percent: number | null;
@@ -49,8 +49,6 @@ type SortKey =
   | 'locations_text';
 
 type LocationScope = 'all_items' | 'has_stock' | 'appears_any';
-
-/** keep this ONCE only */
 type Sel = Record<string, { checked: boolean; qty: number }>;
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -72,17 +70,17 @@ function downloadCsv(filename: string, rows: string[]) {
    Sort header
    ====================================================== */
 function SortHeader({
-  label, active, dir, onClick, alignRight = false, minWidth,
+  label, active, dir, onClick, alignRight = false,
 }: {
   label: string; active: boolean; dir: 'asc'|'desc';
-  onClick: () => void; alignRight?: boolean; minWidth?: number;
+  onClick: () => void; alignRight?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`w-full flex items-center gap-1 ${alignRight ? 'justify-end' : 'justify-start'} font-semibold`}
-      style={{ minWidth }}
+      className={`th-label font-semibold ${alignRight ? 'justify-end' : 'justify-start'}`}
+      style={{ whiteSpace: 'nowrap' }}
       title={`Sort by ${label}`}
     >
       <span>{label}</span>
@@ -190,8 +188,7 @@ function BarcodeSvg({
           lineColor: '#000',
           ...(options || {}),
         });
-      } catch (e) {
-        console.warn(e);
+      } catch {
         if (!svgRef.current) return;
         const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         txt.setAttribute('x', '0'); txt.setAttribute('y', '10');
@@ -206,13 +203,7 @@ function BarcodeSvg({
   return <svg ref={svgRef} className="w-full h-auto" />;
 }
 
-function QrSvg({
-  value,
-  sizeMm = 11,
-}: {
-  value: string;
-  sizeMm?: number;
-}) {
+function QrSvg({ value, sizeMm = 11 }: { value: string; sizeMm?: number }) {
   const wrapRef = React.useRef<HTMLDivElement | null>(null);
 
   React.useEffect(() => {
@@ -234,8 +225,7 @@ function QrSvg({
           svgEl.setAttribute('width', '100%');
           svgEl.setAttribute('height', '100%');
         }
-      } catch (e) {
-        console.warn(e);
+      } catch {
         if (!wrapRef.current) return;
         wrapRef.current.textContent = value;
       }
@@ -244,55 +234,32 @@ function QrSvg({
   }, [value, sizeMm]);
 
   return (
-    <div
-      ref={wrapRef}
-      style={{ width: `${sizeMm}mm`, height: `${sizeMm}mm`, display: 'block' }}
-    />
+    <div ref={wrapRef} style={{ width: `${sizeMm}mm`, height: `${sizeMm}mm`, display: 'block' }} />
   );
 }
 
 function ThermalLabel2x1({
-  brand,
-  name,
-  sku,
-  uom,
-}: {
-  brand?: string;
-  name: string;
-  sku: string;
-  uom?: string;
-}) {
+  brand, name, sku, uom,
+}: { brand?: string; name: string; sku: string; uom?: string }) {
   return (
     <div
       className="thermal-label-2x1"
       style={{
-        width: '50.8mm',
-        height: '25.4mm',
-        padding: '1.5mm',
-        boxSizing: 'border-box',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '0.6mm',
-        justifyContent: 'space-between',
-        border: '1px solid #e5e7eb', // preview only
-        borderRadius: '1mm',
-        background: '#fff',
+        width: '50.8mm', height: '25.4mm', padding: '1.5mm',
+        boxSizing: 'border-box', display: 'flex', flexDirection: 'column',
+        gap: '0.6mm', justifyContent: 'space-between',
+        border: '1px solid #e5e7eb', borderRadius: '1mm', background: '#fff',
       }}
     >
-      {/* Top line */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '1mm' }}>
         <div style={{ fontSize: '8px', fontWeight: 700, lineHeight: '10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '70%' }}>
           {brand || ''}
         </div>
         {uom ? <div style={{ fontSize: '8px', lineHeight: '10px' }}>UoM: {uom}</div> : null}
       </div>
-
-      {/* Name */}
       <div style={{ fontSize: '9px', lineHeight: '10px', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {name}
       </div>
-
-      {/* Barcode + QR row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '1mm', width: '100%', flex: 1 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <BarcodeSvg value={sku} options={{ height: 12, width: 1.4, displayValue: true, fontSize: 8 }} />
@@ -320,7 +287,7 @@ export default function InventoryPage() {
   const [locationScope, setLocationScope] = useState<LocationScope>('all_items');
   const [showZeroQtyLocations, setShowZeroQtyLocations] = useState<boolean>(false);
 
-  // multi selection for labels
+  // selection for labels
   const [sel, setSel] = useState<Sel>({});
   const [bulkQtyState, setBulkQtyState] = useState<number>(1);
   const setBulkQtyInput = (n: number) => setBulkQtyState(Math.max(1, Math.min(500, Math.floor(n || 1))));
@@ -339,7 +306,7 @@ export default function InventoryPage() {
   const loadInventory = async () => {
     try {
       setLoading(true);
-      // Pull your 3 pricing fields too
+      // Pull 3 pricing fields too
       const { data: itemsData, error: itemsErr } = await supabase
         .from('items')
         .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id, purchase_price, gst_percent, margin_percent')
@@ -377,9 +344,7 @@ export default function InventoryPage() {
       const mapped: InvRow[] = (itemsData ?? []).map((it: any) => {
         const itemId = String(it.id);
         const locMap = perItemLocMap.get(itemId) ?? new Map<string, number>();
-        const locations_all = Array.from(locMap.entries())
-          .map(([name, qty]) => ({ name, qty }))
-          .sort((a, b) => a.name.localeCompare(b.name));
+        const locations_all = Array.from(locMap.entries()).map(([name, qty]) => ({ name, qty })).sort((a, b) => a.name.localeCompare(b.name));
         const filteredLocs = locations_all.filter(l => l.qty !== 0);
 
         return {
@@ -392,11 +357,7 @@ export default function InventoryPage() {
           uom_code: it.uom_id ? (uomMap.get(it.uom_id) ?? '') : '',
           locations: filteredLocs,
           locations_all,
-          locations_text: filteredLocs.length
-            ? filteredLocs.map(l => `${l.name}: ${l.qty}`).join(' | ')
-            : '',
-
-          // NEW pricing fields
+          locations_text: filteredLocs.length ? filteredLocs.map(l => `${l.name}: ${l.qty}`).join(' | ') : '',
           purchase_price: it.purchase_price ?? null,
           gst_percent: it.gst_percent ?? null,
           margin_percent: it.margin_percent ?? null,
@@ -420,9 +381,7 @@ export default function InventoryPage() {
       return {
         ...row,
         locations: displayLocs,
-        locations_text: displayLocs.length
-          ? displayLocs.map(l => `${l.name}: ${l.qty}`).join(' | ')
-          : '',
+        locations_text: displayLocs.length ? displayLocs.map(l => `${l.name}: ${l.qty}`).join(' | ') : '',
       };
     });
   }, [rows, showZeroQtyLocations]);
@@ -450,9 +409,9 @@ export default function InventoryPage() {
       const gst = Number(r.gst_percent ?? 0);
       const margin = Number(r.margin_percent ?? 0);
 
-      const unitCostGst = withGst(base, gst);               // rounded to ₹
-      const sellingPrice = withGstAndMargin(base, gst, margin); // rounded to ₹
-      const total_value = r.stock_qty * sellingPrice;       // integer ₹ too
+      const unitCostGst = withGst(base, gst);                 // rounded ₹
+      const sellingPrice = withGstAndMargin(base, gst, margin); // rounded ₹
+      const total_value = r.stock_qty * sellingPrice;           // integer ₹
 
       return { ...r, unitCostGst, sellingPrice, total_value };
     });
@@ -489,39 +448,40 @@ export default function InventoryPage() {
     return { qty: round2(qty), value: rupeeCeil(value) };
   }, [sorted]);
 
-  // selection helpers
-  const setRowChecked = (id: string, checked: boolean) =>
-    setSel(prev => ({ ...prev, [id]: { checked, qty: prev[id]?.qty ?? 1 } }));
-  const setRowQty = (id: string, qty: number) =>
-    setSel(prev => ({ ...prev, [id]: { checked: prev[id]?.checked ?? false, qty: Math.max(1, Math.floor(qty || 1)) } }));
-  const selectAllVisibleWithStock = () =>
-    setSel(prev => {
-      const next: Sel = { ...prev };
-      for (const r of sorted) if ((r.stock_qty ?? 0) > 0 && r.sku) next[r.id] = { checked: true, qty: next[r.id]?.qty ?? 1 };
-      return next;
-    });
-  const clearSelection = () => setSel({});
-  const applyBulkQty = () =>
-    setSel(prev => {
-      const next: Sel = { ...prev };
-      for (const r of sorted)
-        if (next[r.id]?.checked) next[r.id] = { checked: true, qty: bulkQtyState };
-      return next;
-    });
-
-  const selectedItems = useMemo(() => {
-    const arr: { row: InvRow; qty: number }[] = [];
-    for (const r of sorted) {
-      const s = sel[r.id];
-      if (s?.checked && r.sku) arr.push({ row: r, qty: Math.max(1, Math.min(500, Math.floor(s.qty || 1))) });
+  /* =========================
+     DELETE row (safe)
+     ========================= */
+  const deleteRow = async (row: InvRow) => {
+    // Safety: block if stock exists
+    if ((row.stock_qty ?? 0) > 0) {
+      alert('Cannot delete an item that has stock. Please move/issue stock to 0 first.');
+      return;
     }
-    return arr;
-  }, [sorted, sel, bulkQtyState]);
+    const ok = window.confirm(`Delete item:\n${row.sku} — ${row.name}\n\nThis cannot be undone.`);
+    if (!ok) return;
+
+    const { error } = await supabase.from('items').delete().eq('id', row.id);
+    if (error) {
+      alert('Delete failed: ' + error.message);
+      return;
+    }
+    // Remove locally (faster than refetch)
+    setRows(prev => prev.filter(r => r.id !== row.id));
+  };
 
   /* --------------------------------
      PRINT thermal labels
      -------------------------------- */
   const handlePrintThermal = () => {
+    const selectedItems = (() => {
+      const arr: { row: InvRow; qty: number }[] = [];
+      for (const r of sorted) {
+        const s = sel[r.id];
+        if (s?.checked && r.sku) arr.push({ row: r, qty: Math.max(1, Math.min(500, Math.floor(s.qty || 1))) });
+      }
+      return arr;
+    })();
+
     const totalLabels = selectedItems.reduce((sum, it) => sum + it.qty, 0);
     if (totalLabels === 0) {
       alert('Please select items and set label quantities.');
@@ -584,7 +544,7 @@ export default function InventoryPage() {
   };
 
   /* --------------------------------
-     CSV export uses rounded values now
+     CSV export uses rounded values
      -------------------------------- */
   const exportCsv = () => {
     const header = ['SKU','Item','UoM','Qty','Minimum','Purchase Price','GST %','Margin %','Unit Cost (GST)','Total Value (₹)','Locations'];
@@ -607,10 +567,11 @@ export default function InventoryPage() {
     downloadCsv(`inventory_${date}.csv`, [header.join(','), ...lines]);
   };
 
+  /* ========= RENDER ========= */
   return (
     <div className="space-y-4">
       <div className="card">
-        {/* filters */}
+        {/* Filters / actions */}
         <div className="flex flex-wrap items-end gap-3 mb-3">
           <div className="text-lg font-semibold mr-auto">Inventory</div>
 
@@ -641,10 +602,7 @@ export default function InventoryPage() {
 
           <Button type="button" onClick={exportCsv}>Export CSV</Button>
           <Button type="button" onClick={loadInventory}>Refresh</Button>
-          <Link
-            href="/estimate/new"
-            className="rounded border px-3 py-2 hover:bg-neutral-50"
-          >
+          <Link href="/estimate/new" className="rounded bg-emerald-600 text-white px-3 py-2 hover:bg-emerald-700">
             Estimate
           </Link>
         </div>
@@ -653,8 +611,15 @@ export default function InventoryPage() {
         <div className="mb-4 border rounded p-3 bg-white">
           <div className="flex flex-wrap items-end gap-2">
             <div className="font-semibold">Thermal 2×1 Labels (50.8 mm × 25.4 mm)</div>
-            <Button type="button" onClick={selectAllVisibleWithStock}>Select all (stock &gt; 0)</Button>
-            <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={clearSelection}>Clear selection</Button>
+            <Button type="button" onClick={() => {
+              setSel(prev => {
+                const next: Sel = { ...prev };
+                // select all visible with stock
+                for (const r of sorted) if ((r.stock_qty ?? 0) > 0 && r.sku) next[r.id] = { checked: true, qty: next[r.id]?.qty ?? 1 };
+                return next;
+              });
+            }}>Select all (stock &gt; 0)</Button>
+            <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={() => setSel({})}>Clear selection</Button>
 
             <div className="ml-auto flex items-end gap-2">
               <div className="flex flex-col">
@@ -668,10 +633,24 @@ export default function InventoryPage() {
                   onChange={(e) => setBulkQtyInput(parseInt(e.target.value || '1', 10))}
                 />
               </div>
-              <Button type="button" onClick={applyBulkQty}>Apply to selected</Button>
+              <Button type="button" onClick={() => {
+                setSel(prev => {
+                  const next: Sel = { ...prev };
+                  for (const r of sorted) if (next[r.id]?.checked) next[r.id] = { checked: true, qty: bulkQtyState };
+                  return next;
+                });
+              }}>Apply to selected</Button>
               <Button
                 type="button"
                 onClick={() => {
+                  const selectedItems = (() => {
+                    const arr: { row: InvRow; qty: number }[] = [];
+                    for (const r of sorted) {
+                      const s = sel[r.id];
+                      if (s?.checked && r.sku) arr.push({ row: r, qty: Math.max(1, Math.min(500, Math.floor(s.qty || 1))) });
+                    }
+                    return arr;
+                  })();
                   if (selectedItems.length === 0) alert('Select items and set quantities first.');
                 }}
               >
@@ -683,94 +662,119 @@ export default function InventoryPage() {
 
           {/* Preview grid */}
           <div className="mt-3">
-            {selectedItems.length === 0 ? (
-              <div className="text-sm text-gray-600">Select items (or use “Select all (stock &gt; 0)”), set quantities, then click “Preview Labels”.</div>
-            ) : (
-              <div
-                ref={previewRef}
-                className="grid gap-2"
-                style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}
-              >
-                {selectedItems.flatMap(({ row, qty }) =>
-                  Array.from({ length: qty }).map((_, i) => (
-                    <ThermalLabel2x1
-                      key={`${row.id}-${i}`}
-                      brand={brandName}
-                      name={row.name || row.sku}
-                      sku={row.sku}
-                      uom={row.uom_code}
-                    />
-                  ))
-                )}
-              </div>
-            )}
+            {/* Render selected items previews */}
+            <div
+              ref={previewRef}
+              className="grid gap-2"
+              style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}
+            >
+              {Object.entries(sel).flatMap(([id, s]) => {
+                if (!s?.checked) return [];
+                const row = sorted.find(r => r.id === id);
+                if (!row) return [];
+                return Array.from({ length: Math.max(1, Math.min(500, Math.floor(s.qty || 1))) }).map((_, i) => (
+                  <ThermalLabel2x1
+                    key={`${row.id}-${i}`}
+                    brand={brandName}
+                    name={row.name || row.sku}
+                    sku={row.sku}
+                    uom={row.uom_code}
+                  />
+                ));
+              })}
+            </div>
           </div>
         </div>
 
-        {/* Inventory table */}
-        {loading ? (
-          <p>Loading…</p>
-        ) : rows.length === 0 ? (
-          <div className="p-3 text-sm text-gray-700">No items found. Add items or refresh.</div>
-        ) : (
-          <div className="overflow-auto">
-            <table className="table w-full">
-              <thead>
-                <tr>
-                  <th style={{ minWidth: 60 }}>Select</th>
-                  <th style={{ minWidth: 110 }}><SortHeader label="SKU" active={sortKey==='sku'} dir={sortDir} onClick={() => toggleSort('sku')} minWidth={110} /></th>
-                  <th><SortHeader label="Item" active={sortKey==='name'} dir={sortDir} onClick={() => toggleSort('name')} minWidth={200} /></th>
-                  <th><SortHeader label="UoM" active={sortKey==='uom_code'} dir={sortDir} onClick={() => toggleSort('uom_code')} minWidth={60} /></th>
-                  <th className="text-right"><SortHeader label="Qty" active={sortKey==='stock_qty'} dir={sortDir} onClick={() => toggleSort('stock_qty')} alignRight minWidth={80} /></th>
-                  <th className="text-right"><SortHeader label="Minimum" active={sortKey==='low_stock_threshold'} dir={sortDir} onClick={() => toggleSort('low_stock_threshold')} alignRight minWidth={90} /></th>
+        {/* Inventory table with alignment */}
+        <div className="table-scroll">
+          <table className="inventory-table">
+            {/* Exact widths per column */}
+            <colgroup>
+              <col style={{ width: 90  }} />   {/* Select */}
+              <col style={{ width: 120 }} />   {/* SKU */}
+              <col style={{ width: 220 }} />   {/* Item */}
+              <col style={{ width: 80  }} />   {/* UoM */}
+              <col style={{ width: 90  }} />   {/* Qty */}
+              <col style={{ width: 110 }} />   {/* Minimum */}
+              <col style={{ width: 120 }} />   {/* Purchase */}
+              <col style={{ width: 90  }} />   {/* GST % */}
+              <col style={{ width: 90  }} />   {/* Margin % */}
+              <col style={{ width: 140 }} />   {/* Unit Cost (GST) */}
+              <col style={{ width: 160 }} />   {/* Total Value (₹) */}
+              <col style={{ width: 140 }} />   {/* Actions */}
+              <col style={{ width: 360 }} />   {/* Locations */}
+            </colgroup>
 
-                  {/* NEW: Purchase, GST, Margin */}
-                  <th className="text-right" style={{ minWidth: 120 }}>Purchase</th>
-                  <th className="text-right" style={{ minWidth: 90 }}>GST %</th>
-                  <th className="text-right" style={{ minWidth: 90 }}>Margin %</th>
+            <thead className="sticky-head">
+              <tr>
+                <th>Select</th>
+                <th><SortHeader label="SKU" active={sortKey==='sku'} dir={sortDir} onClick={() => toggleSort('sku')} /></th>
+                <th><SortHeader label="Item" active={sortKey==='name'} dir={sortDir} onClick={() => toggleSort('name')} /></th>
+                <th><SortHeader label="UoM" active={sortKey==='uom_code'} dir={sortDir} onClick={() => toggleSort('uom_code')} /></th>
+                <th className="num"><SortHeader label="Qty" active={sortKey==='stock_qty'} dir={sortDir} onClick={() => toggleSort('stock_qty')} alignRight /></th>
+                <th className="num"><SortHeader label="Minimum" active={sortKey==='low_stock_threshold'} dir={sortDir} onClick={() => toggleSort('low_stock_threshold')} alignRight /></th>
 
-                  {/* NEW: Unit Cost (GST) replaces "Avg Unit Cost" */}
-                  <th className="text-right" style={{ minWidth: 120 }}>Unit Cost (GST)</th>
+                <th className="num">Purchase</th>
+                <th className="num">GST %</th>
+                <th className="num">Margin %</th>
+                <th className="num">Unit Cost (GST)</th>
+                <th className="num"><SortHeader label="Total Value (₹)" active={sortKey==='total_value'} dir={sortDir} onClick={() => toggleSort('total_value')} alignRight /></th>
+                <th>Actions</th>
+                <th><SortHeader label="Locations" active={sortKey==='locations_text'} dir={sortDir} onClick={() => toggleSort('locations_text')} /></th>
+              </tr>
+            </thead>
 
-                  <th className="text-right"><SortHeader label="Total Value (₹)" active={sortKey==='total_value'} dir={sortDir} onClick={() => toggleSort('total_value')} alignRight minWidth={140} /></th>
-                  <th><SortHeader label="Locations" active={sortKey==='locations_text'} dir={sortDir} onClick={() => toggleSort('locations_text')} minWidth={260} /></th>
-                </tr>
-              </thead>
-              <tbody>
-                {sorted.map((r) => {
+            <tbody>
+              {loading ? (
+                <tr><td colSpan={13} className="py-6 text-center">Loading…</td></tr>
+              ) : rows.length === 0 ? (
+                <tr><td colSpan={13} className="py-6 text-center">No items found.</td></tr>
+              ) : (
+                sorted.map((r) => {
+                  const s = sel[r.id] || { checked: false, qty: 1 };
                   const isLow =
                     r.low_stock_threshold != null &&
                     r.low_stock_threshold > 0 &&
                     r.stock_qty <= r.low_stock_threshold;
 
-                  const s = sel[r.id] || { checked: false, qty: 1 };
-
                   return (
                     <tr key={r.id} className={isLow ? 'bg-red-50' : ''}>
                       <td>
                         <div className="flex items-center gap-2">
-                          <input type="checkbox" checked={s.checked} onChange={(e) => setRowChecked(r.id, e.target.checked)} title="Select" />
-                          <input className="input w-16" type="number" min={1} max={500} value={s.qty} onChange={(e) => setRowQty(r.id, parseInt(e.target.value || '1', 10))} title="Labels for this item" />
+                          <input type="checkbox" checked={s.checked} onChange={(e) => setSel(prev => ({ ...prev, [r.id]: { checked: e.target.checked, qty: prev[r.id]?.qty ?? 1 } }))} title="Select" />
+                          <input className="input w-16" type="number" min={1} max={500} value={s.qty} onChange={(e) => setSel(prev => ({ ...prev, [r.id]: { checked: prev[r.id]?.checked ?? false, qty: Math.max(1, Math.floor(parseInt(e.target.value || '1', 10))) } }))} title="Labels for this item" />
                         </div>
                       </td>
                       <td>{r.sku}</td>
-                      <td>{r.name}</td>
+                      <td className="truncate-cell">{r.name}</td>
                       <td>{r.uom_code || '-'}</td>
-                      <td className="text-right" style={{ minWidth: 80, fontVariantNumeric: 'tabular-nums' }}>{r.stock_qty}</td>
-                      <td className="text-right" style={{ minWidth: 90, fontVariantNumeric: 'tabular-nums' }}>{r.low_stock_threshold != null ? r.low_stock_threshold : '—'}</td>
+                      <td className="num">{r.stock_qty}</td>
+                      <td className="num">{r.low_stock_threshold != null ? r.low_stock_threshold : '—'}</td>
 
-                      {/* NEW pricing cells */}
-                      <td className="text-right" style={{ minWidth: 120 }}>{INR0.format(Number(r.purchase_price ?? r.unit_cost ?? 0))}</td>
-                      <td className="text-right" style={{ minWidth: 90 }}>{Number(r.gst_percent ?? 0).toFixed(2)}%</td>
-                      <td className="text-right" style={{ minWidth: 90 }}>{Number(r.margin_percent ?? 0).toFixed(2)}%</td>
+                      {/* Pricing cells */}
+                      <td className="num">{INR0.format(Number(r.purchase_price ?? r.unit_cost ?? 0))}</td>
+                      <td className="num">{Number(r.gst_percent ?? 0).toFixed(2)}%</td>
+                      <td className="num">{Number(r.margin_percent ?? 0).toFixed(2)}%</td>
+                      <td className="num">{INR0.format(r.unitCostGst)}</td>
+                      <td className="num">{INR0.format(r.total_value)}</td>
 
-                      {/* Unit Cost (GST) rounded to rupee */}
-                      <td className="text-right" style={{ minWidth: 120, fontVariantNumeric: 'tabular-nums' }}>{INR0.format(r.unitCostGst)}</td>
+                      <td>
+                        <div className="flex gap-2">
+                          <Link href={`/estimate/new?sku=${encodeURIComponent(r.sku)}`} className="rounded bg-emerald-600 text-white px-2 py-1 text-sm hover:bg-emerald-700">
+                            Estimate
+                          </Link>
+                          <button
+                            className="rounded bg-red-600 text-white px-2 py-1 text-sm hover:bg-red-700"
+                            onClick={() => deleteRow(r)}
+                            title="Delete item"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </td>
 
-                      {/* Total Value (rounded) */}
-                      <td className="text-right" style={{ minWidth: 140, fontVariantNumeric: 'tabular-nums' }}>{INR0.format(r.total_value)}</td>
-
-                      <td style={{ minWidth: 260 }}>
+                      <td>
                         {r.locations.length === 0 ? '—' : (
                           <div className="flex flex-wrap gap-1">
                             {r.locations.map(l => (
@@ -783,26 +787,27 @@ export default function InventoryPage() {
                       </td>
                     </tr>
                   );
-                })}
-              </tbody>
-              <tfoot>
-                <tr className="font-semibold">
-                  <td colSpan={4} className="text-right">Totals:</td>
-                  <td className="text-right" style={{ minWidth: 80, fontVariantNumeric: 'tabular-nums' }}>{totals.qty}</td>
-                  <td className="text-right" style={{ minWidth: 90 }}>—</td>
-                  <td className="text-right" style={{ minWidth: 120 }}>—</td>
-                  <td className="text-right" style={{ minWidth: 90 }}>—</td>
-                  <td className="text-right" style={{ minWidth: 90 }}>—</td>
-                  <td className="text-right" style={{ minWidth: 120 }}>—</td>
-                  <td className="text-right" style={{ minWidth: 140, fontVariantNumeric: 'tabular-nums' }}>{INR0.format(totals.value)}</td>
-                  <td>—</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        )}
+                })
+              )}
+            </tbody>
+
+            <tfoot>
+              <tr className="font-semibold">
+                <td colSpan={4} className="text-right">Totals:</td>
+                <td className="num">{totals.qty}</td>
+                <td className="num">—</td>
+                <td className="num">—</td>
+                <td className="num">—</td>
+                <td className="num">—</td>
+                <td className="num">—</td>
+                <td className="num">{INR0.format(totals.value)}</td>
+                <td>—</td>
+                <td>—</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
       </div>
     </div>
   );
 }
-``
