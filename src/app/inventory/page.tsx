@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 
@@ -49,6 +50,9 @@ type SortKey =
 
 type LocationScope = 'all_items' | 'has_stock' | 'appears_any';
 
+/** keep this ONCE only */
+type Sel = Record<string, { checked: boolean; qty: number }>;
+
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 /* ======================================================
@@ -88,7 +92,7 @@ function SortHeader({
 }
 
 /* ======================================================
-   Barcode + QR (unchanged from your code)
+   Barcode + QR (same as your version)
    ====================================================== */
 const JSBARCODE_STATIC_URL =
   process.env.NEXT_PUBLIC_JSBARCODE_URL
@@ -317,7 +321,6 @@ export default function InventoryPage() {
   const [showZeroQtyLocations, setShowZeroQtyLocations] = useState<boolean>(false);
 
   // multi selection for labels
-  type Sel = Record<string, { checked: boolean; qty: number }>;
   const [sel, setSel] = useState<Sel>({});
   const [bulkQtyState, setBulkQtyState] = useState<number>(1);
   const setBulkQtyInput = (n: number) => setBulkQtyState(Math.max(1, Math.min(500, Math.floor(n || 1))));
@@ -486,8 +489,7 @@ export default function InventoryPage() {
     return { qty: round2(qty), value: rupeeCeil(value) };
   }, [sorted]);
 
-  // selection helpers (unchanged)
-  type Sel = Record<string, { checked: boolean; qty: number }>;
+  // selection helpers
   const setRowChecked = (id: string, checked: boolean) =>
     setSel(prev => ({ ...prev, [id]: { checked, qty: prev[id]?.qty ?? 1 } }));
   const setRowQty = (id: string, qty: number) =>
@@ -517,8 +519,9 @@ export default function InventoryPage() {
   }, [sorted, sel, bulkQtyState]);
 
   /* --------------------------------
-     PRINT thermal labels (same logic)
+     PRINT thermal labels
      -------------------------------- */
+  const previewRef = useRef<HTMLDivElement | null>(null);
   const handlePrintThermal = () => {
     const totalLabels = selectedItems.reduce((sum, it) => sum + it.qty, 0);
     if (totalLabels === 0) {
@@ -639,7 +642,12 @@ export default function InventoryPage() {
 
           <Button type="button" onClick={exportCsv}>Export CSV</Button>
           <Button type="button" onClick={loadInventory}>Refresh</Button>
-          <a className="ml-2 rounded bg-emerald-600 text-white px-3 py-2 hover:bg-emerald-700" href="/estimate/new">Estimate</a>
+          <Link
+            href="/estimate/new"
+            className="rounded border px-3 py-2 hover:bg-neutral-50"
+          >
+            Estimate
+          </Link>
         </div>
 
         {/* Thermal labels controls */}
@@ -787,7 +795,7 @@ export default function InventoryPage() {
                   <td className="text-right" style={{ minWidth: 90 }}>—</td>
                   <td className="text-right" style={{ minWidth: 90 }}>—</td>
                   <td className="text-right" style={{ minWidth: 120 }}>—</td>
-                  <td className="text-right" style={{ minWidth: 140, fontVariantNumeric: 'tabular-nums' }}>₹ {INR0.format(totals.value).replace('₹', '').trim()}</td>
+                  <td className="text-right" style={{ minWidth: 140, fontVariantNumeric: 'tabular-nums' }}>{INR0.format(totals.value)}</td>
                   <td>—</td>
                 </tr>
               </tfoot>
@@ -798,3 +806,4 @@ export default function InventoryPage() {
     </div>
   );
 }
+``
