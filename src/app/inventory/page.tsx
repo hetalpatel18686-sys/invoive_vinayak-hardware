@@ -521,7 +521,6 @@ export default function InventoryPage() {
   /* --------------------------------
      PRINT thermal labels
      -------------------------------- */
-  const previewRef = useRef<HTMLDivElement | null>(null);
   const handlePrintThermal = () => {
     const totalLabels = selectedItems.reduce((sum, it) => sum + it.qty, 0);
     if (totalLabels === 0) {
