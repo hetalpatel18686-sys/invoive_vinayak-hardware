@@ -4,17 +4,37 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 
+/* ======================================================
+   Round-up helpers (ALWAYS whole rupees)
+   ====================================================== */
+const rupeeCeil = (n: number) => Math.ceil((n ?? 0) + Number.EPSILON);
+const INR0 = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 });
+
+const withGst = (base: number, gstPct: number) =>
+  rupeeCeil((base ?? 0) * (1 + (gstPct ?? 0) / 100));
+
+const withGstAndMargin = (base: number, gstPct: number, marginPct: number) =>
+  rupeeCeil(withGst(base ?? 0, gstPct ?? 0) * (1 + (marginPct ?? 0) / 100));
+
+/* ======================================================
+   Types
+   ====================================================== */
 interface InvRow {
   id: string;
   sku: string;
   name: string;
   stock_qty: number;
-  unit_cost: number;
+  unit_cost: number; // your old avg unit cost (kept as fallback)
   uom_code: string;
   low_stock_threshold: number | null;
   locations: { name: string; qty: number }[];
   locations_all: { name: string; qty: number }[];
   locations_text: string;
+
+  // NEW pricing fields pulled from DB
+  purchase_price: number | null;
+  gst_percent: number | null;
+  margin_percent: number | null;
 }
 
 type SortKey =
@@ -31,6 +51,9 @@ type LocationScope = 'all_items' | 'has_stock' | 'appears_any';
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
+/* ======================================================
+   CSV helper
+   ====================================================== */
 function downloadCsv(filename: string, rows: string[]) {
   const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
@@ -41,6 +64,9 @@ function downloadCsv(filename: string, rows: string[]) {
   URL.revokeObjectURL(url);
 }
 
+/* ======================================================
+   Sort header
+   ====================================================== */
 function SortHeader({
   label, active, dir, onClick, alignRight = false, minWidth,
 }: {
@@ -62,7 +88,7 @@ function SortHeader({
 }
 
 /* ======================================================
-   BARCODE loader (Option C)
+   Barcode + QR (unchanged from your code)
    ====================================================== */
 const JSBARCODE_STATIC_URL =
   process.env.NEXT_PUBLIC_JSBARCODE_URL
@@ -96,9 +122,6 @@ async function ensureJsBarcode(): Promise<any> {
   return (window as any).JsBarcode;
 }
 
-/* ======================================================
-   QR loader (Option C)
-   ====================================================== */
 const QRCODE_STATIC_URL =
   process.env.NEXT_PUBLIC_QRCODE_URL
   || '/vendor/qrcode.min.js'
@@ -132,9 +155,6 @@ async function ensureQRCodeFromStatic(): Promise<any> {
   return (window as any).QRCode || (window as any).qrcode;
 }
 
-/* ----------------------------------------------
-   Barcode SVG (vector)
-   ---------------------------------------------- */
 function BarcodeSvg({
   value,
   options,
@@ -182,12 +202,9 @@ function BarcodeSvg({
   return <svg ref={svgRef} className="w-full h-auto" />;
 }
 
-/* ----------------------------------------------
-   QR SVG (vector) using QRCode.toString(type='svg')
-   ---------------------------------------------- */
 function QrSvg({
   value,
-  sizeMm = 11, // ~11mm fits inside 25.4mm label
+  sizeMm = 11,
 }: {
   value: string;
   sizeMm?: number;
@@ -202,7 +219,7 @@ function QrSvg({
         const QR: any = await ensureQRCodeFromStatic();
         if (cancelled || !wrapRef.current) return;
 
-        const px = Math.max(40, Math.round((sizeMm / 25.4) * 96)); // approximate sizing
+        const px = Math.max(40, Math.round((sizeMm / 25.4) * 96));
         const toString = QR.toString || QR.default?.toString || QR?.toString;
         if (!toString) throw new Error('QR lib missing toString()');
 
@@ -230,9 +247,6 @@ function QrSvg({
   );
 }
 
-/* ----------------------------------------------
-   Thermal 2×1 label with QR + Barcode
-   ---------------------------------------------- */
 function ThermalLabel2x1({
   brand,
   name,
@@ -285,6 +299,9 @@ function ThermalLabel2x1({
   );
 }
 
+/* ======================================================
+   Page
+   ====================================================== */
 export default function InventoryPage() {
   const [loading, setLoading] = useState<boolean>(true);
   const [rows, setRows] = useState<InvRow[]>([]);
@@ -302,12 +319,10 @@ export default function InventoryPage() {
   // multi selection for labels
   type Sel = Record<string, { checked: boolean; qty: number }>;
   const [sel, setSel] = useState<Sel>({});
-  const [bulkQtyState, setBulkQtyState] = useState<number>(1); // ✅ renamed
-  const setBulkQtyInput = (n: number) => setBulkQtyState(Math.max(1, Math.min(500, Math.floor(n || 1)))); // ✅ renamed
+  const [bulkQtyState, setBulkQtyState] = useState<number>(1);
+  const setBulkQtyInput = (n: number) => setBulkQtyState(Math.max(1, Math.min(500, Math.floor(n || 1))));
 
   const brandName = process.env.NEXT_PUBLIC_BRAND_NAME || 'Vinayak Hardware';
-
-  // ✅ only one previewRef
   const previewRef = useRef<HTMLDivElement | null>(null);
 
   const toggleSort = (k: SortKey) => {
@@ -321,9 +336,10 @@ export default function InventoryPage() {
   const loadInventory = async () => {
     try {
       setLoading(true);
+      // Pull your 3 pricing fields too
       const { data: itemsData, error: itemsErr } = await supabase
         .from('items')
-        .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id')
+        .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id, purchase_price, gst_percent, margin_percent')
         .order('sku', { ascending: true });
       if (itemsErr) throw itemsErr;
 
@@ -376,6 +392,11 @@ export default function InventoryPage() {
           locations_text: filteredLocs.length
             ? filteredLocs.map(l => `${l.name}: ${l.qty}`).join(' | ')
             : '',
+
+          // NEW pricing fields
+          purchase_price: it.purchase_price ?? null,
+          gst_percent: it.gst_percent ?? null,
+          margin_percent: it.margin_percent ?? null,
         };
       });
 
@@ -419,19 +440,20 @@ export default function InventoryPage() {
     });
   }, [rowsWithDisplayLocations, search, lowOnly]);
 
-  const filtered = useMemo(() => {
-    if (!selectedLocation || locationScope === 'all_items') return prefiltered;
-    if (locationScope === 'has_stock') {
-      return prefiltered.filter(r => {
-        const loc = r.locations_all.find(l => l.name === selectedLocation);
-        return !!loc && Number(loc.qty) > 0;
-      });
-    }
-    return prefiltered.filter(r => r.locations_all.some(l => l.name === selectedLocation));
-  }, [prefiltered, selectedLocation, locationScope]);
-
+  // Compute rounded prices for display and totals
   const sorted = useMemo(() => {
-    const cp = filtered.map(r => ({ ...r, total_value: r.stock_qty * r.unit_cost }));
+    const cp = prefiltered.map(r => {
+      const base = Number(r.purchase_price ?? r.unit_cost ?? 0);
+      const gst = Number(r.gst_percent ?? 0);
+      const margin = Number(r.margin_percent ?? 0);
+
+      const unitCostGst = withGst(base, gst);               // rounded to ₹
+      const sellingPrice = withGstAndMargin(base, gst, margin); // rounded to ₹
+      const total_value = r.stock_qty * sellingPrice;       // integer ₹ too
+
+      return { ...r, unitCostGst, sellingPrice, total_value };
+    });
+
     cp.sort((a: any, b: any) => {
       const dir = sortDir === 'asc' ? 1 : -1;
       let va: any; let vb: any;
@@ -451,16 +473,21 @@ export default function InventoryPage() {
       if (va > vb) return  1 * dir;
       return 0;
     });
-    return cp as (InvRow & { total_value: number })[];
-  }, [filtered, sortKey, sortDir]);
+
+    return cp as (InvRow & { unitCostGst: number; sellingPrice: number; total_value: number })[];
+  }, [prefiltered, sortKey, sortDir]);
 
   const totals = useMemo(() => {
     let qty = 0, value = 0;
-    for (const r of sorted) { qty += r.stock_qty; value += r.stock_qty * r.unit_cost; }
-    return { qty: round2(qty), value: round2(value) };
+    for (const r of sorted) {
+      qty += r.stock_qty;
+      value += r.total_value; // already integer rupees
+    }
+    return { qty: round2(qty), value: rupeeCeil(value) };
   }, [sorted]);
 
-  // selection helpers
+  // selection helpers (unchanged)
+  type Sel = Record<string, { checked: boolean; qty: number }>;
   const setRowChecked = (id: string, checked: boolean) =>
     setSel(prev => ({ ...prev, [id]: { checked, qty: prev[id]?.qty ?? 1 } }));
   const setRowQty = (id: string, qty: number) =>
@@ -490,58 +517,37 @@ export default function InventoryPage() {
   }, [sorted, sel, bulkQtyState]);
 
   /* --------------------------------
-     PRINT (fixed blank page issue)
+     PRINT thermal labels (same logic)
      -------------------------------- */
- // --- REPLACE your existing handlePrintThermal with this version ---
-const handlePrintThermal = () => {
-  // 1) Validate there is something to print
-  const totalLabels = selectedItems.reduce((sum, it) => sum + it.qty, 0);
-  if (totalLabels === 0) {
-    alert('Please select items and set label quantities.');
-    return;
-  }
-  const html = previewRef.current?.innerHTML || '';
-  if (!html) {
-    alert('Please click "Preview Labels" first and wait a moment.');
-    return;
-  }
+  const handlePrintThermal = () => {
+    const totalLabels = selectedItems.reduce((sum, it) => sum + it.qty, 0);
+    if (totalLabels === 0) {
+      alert('Please select items and set label quantities.');
+      return;
+    }
+    const html = previewRef.current?.innerHTML || '';
+    if (!html) {
+      alert('Please click "Preview Labels" first and wait a moment.');
+      return;
+    }
 
-  // 2) Compose a full HTML doc with exact 2×1 (50.8mm × 25.4mm) page size
-  const docHtml = `<!doctype html>
+    const docHtml = `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>Thermal 2x1 Labels</title>
   <style>
-    @page {
-      size: 50.8mm 25.4mm; /* exact 2×1 inches */
-      margin: 0;
-    }
-    html, body {
-      margin: 0;
-      padding: 0;
-      background: #fff;
-    }
-    /* Each .sheet will be exactly one label "page" on the roll */
-    .sheet {
-      width: 50.8mm;
-      height: 25.4mm;
-      page-break-after: always;
-    }
-    /* Ensure the preview label style is identical in print */
+    @page { size: 50.8mm 25.4mm; margin: 0; }
+    html, body { margin: 0; padding: 0; background: #fff; }
+    .sheet { width: 50.8mm; height: 25.4mm; page-break-after: always; }
     .thermal-label-2x1 {
-      width: 50.8mm;
-      height: 25.4mm;
-      padding: 1.5mm;
-      box-sizing: border-box;
-      border: none !important; /* remove preview border in print */
-      background: #fff;
+      width: 50.8mm; height: 25.4mm; padding: 1.5mm;
+      box-sizing: border-box; border: none !important; background: #fff;
     }
   </style>
 </head>
 <body>
   ${(() => {
-    // Wrap each label node from preview into a .sheet container
     const container = document.createElement('div');
     container.innerHTML = html;
     const items = Array.from(container.children);
@@ -550,63 +556,48 @@ const handlePrintThermal = () => {
 </body>
 </html>`;
 
-  // 3) Create a hidden iframe and print from it (more reliable than window.open)
-  const iframe = document.createElement('iframe');
-  iframe.setAttribute('style', 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;');
-  document.body.appendChild(iframe);
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('style', 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;');
+    document.body.appendChild(iframe);
 
-  const onFrameLoad = () => {
-    try {
-      const w = iframe.contentWindow!;
-      const d = w.document;
-
-      // Write the print HTML and wait for layout/paint
-      d.open();
-      d.write(docHtml);
-      d.close();
-
-      // Give the browser a short tick to render SVGs fully, then print
-      setTimeout(() => {
-        w.focus();
-        w.print();
-
-        // Clean up after printing (some browsers fire afterprint; fallback to timeout)
-        const cleanup = () => {
-          try { document.body.removeChild(iframe); } catch {}
-        };
-        w.addEventListener('afterprint', cleanup, { once: true });
-        setTimeout(cleanup, 1500);
-      }, 300);
-    } catch (err) {
-      console.error('Print failed:', err);
-      try { document.body.removeChild(iframe); } catch {}
-      alert('Printing failed. Please try again.');
-    }
+    const onFrameLoad = () => {
+      try {
+        const w = iframe.contentWindow!;
+        const d = w.document;
+        d.open(); d.write(docHtml); d.close();
+        setTimeout(() => {
+          w.focus(); w.print();
+          const cleanup = () => { try { document.body.removeChild(iframe); } catch {} };
+          w.addEventListener('afterprint', cleanup, { once: true });
+          setTimeout(cleanup, 1500);
+        }, 300);
+      } catch (err) {
+        console.error('Print failed:', err);
+        try { document.body.removeChild(iframe); } catch {}
+        alert('Printing failed. Please try again.');
+      }
+    };
+    if (iframe.contentWindow?.document?.readyState === 'complete') onFrameLoad();
+    else iframe.onload = onFrameLoad;
   };
 
-  // Some browsers fire load even for empty iframe; attach then write
-  if (iframe.contentWindow?.document?.readyState === 'complete') {
-    onFrameLoad();
-  } else {
-    iframe.onload = onFrameLoad;
-  }
-};
-
   /* --------------------------------
-     CSV export (same as before)
+     CSV export uses rounded values now
      -------------------------------- */
   const exportCsv = () => {
-    const header = ['SKU','Item','UoM','Qty','Minimum','Avg Unit Cost','Total Value','Locations'];
+    const header = ['SKU','Item','UoM','Qty','Minimum','Purchase Price','GST %','Margin %','Unit Cost (GST)','Total Value (₹)','Locations'];
     const lines = sorted.map((r) => {
-      const total = r.stock_qty * r.unit_cost;
       return [
         r.sku,
         (r.name ?? '').replaceAll('"','""'),
         r.uom_code || '',
         String(r.stock_qty),
         r.low_stock_threshold != null ? String(r.low_stock_threshold) : '',
-        r.unit_cost.toFixed(2),
-        total.toFixed(2),
+        String(r.purchase_price ?? r.unit_cost ?? 0),
+        String(r.gst_percent ?? 0),
+        String(r.margin_percent ?? 0),
+        String(r.unitCostGst),
+        String(r.total_value),
         (r.locations_text ?? '').replaceAll('"','""'),
       ].map(v => `"${v}"`).join(',');
     });
@@ -648,6 +639,7 @@ const handlePrintThermal = () => {
 
           <Button type="button" onClick={exportCsv}>Export CSV</Button>
           <Button type="button" onClick={loadInventory}>Refresh</Button>
+          <a className="ml-2 rounded bg-emerald-600 text-white px-3 py-2 hover:bg-emerald-700" href="/estimate/new">Estimate</a>
         </div>
 
         {/* Thermal labels controls */}
@@ -724,14 +716,21 @@ const handlePrintThermal = () => {
                   <th><SortHeader label="UoM" active={sortKey==='uom_code'} dir={sortDir} onClick={() => toggleSort('uom_code')} minWidth={60} /></th>
                   <th className="text-right"><SortHeader label="Qty" active={sortKey==='stock_qty'} dir={sortDir} onClick={() => toggleSort('stock_qty')} alignRight minWidth={80} /></th>
                   <th className="text-right"><SortHeader label="Minimum" active={sortKey==='low_stock_threshold'} dir={sortDir} onClick={() => toggleSort('low_stock_threshold')} alignRight minWidth={90} /></th>
-                  <th className="text-right"><SortHeader label="Avg Unit Cost" active={sortKey==='unit_cost'} dir={sortDir} onClick={() => toggleSort('unit_cost')} alignRight minWidth={120} /></th>
+
+                  {/* NEW: Purchase, GST, Margin */}
+                  <th className="text-right" style={{ minWidth: 120 }}>Purchase</th>
+                  <th className="text-right" style={{ minWidth: 90 }}>GST %</th>
+                  <th className="text-right" style={{ minWidth: 90 }}>Margin %</th>
+
+                  {/* NEW: Unit Cost (GST) replaces "Avg Unit Cost" */}
+                  <th className="text-right" style={{ minWidth: 120 }}>Unit Cost (GST)</th>
+
                   <th className="text-right"><SortHeader label="Total Value (₹)" active={sortKey==='total_value'} dir={sortDir} onClick={() => toggleSort('total_value')} alignRight minWidth={140} /></th>
                   <th><SortHeader label="Locations" active={sortKey==='locations_text'} dir={sortDir} onClick={() => toggleSort('locations_text')} minWidth={260} /></th>
                 </tr>
               </thead>
               <tbody>
                 {sorted.map((r) => {
-                  const total = r.stock_qty * r.unit_cost;
                   const isLow =
                     r.low_stock_threshold != null &&
                     r.low_stock_threshold > 0 &&
@@ -752,8 +751,18 @@ const handlePrintThermal = () => {
                       <td>{r.uom_code || '-'}</td>
                       <td className="text-right" style={{ minWidth: 80, fontVariantNumeric: 'tabular-nums' }}>{r.stock_qty}</td>
                       <td className="text-right" style={{ minWidth: 90, fontVariantNumeric: 'tabular-nums' }}>{r.low_stock_threshold != null ? r.low_stock_threshold : '—'}</td>
-                      <td className="text-right" style={{ minWidth: 120, fontVariantNumeric: 'tabular-nums' }}>₹ {r.unit_cost.toFixed(2)}</td>
-                      <td className="text-right" style={{ minWidth: 140, fontVariantNumeric: 'tabular-nums' }}>₹ {total.toFixed(2)}</td>
+
+                      {/* NEW pricing cells */}
+                      <td className="text-right" style={{ minWidth: 120 }}>{INR0.format(Number(r.purchase_price ?? r.unit_cost ?? 0))}</td>
+                      <td className="text-right" style={{ minWidth: 90 }}>{Number(r.gst_percent ?? 0).toFixed(2)}%</td>
+                      <td className="text-right" style={{ minWidth: 90 }}>{Number(r.margin_percent ?? 0).toFixed(2)}%</td>
+
+                      {/* Unit Cost (GST) rounded to rupee */}
+                      <td className="text-right" style={{ minWidth: 120, fontVariantNumeric: 'tabular-nums' }}>{INR0.format(r.unitCostGst)}</td>
+
+                      {/* Total Value (rounded) */}
+                      <td className="text-right" style={{ minWidth: 140, fontVariantNumeric: 'tabular-nums' }}>{INR0.format(r.total_value)}</td>
+
                       <td style={{ minWidth: 260 }}>
                         {r.locations.length === 0 ? '—' : (
                           <div className="flex flex-wrap gap-1">
@@ -775,7 +784,10 @@ const handlePrintThermal = () => {
                   <td className="text-right" style={{ minWidth: 80, fontVariantNumeric: 'tabular-nums' }}>{totals.qty}</td>
                   <td className="text-right" style={{ minWidth: 90 }}>—</td>
                   <td className="text-right" style={{ minWidth: 120 }}>—</td>
-                  <td className="text-right" style={{ minWidth: 140, fontVariantNumeric: 'tabular-nums' }}>₹ {totals.value.toFixed(2)}</td>
+                  <td className="text-right" style={{ minWidth: 90 }}>—</td>
+                  <td className="text-right" style={{ minWidth: 90 }}>—</td>
+                  <td className="text-right" style={{ minWidth: 120 }}>—</td>
+                  <td className="text-right" style={{ minWidth: 140, fontVariantNumeric: 'tabular-nums' }}>₹ {INR0.format(totals.value).replace('₹', '').trim()}</td>
                   <td>—</td>
                 </tr>
               </tfoot>
