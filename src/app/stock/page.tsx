@@ -62,9 +62,16 @@ interface FoundItem {
   name: string | null;
   description?: string | null;
   stock_qty?: number;
-  unit_cost?: number;
+  unit_cost?: number;       // moving average (from DB)
   uom_code?: string;
   low_stock_threshold?: number | null;
+
+  // pricing fields (used by Inventory page)
+  purchase_price?: number | null;
+  gst_percent?: number | null;
+  margin_percent?: number | null;
+  tax_rate?: number | null;    // mirror of gst_percent for legacy UIs
+  unit_price?: number | null;  // selling price
 }
 
 interface MoveRow {
@@ -178,9 +185,7 @@ export default function Stock() {
       if (el) {
         el.focus();
         if (selectAll) {
-          try {
-            el.select();
-          } catch {}
+          try { el.select(); } catch {}
         }
       }
     });
@@ -278,7 +283,8 @@ export default function Stock() {
     const { data, error } = await supabase
       .from('items')
       .select(
-        'id, sku, name, description, stock_qty, unit_cost, low_stock_threshold, tax_rate, unit_price, uom:units_of_measure ( code )'
+        // pull pricing fields too
+        'id, sku, name, description, stock_qty, unit_cost, low_stock_threshold, purchase_price, gst_percent, margin_percent, tax_rate, unit_price, uom:units_of_measure ( code )'
       )
       .ilike('sku', trimmed)
       .limit(1);
@@ -298,23 +304,30 @@ export default function Stock() {
       unit_cost: Number(row.unit_cost ?? 0),
       uom_code,
       low_stock_threshold: row.low_stock_threshold ?? null,
+
+      purchase_price: row.purchase_price ?? null,
+      gst_percent: row.gst_percent ?? (row.tax_rate ?? null),
+      margin_percent: row.margin_percent ?? null,
+      tax_rate: row.tax_rate ?? null,
+      unit_price: row.unit_price ?? null,
     };
 
     setFound(foundItem);
     setMinQty(Number(row.low_stock_threshold ?? 0));
-    // Prime Receive modal defaults
+
+    // Prefill Receive modal from DB values
     setRcvQty(0);
     setRcvUom(uom_code || '');
-    setPurchasePrice(0);
-    setGstPct(Number(row.tax_rate ?? 0)); // use existing GST if any
-    setMarginPct(0);
+    setPurchasePrice(Number(row.purchase_price ?? row.unit_cost ?? 0));
+    setGstPct(Number(row.gst_percent ?? row.tax_rate ?? 0));
+    setMarginPct(Number(row.margin_percent ?? 0));
     setSalePrice(Number(row.unit_price ?? 0));
     setRcvRef('');
     setRcvReason('');
     setRcvLocation('');
     setUseCustomLocation(false);
 
-    // Other modals
+    // Other modals reset
     setMQty(0);
     setMRef('');
     setMReason('');
@@ -403,6 +416,48 @@ export default function Stock() {
     });
   };
 
+  /* ------------------------- Common pricing sync ------------------------- */
+
+  /**
+   * Sync pricing on the `items` row so Inventory page reflects the latest
+   * Purchase/GST/Margin and a recomputed Selling Price.
+   * - On Receive: pass the modal values (purchasePrice, gstPct, marginPct, salePrice)
+   * - On Issue/Return/Adjust: if nothing changed, we keep the last saved values from DB.
+   */
+  const syncItemPricing = async (opts?: {
+    purchase?: number | null;
+    gst?: number | null;
+    margin?: number | null;
+    sale?: number | null;
+  }) => {
+    if (!found) return;
+    const purchase =
+      (Number.isFinite(opts?.purchase ?? NaN) ? opts!.purchase! : (found.purchase_price ?? found.unit_cost ?? 0)) as number;
+    const gst =
+      (Number.isFinite(opts?.gst ?? NaN) ? opts!.gst! : (found.gst_percent ?? found.tax_rate ?? 0)) as number;
+    const margin =
+      (Number.isFinite(opts?.margin ?? NaN) ? opts!.margin! : (found.margin_percent ?? 0)) as number;
+
+    const sale =
+      Number.isFinite(opts?.sale ?? NaN) && (opts!.sale as number) > 0
+        ? (opts!.sale as number)
+        : Number((purchase * (1 + (gst || 0) / 100) * (1 + (margin || 0) / 100)).toFixed(2));
+
+    // Persist (and keep tax_rate mirror for any legacy screens)
+    const { error } = await supabase
+      .from('items')
+      .update({
+        purchase_price: Number.isFinite(purchase) ? purchase : 0,
+        gst_percent: Number.isFinite(gst) ? gst : 0,
+        margin_percent: Number.isFinite(margin) ? margin : 0,
+        tax_rate: Number.isFinite(gst) ? gst : 0,
+        unit_price: Number.isFinite(sale) ? sale : 0,
+      })
+      .eq('id', found.id);
+
+    if (error) throw error;
+  };
+
   /* ----------------------------- Handlers -------------------------------- */
 
   // Save minimum
@@ -464,30 +519,19 @@ export default function Stock() {
         }
       }
 
-      // 3) Update item pricing fields so your second page reflects it automatically
-      //    - tax_rate := GST %
-      //    - unit_price := selling price (purchase * (1+gst) * (1+margin))
-      //    NOTE: unit_cost (avg) will be updated by the receive RPC; we only set tax & selling price here.
-      {
-        const computedSale =
-          salePrice && salePrice > 0
-            ? salePrice
-            : (purchasePrice * (1 + (gstPct || 0) / 100) * (1 + (marginPct || 0) / 100));
-
-        const { error } = await supabase
-          .from('items')
-          .update({
-            tax_rate: Number.isFinite(gstPct) ? gstPct : 0,
-            unit_price: Number.isFinite(computedSale) ? computedSale : 0,
-          })
-          .eq('id', found.id);
-        if (error) throw error;
-      }
+      // 3) *** Persist the values that Inventory page displays ***
+      await syncItemPricing({
+        purchase: purchasePrice,
+        gst: gstPct,
+        margin: marginPct,
+        sale: salePrice && salePrice > 0 ? salePrice : null,
+      });
 
       // Refresh
       await findBySku();
       await loadHistory();
       alert('Receive saved.');
+
       // Close modal & reset
       setShowReceive(false);
       setRcvQty(0);
@@ -506,7 +550,7 @@ export default function Stock() {
     }
   };
 
-  // Issue / Return / Adjust submitters
+  // Issue submit
   const submitIssue = async () => {
     if (!found) return alert('Find an item first.');
     if (!mLocation) return alert('Please select a location to issue from.');
@@ -536,6 +580,9 @@ export default function Stock() {
         .update({ location: mLocation })
         .eq('client_tx_id', clientTxId);
 
+      // Auto-sync pricing (keeps last known Purchase/GST/Margin; recompute sale)
+      await syncItemPricing();
+
       await findBySku();
       await loadHistory();
       alert('Issue saved.');
@@ -553,6 +600,7 @@ export default function Stock() {
     }
   };
 
+  // Return submit
   const submitReturn = async () => {
     if (!found) return alert('Find an item first.');
     if (!mLocation) return alert('Please select a location for return.');
@@ -579,6 +627,9 @@ export default function Stock() {
         .update({ location: mLocation })
         .eq('client_tx_id', clientTxId);
 
+      // Auto-sync pricing
+      await syncItemPricing();
+
       await findBySku();
       await loadHistory();
       alert('Return saved.');
@@ -596,6 +647,7 @@ export default function Stock() {
     }
   };
 
+  // Adjust submit
   const submitAdjust = async () => {
     if (!found) return alert('Find an item first.');
     if (!mLocation) return alert('Please select a location for adjust.');
@@ -603,7 +655,6 @@ export default function Stock() {
 
     const loc = locBalances.find(l => l.name === mLocation);
     if (!loc) return alert('Invalid location.');
-
     if (mQty < 0 && loc.qty + mQty < 0) {
       return alert(`This would make "${mLocation}" negative. Available: ${loc.qty}, delta: ${mQty}`);
     }
@@ -629,6 +680,9 @@ export default function Stock() {
         .update({ location: mLocation })
         .eq('client_tx_id', clientTxId);
 
+      // Auto-sync pricing
+      await syncItemPricing();
+
       await findBySku();
       await loadHistory();
       alert('Adjustment saved.');
@@ -653,8 +707,6 @@ export default function Stock() {
     const calc = purchasePrice * (1 + (gstPct || 0) / 100) * (1 + (marginPct || 0) / 100);
     if (!Number.isFinite(calc)) return;
     setSalePrice((prev) => {
-      // only auto-overwrite if user hasn't manually changed to a non-matching value recently:
-      // small tolerance
       const tol = 0.00001;
       if (Math.abs((prev || 0) - calc) < tol) return prev;
       return Number(calc.toFixed(2));
