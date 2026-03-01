@@ -5,7 +5,9 @@
 /* Force light mode UI (you can remove if you need dark) */
 :root { color-scheme: light; }
 
-/* Your existing small utility classes */
+/* ================================
+   Small utility classes
+   ================================ */
 .table { @apply w-full text-sm; }
 .table th { @apply text-left text-gray-600 font-semibold py-2; }
 .table td { @apply py-2 border-t; }
@@ -13,34 +15,104 @@
 .input { @apply border rounded px-3 py-2 w-full; }
 .label { @apply text-sm text-gray-600; }
 
-/* ---------- Inventory table alignment helpers ---------- */
-.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
-.inventory-table{table-layout:fixed;width:100%;border-collapse:separate;border-spacing:0;font-size:.875rem}
-.inventory-table th,.inventory-table td{padding:8px 10px;white-space:nowrap;vertical-align:middle}
-.inventory-table .num{text-align:right;font-variant-numeric:tabular-nums}
-.inventory-table .sticky-head th{position:sticky;top:0;z-index:1;background:#f8fafc;box-shadow:inset 0 -1px 0 rgba(0,0,0,.06)}
-.inventory-table .th-label{display:inline-flex;align-items:center;gap:6px}
-.inventory-table .truncate-cell{overflow:hidden;text-overflow:ellipsis}
-.table-scroll::-webkit-scrollbar{height:10px}
-.table-scroll::-webkit-scrollbar-track{background:#f1f5f9}
-.table-scroll::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:6px}
-.table-scroll::-webkit-scrollbar-thumb:hover{background:#94a3b8}
+/* =======================================================
+   Inventory table alignment helpers (header/body alignment)
+   ======================================================= */
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
 
-/* ---------- Label print safety (barcode + QR layout) ---------- */
-.thermal-label-2x1 .label-row .barcode-wrap svg{display:block;width:100%!important;height:auto!important}
-.thermal-label-2x1 .label-row .qr-wrap svg{display:block;width:100%!important;height:100%!important}
+.inventory-table {
+  table-layout: fixed;     /* respects <colgroup> widths */
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.875rem;     /* text-sm */
+}
 
-/* ---------- Global print rules ---------- */
+.inventory-table th,
+.inventory-table td {
+  padding: 8px 10px;
+  white-space: nowrap;     /* keep header on one line */
+  vertical-align: middle;
+}
+
+.inventory-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;  /* neat digit alignment */
+}
+
+.inventory-table .sticky-head th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f8fafc; /* slate-50-ish */
+  box-shadow: inset 0 -1px 0 rgba(0,0,0,0.06);
+}
+
+.inventory-table .th-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inventory-table .truncate-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Optional nicer horizontal scrollbar */
+.table-scroll::-webkit-scrollbar { height: 10px; }
+.table-scroll::-webkit-scrollbar-track { background: #f1f5f9; }
+.table-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 6px; }
+.table-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+/* =======================================================
+   Label print safety (barcode + QR layout)
+   ======================================================= */
+.thermal-label-2x1 .label-row .barcode-wrap svg {
+  display: block;
+  width: 100% !important;   /* fill remaining space */
+  height: auto !important;  /* keep aspect ratio */
+}
+
+.thermal-label-2x1 .label-row .qr-wrap svg {
+  display: block;
+  width: 100% !important;   /* fit the mm container */
+  height: 100% !important;
+}
+
+/* =======================================================
+   Global print rules
+   ======================================================= */
 @media print {
-  /* Hide your site shell/header/nav/footer or anything tagged .no-print */
+  /* Hide shell/header/nav/footer or anything tagged .no-print */
   header, nav, footer, .site-header, .no-print { display: none !important; }
   body { background: #fff; margin: 0; }
 
   /* Keep label layout safe in print */
-  .thermal-label-2x1{border:none!important;background:#fff}
-  .thermal-label-2x1 .label-row{display:flex;gap:1mm;align-items:center}
-  .thermal-label-2x1 .label-row .barcode-wrap{flex:1 1 auto;min-width:0}
-  .thermal-label-2x1 .label-row .qr-wrap{flex:0 0 11mm;width:11mm;height:11mm}
+  .thermal-label-2x1 {
+    border: none !important;
+    background: #fff;
+  }
+  .thermal-label-2x1 .label-row {
+    display: flex;
+    gap: 1mm;
+    align-items: center;
+  }
+  .thermal-label-2x1 .label-row .barcode-wrap {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .thermal-label-2x1 .label-row .qr-wrap {
+    flex: 0 0 11mm;
+    width: 11mm;
+    height: 11mm;
+  }
   .thermal-label-2x1 .label-row .barcode-wrap svg,
-  .thermal-label-2x1 .label-row .qr-wrap svg{display:block;max-width:100%}
+  .thermal-label-2x1 .label-row .qr-wrap svg {
+    display: block;
+    max-width: 100%;
+  }
 }
