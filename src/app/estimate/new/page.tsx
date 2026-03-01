@@ -26,7 +26,7 @@ type ItemRow = {
   gst_percent: number | null;
   margin_percent: number | null;
   unit_cost: number | null;
-  // If you have a real barcode column, add it here and in the select below.
+  // If you have a real barcode column, add it here and in the select/filter below.
   // barcode?: string | null;
 };
 
@@ -46,7 +46,6 @@ function buildWhatsappMessage(customer: string, lines: Line[], grand: number) {
 
 /* Safe phone normalizer for wa.me (expects country code, no +, no spaces) */
 function normalizePhoneForWa(raw: string) {
-  // keep digits only; if you need to default to India, you can prefill with "91"
   return raw.replace(/\D+/g, '');
 }
 
@@ -62,27 +61,26 @@ export default function NewEstimatePage() {
   const [suggest, setSuggest] = useState<ItemRow[]>([]);
   const [loadingSuggest, setLoadingSuggest] = useState(false);
 
-  /** WhatsApp phone number input (with country code, e.g., 91XXXXXXXXXX) */
+  /** WhatsApp phone number (with country code, e.g., 91XXXXXXXXXX) */
   const [waPhone, setWaPhone] = useState('');
 
-  /* ---------- add one item by sku OR name OR barcode (case-insensitive) ---------- */
+  /* ---------- add one item by sku OR name (case-insensitive) ---------- */
   async function fetchBestItem(query: string): Promise<ItemRow | null> {
     const q = query.trim();
     if (!q) return null;
 
-    // 1) Try exact SKU (case-insensitive) OR exact barcode if you have one
-    // If you have a barcode column, change the .or(...) to include barcode.eq.${q}
-    // e.g., `.or(\`sku.ilike.${q},barcode.eq.${q}\`)`
+    // 1) Try exact SKU (case-insensitive).
+    // If you have a barcode column: change the .or(...) to include barcode.eq.${q}
     {
       const { data, error } = await supabase
         .from('items')
         .select('sku, name, purchase_price, gst_percent, margin_percent, unit_cost')
-        .or(`sku.ilike.${q}`)
+        .or(`sku.ilike.${q}`) // ILIKE without % works as case-insensitive "equals"
         .limit(1);
       if (!error && data && data.length > 0) return data[0] as ItemRow;
     }
 
-    // 2) Try partial match by SKU or NAME (case-insensitive)
+    // 2) Partial match by SKU or NAME (case-insensitive)
     {
       const like = `%${q}%`;
       const { data, error } = await supabase
@@ -94,7 +92,7 @@ export default function NewEstimatePage() {
       if (!error && data && data.length > 0) return data[0] as ItemRow;
     }
 
-    // 3) (Optional) If you added a real barcode column, do another attempt:
+    // 3) (Optional) Real barcode column:
     // {
     //   const { data, error } = await supabase
     //     .from('items')
@@ -158,7 +156,7 @@ export default function NewEstimatePage() {
       setLoadingSuggest(true);
       const like = `%${q}%`;
 
-      // If you have a barcode column, add it to the or() list as barcode.ilike.${like}
+      // If you have a barcode col, add: ,barcode.ilike.${like}
       const { data, error } = await supabase
         .from('items')
         .select('sku, name, purchase_price, gst_percent, margin_percent, unit_cost')
@@ -238,7 +236,13 @@ export default function NewEstimatePage() {
           >
             Print
           </button>
-          /inventoryBack to Inventory</Link>
+          <Link
+            href="/inventory"
+            className="rounded border px-3 py-2 hover:bg-neutral-50"
+            title="Back to Inventory"
+          >
+            Back to Inventory
+          </Link>
         </div>
       </div>
 
@@ -264,7 +268,7 @@ export default function NewEstimatePage() {
         </div>
       </div>
 
-      {/* Search box with suggestions */}
+      {/* Search box with suggestions (SKU / Name / (optional) Barcode) */}
       <div className="no-print mt-6">
         <div className="flex items-center gap-2">
           <input
