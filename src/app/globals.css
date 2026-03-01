@@ -70,3 +70,48 @@
 .table-scroll::-webkit-scrollbar-track { background: #f1f5f9; }
 .table-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 6px; }
 .table-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+/* =======================================================
+   Label print safety (barcode + QR layout)
+   ======================================================= */
+.thermal-label-2x1 .label-row .barcode-wrap svg {
+  display: block;
+  width: 100% !important;   /* fill remaining space */
+  height: auto !important;  /* keep aspect ratio */
+}
+
+.thermal-label-2x1 .label-row .qr-wrap svg {
+  display: block;
+  width: 100% !important;   /* fit the mm container */
+  height: 100% !important;
+}
+
+@media print {
+  .thermal-label-2x1 {
+    border: none !important;
+    background: #fff;
+  }
+
+  .thermal-label-2x1 .label-row {
+    display: flex;
+    gap: 1mm;
+    align-items: center;
+  }
+
+  .thermal-label-2x1 .label-row .barcode-wrap {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .thermal-label-2x1 .label-row .qr-wrap {
+    flex: 0 0 11mm;
+    width: 11mm;
+    height: 11mm;
+  }
+
+  .thermal-label-2x1 .label-row .barcode-wrap svg,
+  .thermal-label-2x1 .label-row .qr-wrap svg {
+    display: block;
+    max-width: 100%;
+  }
+}
