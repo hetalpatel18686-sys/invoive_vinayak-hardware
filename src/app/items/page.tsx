@@ -91,13 +91,12 @@ export default function Items() {
   }, []);
 
   /** Generate an item number (SKU) before saving.
-   *  This calls a Postgres function (RPC) `generate_item_sku`.
-   *  See SQL in the next section if you need to create it.
+   *  Calls Postgres function (RPC) `generate_item_sku`.
    */
   const onAddItem = async () => {
     setIsGeneratingSku(true);
     try {
-      const { data, error } = await supabase.rpc('generate_item_sku'); // <-- expects a text return
+      const { data, error } = await supabase.rpc('generate_item_sku'); // returns text
       if (error) throw error;
       const nextSku = String(data ?? '').trim();
       if (!nextSku) {
@@ -147,7 +146,6 @@ export default function Items() {
           ? Number(form.low_stock_threshold)
           : 0,
         uom_id: form.uom_id || null,
-        // pricing fields removed entirely
       };
 
       const { error } = await supabase.from('items').insert([payload]);
@@ -179,7 +177,6 @@ export default function Items() {
     if (error) {
       alert(error.message);
     } else {
-      // Refresh list
       await load();
     }
   };
@@ -223,7 +220,7 @@ export default function Items() {
                         <td className="text-right">
                           <Button
                             onClick={() => onDelete(it.id, it.sku)}
-                            variant="danger"
+                            className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded"
                           >
                             Delete
                           </Button>
@@ -318,3 +315,4 @@ export default function Items() {
     </Protected>
   );
 }
+``
