@@ -37,7 +37,7 @@ interface InvRow {
   gst_percent: number | null;
   margin_percent: number | null;
 
-  // NEW: optional selling price column (from Supabase)
+  // NEW: optional selling price column from DB (if present)
   selling_price_per_unit?: number | null;
 }
 
@@ -249,7 +249,7 @@ function ThermalLabel2x1({
   name,
   sku,
   uom,
-  priceRupees, // NEW: print selling price
+  priceRupees, // NEW: show selling price on label
 }: {
   brand?: string;
   name: string;
@@ -345,7 +345,7 @@ export default function InventoryPage() {
   const [locationScope, setLocationScope] = useState<LocationScope>('all_items');
   const [showZeroQtyLocations, setShowZeroQtyLocations] = useState<boolean>(false);
 
-  // selection for labels & multi-estimate
+  // selection for labels + multi-estimate
   const [sel, setSel] = useState<Sel>({});
   const [bulkQtyState, setBulkQtyState] = useState<number>(1);
   const setBulkQtyInput = (n: number) => setBulkQtyState(Math.max(1, Math.min(500, Math.floor(n || 1))));
@@ -364,7 +364,7 @@ export default function InventoryPage() {
   const loadInventory = async () => {
     try {
       setLoading(true);
-      // Pull pricing fields too (including optional selling_price_per_unit)
+      // Pull pricing fields too (including selling_price_per_unit from your Supabase)
       const { data: itemsData, error: itemsErr } = await supabase
         .from('items')
         .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
@@ -470,7 +470,7 @@ export default function InventoryPage() {
 
       const unitCostGst = withGst(base, gst); // rounded ₹
 
-      // Prefer DB selling price when present; else formula fallback
+      // Prefer DB selling price when present; else compute Purchase+GST+Margin
       const sellingDb = r.selling_price_per_unit;
       const sellingPrice = Number.isFinite(Number(sellingDb)) && Number(sellingDb) > 0
         ? rupeeCeil(Number(sellingDb))
@@ -537,9 +537,8 @@ export default function InventoryPage() {
      PRINT thermal labels
      -------------------------------- */
   const handlePrintThermal = () => {
-    // Build selected items from current selection map
     const selectedItems = (() => {
-      const arr: { row: (InvRow & { unitCostGst: number; sellingPrice: number; total_value: number }); qty: number }[] = [];
+      const arr: { row: InvRow & { unitCostGst: number; sellingPrice: number; total_value: number }; qty: number }[] = [];
       for (const r of sorted) {
         const s = sel[r.id];
         if (s?.checked && r.sku) arr.push({ row: r, qty: Math.max(1, Math.min(500, Math.floor(s.qty || 1))) });
@@ -574,7 +573,6 @@ export default function InventoryPage() {
       display: flex; flex-direction: column; gap: 0.6mm; justify-content: space-between;
     }
 
-    /* ---- Layout-safe row ---- */
     .thermal-label-2x1 .label-row { display: flex; align-items: center; gap: 1mm; width: 100%; flex: 1; min-height: 0; }
     .thermal-label-2x1 .label-row .barcode-wrap { flex: 1 1 auto; min-width: 0; }
     .thermal-label-2x1 .label-row .qr-wrap { flex: 0 0 11mm; width: 11mm; height: 11mm; }
@@ -640,7 +638,7 @@ export default function InventoryPage() {
         String(r.gst_percent ?? 0),
         String(r.margin_percent ?? 0),
         String(r.unitCostGst),
-        String(r.sellingPrice),
+        String(r.sellingPrice),                // NEW
         String(r.total_value),
         (r.locations_text ?? '').replaceAll('"','""'),
       ].map(v => `"${v}"`).join(',');
@@ -769,7 +767,7 @@ export default function InventoryPage() {
                     name={row.name || row.sku}
                     sku={row.sku}
                     uom={row.uom_code}
-                    priceRupees={row.sellingPrice} // NEW: print selling price
+                    priceRupees={row.sellingPrice}  // NEW: show selling price on label
                   />
                 ));
               })}
@@ -911,7 +909,7 @@ export default function InventoryPage() {
                 <td className="num">—</td>
                 <td className="num">—</td>
                 <td className="num">—</td>
-                <td className="num">—</td>{/* NEW Selling column total not needed */}
+                <td className="num">—</td>{/* Selling total not used */}
                 <td className="num">{INR0.format(totals.value)}</td>
                 <td>—</td>
                 <td>—</td>
