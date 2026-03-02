@@ -353,8 +353,9 @@ export default function EstimateClient() {
           } catch {}
         }
         if (Array.isArray(seedArr) && seedArr.length > 0) {
-          type NSeed = { sku: string; qty: number; name?: string; uom_code?: string; selling?: number };
-          const mm = new Map<string, NSeed>();
+          // Accumulator type with deterministic fields (no optionals)
+          type SeedAccum = { sku: string; qty: number; name: string; uom_code: string; selling: number };
+          const mm = new Map<string, SeedAccum>();
 
           for (const it of seedArr) {
             const rawSku = it?.sku ?? '';
@@ -364,16 +365,16 @@ export default function EstimateClient() {
             const qty = Math.max(1, Math.min(500, Math.floor(Number(it?.qty) || 1)));
 
             // Accept many possible field names from seed
-            const name =
+            const name: string =
               it?.name ?? it?.item ?? it?.description ?? sku;
 
-            const uom_code =
+            const uom_code: string =
               it?.uom_code ?? it?.uom ?? '';
 
             const sellingCandidate =
               it?.selling ?? it?.sellingPrice ?? it?.selling_price ?? it?.price ?? it?.unit_price ?? it?.unitPrice;
 
-            const selling = Number.isFinite(Number(sellingCandidate))
+            const selling: number = Number.isFinite(Number(sellingCandidate))
               ? rupeeCeil(Number(sellingCandidate))
               : 0;
 
@@ -381,18 +382,18 @@ export default function EstimateClient() {
             mm.set(sku, {
               sku,
               qty: (prev?.qty ?? 0) + qty,
-              name,
-              uom_code,
-              selling,
-            });
+              name: String(name),
+              uom_code: String(uom_code || '-'),
+              selling: Number(selling) || 0,
+            } as SeedAccum);
           }
 
-          const merged = Array.from(mm.values());
+          const merged: SeedAccum[] = Array.from(mm.values());
+
           setLines(merged.map(x => ({ sku: x.sku, qty: x.qty })));
 
-          // ---------------- FIX: Always coerce to number so type = number (not number|undefined)
-          setItems(merged.map(x => ({
-            id: undefined,
+          // Build strongly-typed ItemRow objects (no undefineds)
+          const seedItems: ItemRow[] = merged.map(x => ({
             sku: x.sku,
             name: String(x.name || x.sku),
             uom_code: String(x.uom_code || '-'),
@@ -400,9 +401,10 @@ export default function EstimateClient() {
             gst_percent: null,
             margin_percent: null,
             unit_cost: null,
-            selling_price_per_unit: Number.isFinite(Number(x.selling)) ? Number(x.selling) : 0,
-            selling_price: Number.isFinite(Number(x.selling)) ? Number(x.selling) : 0,
-          })));
+            selling_price_per_unit: Number(x.selling) || 0,
+            selling_price: Number(x.selling) || 0,
+          }));
+          setItems(seedItems);
 
           setLoading(false);
           return;
@@ -710,6 +712,13 @@ export default function EstimateClient() {
           </div>
         </div>
       )}
+
+      {/* Error (if any) */}
+      {errorMsg ? (
+        <div className="text-red-700 text-sm no-print">
+          {errorMsg}
+        </div>
+      ) : null}
     </div>
   );
 }
