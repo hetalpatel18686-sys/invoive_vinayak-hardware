@@ -335,12 +335,12 @@ export default function EstimateClient() {
   const [lines, setLines] = useState<EstimateLineReq[]>([]);
   const [items, setItems] = useState<ItemRow[]>([]);
 
-  // Manual add (now supports custom line without DB)
+  // Manual add (supports custom lines without DB)
   const [addSku, setAddSku] = useState('');
   const [addQty, setAddQty] = useState(1);
-  const [addName, setAddName] = useState('');     // optional
-  const [addUom, setAddUom] = useState('');       // optional
-  const [addSelling, setAddSelling] = useState(''); // optional (string to allow empty)
+  const [addName, setAddName] = useState('');       // optional
+  const [addUom, setAddUom] = useState('');         // optional
+  const [addSelling, setAddSelling] = useState(''); // optional
 
   const [showBarcode, setShowBarcode] = useState(true);
   const [showQr, setShowQr] = useState(false);
@@ -389,7 +389,7 @@ export default function EstimateClient() {
           return;
         }
 
-        // 2) Otherwise parse ?lines= (small/mid selections)
+        // 2) Otherwise parse ?lines= (small/mid)
         let req: EstimateLineReq[] = parseLinesParam(linesParam);
 
         // 3) Legacy single
@@ -447,7 +447,7 @@ export default function EstimateClient() {
   /**
    * Add line from UI:
    * - If user provided Name/UoM/Selling => add a CUSTOM line (no DB).
-   * - Else try DB; if not found => still add a placeholder line with what user typed (not blank).
+   * - Else try DB; if not found => still add a placeholder so it’s never blank.
    */
   const addLineBySku = async () => {
     const sku = canonicalSku(addSku);
@@ -456,7 +456,7 @@ export default function EstimateClient() {
 
     if (!sku) return alert('Enter a SKU');
 
-    // Case A: user provided manual details -> add custom line directly
+    // A) custom details -> no DB
     if (hasCustom) {
       const selling = Math.max(0, Math.floor(Number(addSelling || 0)));
       const customRow: ItemRow = {
@@ -481,30 +481,23 @@ export default function EstimateClient() {
         const found = prev.find(p => skuCore(p.sku) === skuCore(sku));
         return found ? prev : [...prev, customRow];
       });
-      // clear inputs
       setAddSku(''); setAddQty(1); setAddName(''); setAddUom(''); setAddSelling('');
       return;
     }
 
-    // Case B: no manual details -> try DB, fallback to placeholder
+    // B) no custom -> try DB, else placeholder
     try {
       const rows = await loadItemsForSkus([sku]);
       const found = rows[0];
 
-      let rowToUse: ItemRow;
-      if (!found || !found.sku) {
-        // placeholder so page isn't blank
-        rowToUse = {
-          sku,
-          name: sku,
-          uom_code: '-',
-          purchase_price: null, gst_percent: null, margin_percent: null, unit_cost: null,
-          selling_price_per_unit: 0,
-          selling_price: 0,
-        };
-      } else {
-        rowToUse = found;
-      }
+      const rowToUse: ItemRow = found && found.sku ? found : {
+        sku,
+        name: sku,
+        uom_code: '-',
+        purchase_price: null, gst_percent: null, margin_percent: null, unit_cost: null,
+        selling_price_per_unit: 0,
+        selling_price: 0,
+      };
 
       setLines(prev => {
         const exists = prev.find(l => skuCore(l.sku) === skuCore(sku));
@@ -557,7 +550,7 @@ export default function EstimateClient() {
           <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={handlePrint}>Print</Button>
         </div>
 
-        {/* Manual add (now supports custom lines without DB) */}
+        {/* Manual add (supports custom lines without DB) */}
         <div className="grid lg:grid-cols-5 md:grid-cols-4 sm:grid-cols-2 gap-2">
           <div>
             <label className="label">SKU</label>
@@ -651,7 +644,7 @@ export default function EstimateClient() {
         <EstimateTable view={view} showBarcode={showBarcode} showQr={showQr} grand={grand} />
       </div>
 
-      {/* ---- Editable grid (screen), hidden on print) ---- */}
+      {/* ---- Editable grid (screen), hidden on print ---- */}
       {view.length > 0 && (
         <div className="card no-print">
           <div className="overflow-auto">
@@ -754,7 +747,8 @@ function EstimateTable({
                   <td>
                     <div className="flex flex-col gap-1">
                       <div>{v.sku}</div>
-                     howQr && <QrSvg value={v.sku} />}
+                      {showBarcode && <BarcodeSvg value={v.sku} />}
+                      {showQr && <QrSvg value={v.sku} />}
                     </div>
                   </td>
                   <td>{v.name}</td>
