@@ -344,7 +344,7 @@ export default function EstimateClient() {
       try {
         setLoading(true); setErrorMsg('');
 
-        // 1) Prefer SEED path (works even if seed has only sku/qty)
+        // 1) Prefer SEED path (works even if seed has only sku/qty, and flexible keys)
         let seedArr: any[] = [];
         if (seedFlag) {
           try {
@@ -353,7 +353,6 @@ export default function EstimateClient() {
           } catch {}
         }
         if (Array.isArray(seedArr) && seedArr.length > 0) {
-          // Normalize any seed shape
           type NSeed = { sku: string; qty: number; name?: string; uom_code?: string; selling?: number };
           const mm = new Map<string, NSeed>();
 
@@ -364,7 +363,7 @@ export default function EstimateClient() {
 
             const qty = Math.max(1, Math.min(500, Math.floor(Number(it?.qty) || 1)));
 
-            // Accept various field names from seed:
+            // Accept many possible field names from seed
             const name =
               it?.name ?? it?.item ?? it?.description ?? sku;
 
@@ -390,15 +389,21 @@ export default function EstimateClient() {
 
           const merged = Array.from(mm.values());
           setLines(merged.map(x => ({ sku: x.sku, qty: x.qty })));
+
+          // ---------------- FIX: Always coerce to number so type = number (not number|undefined)
           setItems(merged.map(x => ({
             id: undefined,
             sku: x.sku,
-            name: x.name || x.sku,
-            uom_code: x.uom_code || '-',
-            purchase_price: null, gst_percent: null, margin_percent: null, unit_cost: null,
-            selling_price_per_unit: x.selling,
-            selling_price: x.selling,
+            name: String(x.name || x.sku),
+            uom_code: String(x.uom_code || '-'),
+            purchase_price: null,
+            gst_percent: null,
+            margin_percent: null,
+            unit_cost: null,
+            selling_price_per_unit: Number.isFinite(Number(x.selling)) ? Number(x.selling) : 0,
+            selling_price: Number.isFinite(Number(x.selling)) ? Number(x.selling) : 0,
           })));
+
           setLoading(false);
           return;
         }
