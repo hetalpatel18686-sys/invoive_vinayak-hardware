@@ -246,13 +246,11 @@ function ThermalLabel2x1({
   name,
   sku,
   uom,
-   selling_price_est_ceil,
 }: {
   brand?: string;
   name: string;
   sku: string;
   uom?: string;
-   selling_price_est_ceil: string;
 }) {
   return (
     <div
