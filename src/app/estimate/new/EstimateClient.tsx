@@ -6,15 +6,9 @@ import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 
-/* =========================
-   Whole-rupee helpers
-   ========================= */
+/* ---------------- Whole-rupee helpers ---------------- */
 const rupeeCeil = (n: number) => Math.ceil((n ?? 0) + Number.EPSILON);
-const INR0 = new Intl.NumberFormat('en-IN', {
-  style: 'currency',
-  currency: 'INR',
-  maximumFractionDigits: 0,
-});
+const INR0 = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 });
 
 const withGst = (base: number, gstPct: number) =>
   rupeeCeil((base ?? 0) * (1 + (gstPct ?? 0) / 100));
@@ -22,42 +16,29 @@ const withGst = (base: number, gstPct: number) =>
 const withGstAndMargin = (base: number, gstPct: number, marginPct: number) =>
   rupeeCeil(withGst(base ?? 0, gstPct ?? 0) * (1 + (marginPct ?? 0) / 100));
 
-/* =========================
-   Branding (env or defaults)
-   ========================= */
+/* ---------------- Branding (env overrides) ---------------- */
 const BRAND_NAME    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
 const BRAND_LOGO    = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png';
 const BRAND_ADDRESS = process.env.NEXT_PUBLIC_BRAND_ADDRESS  || 'Bilimora, Gandevi, Navsari, Gujarat, 396321';
 const BRAND_PHONE   = process.env.NEXT_PUBLIC_BRAND_PHONE    || '+91 7046826808';
 
-/* =========================
-   Types
-   ========================= */
-interface EstimateLineReq {
-  sku: string;
-  qty: number;
-}
+/* ---------------- Types ---------------- */
+interface EstimateLineReq { sku: string; qty: number; }
 
 interface ItemRow {
   id?: string;
   sku: string;
   name: string;
   uom_code: string;
-
-  // pricing fields for compute
   purchase_price: number | null;
   gst_percent: number | null;
   margin_percent: number | null;
   unit_cost: number | null;
   selling_price_per_unit?: number | null;
-
-  // computed
-  selling_price: number; // whole rupees
+  selling_price: number; // computed
 }
 
-/* =========================
-   Optional: Barcode + QR (print)
-   ========================= */
+/* ---------------- Barcode / QR helpers ---------------- */
 const JSBARCODE_STATIC_URL =
   process.env.NEXT_PUBLIC_JSBARCODE_URL ||
   '/vendor/jsbarcode.min.js' ||
@@ -125,7 +106,6 @@ async function ensureQRCodeFromStatic(): Promise<any> {
 
 function BarcodeSvg({ value }: { value: string }) {
   const ref = React.useRef<SVGSVGElement | null>(null);
-
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -155,13 +135,11 @@ function BarcodeSvg({ value }: { value: string }) {
     })();
     return () => { cancelled = true; };
   }, [value]);
-
   return <svg ref={ref} style={{ width: '100%', height: '32px' }} />;
 }
 
-function QrSvg({ value, sizePx = 64 }: { value: string; sizePx?: number }) {
+function QrSvg({ value, sizePx = 56 }: { value: string; sizePx?: number }) {
   const ref = React.useRef<HTMLDivElement | null>(null);
-
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -169,17 +147,12 @@ function QrSvg({ value, sizePx = 64 }: { value: string; sizePx?: number }) {
       try {
         const QR: any = await ensureQRCodeFromStatic();
         if (cancelled || !ref.current) return;
-
         const toString = QR.toString || QR.default?.toString || QR?.toString;
         if (!toString) throw new Error('QR lib missing toString()');
-
         const svg = await toString(String(value), { type: 'svg', margin: 0, width: sizePx });
         ref.current.innerHTML = svg;
         const svgEl = ref.current.querySelector('svg') as SVGSVGElement | null;
-        if (svgEl) {
-          svgEl.setAttribute('width', `${sizePx}px`);
-          svgEl.setAttribute('height', `${sizePx}px`);
-        }
+        if (svgEl) { svgEl.setAttribute('width', `${sizePx}px`); svgEl.setAttribute('height', `${sizePx}px`); }
       } catch {
         if (!ref.current) return;
         ref.current.textContent = value;
@@ -187,13 +160,10 @@ function QrSvg({ value, sizePx = 64 }: { value: string; sizePx?: number }) {
     })();
     return () => { cancelled = true; };
   }, [value, sizePx]);
-
   return <div ref={ref} style={{ width: sizePx, height: sizePx }} />;
 }
 
-/* =========================
-   Parse helpers
-   ========================= */
+/* ---------------- Parse helpers ---------------- */
 function parseLinesParam(linesParam: string | null): EstimateLineReq[] {
   if (!linesParam) return [];
   return linesParam
@@ -209,41 +179,78 @@ function parseLinesParam(linesParam: string | null): EstimateLineReq[] {
     .filter(Boolean) as EstimateLineReq[];
 }
 
-async function loadItemsForSkus(skus: string[]): Promise<ItemRow[]> {
+/**
+ * Robust loader:
+ *  1) try IN(skus) exact match
+ *  2) for any missing skus, fetch individually with ILIKE (case-insensitive exact)
+ */
+async function loadItemsForSkus(skusInput: string[]): Promise<ItemRow[]> {
+  const skus = Array.from(new Set(skusInput.map(s => (s ?? '').trim()).filter(Boolean)));
   if (skus.length === 0) return [];
 
-  const { data: items, error: itemsErr } = await supabase
-    .from('items')
-    .select('id, sku, name, unit_cost, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
-    .in('sku', skus);
-
-  if (itemsErr) {
-    console.error('[Estimate] items load error:', itemsErr);
-    return skus.map(sku => ({
-      sku,
-      name: '(Unknown item)',
-      uom_code: '',
-      purchase_price: null, gst_percent: null, margin_percent: null,
-      unit_cost: null, selling_price_per_unit: null, selling_price: 0,
-    }));
+  // 1) fast path: IN
+  let got: any[] = [];
+  try {
+    const { data, error } = await supabase
+      .from('items')
+      .select('id, sku, name, unit_cost, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
+      .in('sku', skus);
+    if (error) throw error;
+    got = data ?? [];
+  } catch (e) {
+    console.warn('[Estimate] IN fetch failed; will use ILIKE per sku:', e);
   }
 
-  // UOM codes
-  const uomIds = Array.from(new Set((items ?? []).map(it => it.uom_id).filter(Boolean)));
-  let uomMap = new Map<any, string>();
+  // Index what we have
+  const bySku = new Map<string, any>((got || []).map((it: any) => [String(it.sku || '').trim(), it]));
+
+  // 2) fill missing via ILIKE (exact, case-insensitive)
+  const missing = skus.filter(sku => !bySku.has(sku));
+  if (missing.length > 0) {
+    for (const sku of missing) {
+      try {
+        const { data, error } = await supabase
+          .from('items')
+          .select('id, sku, name, unit_cost, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
+          .ilike('sku', sku)  // exact string, case-insensitive
+          .limit(1);
+        if (error) throw error;
+        const it = (data ?? [])[0];
+        if (it?.sku) bySku.set(String(it.sku).trim(), it);
+      } catch (e) {
+        console.warn('[Estimate] ILIKE fetch failed for', sku, e);
+      }
+    }
+  }
+
+  // 3) UOM codes
+  const all = Array.from(bySku.values());
+  const uomIds = Array.from(new Set(all.map((it: any) => it?.uom_id).filter(Boolean)));
+  const uomMap = new Map<any, string>();
   if (uomIds.length > 0) {
-    const { data: uoms } = await supabase
-      .from('units_of_measure')
-      .select('id, code')
-      .in('id', uomIds);
-    (uoms ?? []).forEach((u: any) => uomMap.set(u.id, u.code));
+    try {
+      const { data: uoms } = await supabase.from('units_of_measure').select('id, code').in('id', uomIds);
+      (uoms ?? []).forEach((u: any) => uomMap.set(u.id, u.code));
+    } catch (e) {
+      console.warn('[Estimate] UOM load failed:', e);
+    }
   }
 
-  return (items ?? []).map((it: any) => {
+  // 4) Normalize + compute selling
+  const normalized: ItemRow[] = skus.map(sku => {
+    const it = bySku.get(sku);
+    if (!it) {
+      return {
+        sku,
+        name: '(Unknown item)',
+        uom_code: '',
+        purchase_price: null, gst_percent: null, margin_percent: null,
+        unit_cost: null, selling_price_per_unit: null, selling_price: 0,
+      };
+    }
     const base = Number(it.purchase_price ?? it.unit_cost ?? 0);
     const gst = Number(it.gst_percent ?? 0);
     const margin = Number(it.margin_percent ?? 0);
-
     const sellingDb = it.selling_price_per_unit;
     const selling = Number.isFinite(Number(sellingDb)) && Number(sellingDb) > 0
       ? rupeeCeil(Number(sellingDb))
@@ -262,52 +269,54 @@ async function loadItemsForSkus(skus: string[]): Promise<ItemRow[]> {
       selling_price: selling,
     };
   });
+
+  return normalized;
 }
 
-/* =========================
-   Page
-   ========================= */
+/* ---------------- Page ---------------- */
 export default function EstimatePage() {
   const sp = useSearchParams();
 
-  // Inputs from Inventory
-  const seedFlag   = sp?.get('seed')  || null;           // inventory large-selection
-  const linesParam = sp?.get('lines') || null;           // small-selection
-  const singleSku  = sp?.get('sku')   || null;           // legacy single
+  // Inputs
+  const seedFlag   = sp?.get('seed')  || null;
+  const linesParam = sp?.get('lines') || null;
+  const singleSku  = sp?.get('sku')   || null;  // legacy single
   const singleQty  = sp?.get('qty')   || null;
 
-  // UI/lines
+  // UI
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
-  const [lines, setLines] = useState<EstimateLineReq[]>([]);
-  const [items, setItems] = useState<ItemRow[]>([]);
   const [seedUsed, setSeedUsed] = useState<'none'|'lines'|'localStorage'|'single'>('none');
 
-  // Manual add (SKU + Qty)
+  // Lines + items
+  const [lines, setLines] = useState<EstimateLineReq[]>([]);
+  const [items, setItems] = useState<ItemRow[]>([]);
+
+  // Manual add
   const [addSku, setAddSku] = useState('');
   const [addQty, setAddQty] = useState(1);
 
-  // Print toggles
+  // Print extras
   const [showBarcode, setShowBarcode] = useState(true);
   const [showQr, setShowQr] = useState(false);
 
-  // Load lines: priority lines -> seed -> single
+  // Build request
   useEffect(() => {
     (async () => {
       try {
         setLoading(true);
         setErrorMsg('');
 
-        let requested: EstimateLineReq[] = parseLinesParam(linesParam);
-        if (requested.length > 0) setSeedUsed('lines');
+        let req: EstimateLineReq[] = parseLinesParam(linesParam);
+        if (req.length > 0) setSeedUsed('lines');
 
-        if (requested.length === 0 && seedFlag) {
+        if (req.length === 0 && seedFlag) {
           try {
             const seed = localStorage.getItem('estimate-seed');
             if (seed) {
               const arr = JSON.parse(seed) as EstimateLineReq[];
               if (Array.isArray(arr) && arr.length > 0) {
-                requested = arr.map(x => ({
+                req = arr.map(x => ({
                   sku: String(x?.sku || '').trim(),
                   qty: Math.max(1, Math.min(500, Math.floor(Number(x?.qty) || 1))),
                 })).filter(x => x.sku);
@@ -315,35 +324,29 @@ export default function EstimatePage() {
               }
             }
           } catch (e) {
-            console.warn('[Estimate] read seed failed:', e);
+            console.warn('[Estimate] seed read failed:', e);
           }
         }
 
-        if (requested.length === 0 && (singleSku || singleQty)) {
+        if (req.length === 0 && (singleSku || singleQty)) {
           const sku = (singleSku || '').trim();
           const qty = Math.max(1, Math.min(500, Math.floor(parseInt(singleQty || '1', 10) || 1)));
-          if (sku) {
-            requested = [{ sku, qty }];
-            setSeedUsed('single');
-          }
+          if (sku) { req = [{ sku, qty }]; setSeedUsed('single'); }
         }
 
-        if (requested.length === 0) {
-          setLines([]); setItems([]);
-          setLoading(false);
-          return;
+        if (req.length === 0) {
+          setLines([]); setItems([]); setSeedUsed('none'); setLoading(false); return;
         }
 
         // Merge dups
         const mm = new Map<string, number>();
-        for (const r of requested) mm.set(r.sku, (mm.get(r.sku) || 0) + r.qty);
+        for (const r of req) mm.set(r.sku, (mm.get(r.sku) || 0) + r.qty);
         const merged = Array.from(mm.entries()).map(([sku, qty]) => ({ sku, qty }));
 
         setLines(merged);
 
-        // Load items from DB
-        const skus = merged.map(r => r.sku);
-        const rows = await loadItemsForSkus(skus);
+        // Robust item load
+        const rows = await loadItemsForSkus(merged.map(r => r.sku));
         setItems(rows);
       } catch (e: any) {
         console.error(e);
@@ -355,7 +358,7 @@ export default function EstimatePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [linesParam, seedFlag, singleSku, singleQty]);
 
-  // Combine item + qty for view
+  // View join
   const view = useMemo(() => {
     const qtyBySku = new Map(lines.map(l => [l.sku, l.qty]));
     return items.map(it => {
@@ -365,11 +368,7 @@ export default function EstimatePage() {
     });
   }, [items, lines]);
 
-  const grand = useMemo(() => {
-    let s = 0;
-    for (const v of view) s += v.lineTotal;
-    return rupeeCeil(s);
-  }, [view]);
+  const grand = useMemo(() => view.reduce((s, v) => s + v.lineTotal, 0), [view]);
 
   // Handlers
   const setQty = (sku: string, qty: number) => {
@@ -380,56 +379,40 @@ export default function EstimatePage() {
     setLines(prev => prev.filter(l => l.sku !== sku));
     setItems(prev => prev.filter(i => i.sku !== sku));
   };
-
-  // Manual add
   const addLineBySku = async () => {
     const sku = (addSku || '').trim();
     const qty = Math.max(1, Math.min(500, Math.floor(addQty || 1)));
-    if (!sku) { alert('Enter a SKU'); return; }
+    if (!sku) return alert('Enter a SKU');
     try {
       setLoading(true);
       const rows = await loadItemsForSkus([sku]);
       const found = rows[0];
-      if (!found || !found.sku) {
-        alert(`Item not found for SKU "${sku}"`);
-        return;
-      }
-      // merge/insert
+      if (!found || !found.sku) return alert(`Item not found: ${sku}`);
+
       setLines(prev => {
         const idx = prev.findIndex(l => l.sku === sku);
         if (idx >= 0) {
           const next = [...prev];
-          next[idx] = { sku, qty: (next[idx].qty || 0) + qty };
+          next[idx] = { sku, qty: Math.max(1, Math.min(500, (next[idx].qty || 0) + qty)) };
           return next;
         }
         return [...prev, { sku, qty }];
       });
-      // update items list (dedupe by sku)
-      setItems(prev => {
-        const exists = prev.some(p => p.sku === found.sku);
-        return exists ? prev : [...prev, found];
-      });
-      setAddSku('');
-      setAddQty(1);
+      setItems(prev => prev.some(p => p.sku === found.sku) ? prev : [...prev, found]);
+      setAddSku(''); setAddQty(1);
     } catch (e: any) {
       console.error(e);
       alert(e?.message || 'Add failed');
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   };
 
-  // PRINT: only shop header + lines
-  const handlePrint = () => {
-    try { window.print(); } catch {}
-  };
+  // Print only the estimate (branding + lines)
+  const handlePrint = () => { try { window.print(); } catch {} };
 
   return (
     <div className="space-y-4">
       <style>{`
-        /* keep numeric columns aligned */
         .num { text-align: right; font-variant-numeric: tabular-nums; }
-        /* print-only rules */
         @media print {
           @page { margin: 10mm; }
           body * { visibility: hidden !important; }
@@ -439,60 +422,45 @@ export default function EstimatePage() {
         }
       `}</style>
 
-      {/* ===== Top toolbar (not printed) ===== */}
+      {/* ---- Screen toolbar (not printed) ---- */}
       <div className="card no-print">
         <div className="flex flex-wrap items-end gap-3 mb-3">
           <div className="text-lg font-semibold mr-auto">Estimate</div>
 
           <Link href="/inventory" className="rounded border px-3 py-2 hover:bg-neutral-50">Back to Inventory</Link>
           <Button type="button" onClick={() => window.location.reload()}>Refresh</Button>
-          <Button
-            type="button"
-            className="bg-gray-700 hover:bg-gray-800"
-            onClick={() => { try { localStorage.removeItem('estimate-seed'); alert('Seed cleared'); } catch {} }}
-          >
+          <Button type="button" className="bg-gray-700 hover:bg-gray-800"
+            onClick={() => { try { localStorage.removeItem('estimate-seed'); alert('Seed cleared'); } catch {} }}>
             Clear Seed
           </Button>
           <Button type="button" onClick={() => { window.location.href = '/estimate/new?seed=1'; }}>
             Re-import Seed
           </Button>
-
-          {/* Print */}
-          <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={handlePrint}>
-            Print
-          </Button>
+          <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={handlePrint}>Print</Button>
         </div>
 
-        {/* Manual add row */}
+        {/* Manual add */}
         <div className="grid sm:grid-cols-3 gap-2">
           <div>
             <label className="label">Add by SKU</label>
-            <input
-              className="input"
-              placeholder="e.g. VH-001"
+            <input className="input" placeholder="e.g. VH-001"
               value={addSku}
               onChange={(e) => setAddSku(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') addLineBySku(); }}
-            />
+              onKeyDown={(e) => { if (e.key === 'Enter') addLineBySku(); }} />
           </div>
           <div>
             <label className="label">Qty</label>
-            <input
-              className="input"
-              type="number"
-              min={1}
-              max={500}
+            <input className="input" type="number" min={1} max={500}
               value={addQty}
               onChange={(e) => setAddQty(Math.max(1, Math.min(500, Math.floor(parseInt(e.target.value || '1', 10)))))}
-              onKeyDown={(e) => { if (e.key === 'Enter') addLineBySku(); }}
-            />
+              onKeyDown={(e) => { if (e.key === 'Enter') addLineBySku(); }} />
           </div>
           <div className="self-end">
             <Button type="button" onClick={addLineBySku}>Add Line</Button>
           </div>
         </div>
 
-        {/* Small toggles for print extras */}
+        {/* Print extras toggles */}
         <div className="mt-3 flex flex-wrap items-center gap-4">
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={showBarcode} onChange={(e) => setShowBarcode(e.target.checked)} />
@@ -505,9 +473,8 @@ export default function EstimatePage() {
         </div>
       </div>
 
-      {/* ===== PRINT AREA ONLY ===== */}
+      {/* ---- PRINT AREA (branding + lines only) ---- */}
       <div className="print-area">
-        {/* Shop header (printed) */}
         <div className="mb-3 flex items-start gap-3">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           {BRAND_LOGO ? <img src={BRAND_LOGO} alt="logo" className="h-14 w-14 rounded bg-white object-contain" /> : null}
@@ -522,7 +489,6 @@ export default function EstimatePage() {
           </div>
         </div>
 
-        {/* Lines table (printed view as well) */}
         {loading ? (
           <div className="py-8 text-center text-gray-600">Loading…</div>
         ) : errorMsg ? (
@@ -551,9 +517,8 @@ export default function EstimatePage() {
                     <td>
                       <div className="flex flex-col gap-1">
                         <div>{v.sku}</div>
-                        {/* Optional barcode/QR on print */}
                         {showBarcode && <BarcodeSvg value={v.sku} />}
-                        {showQr && <QrSvg value={v.sku} sizePx={56} />}
+                        {showQr && <QrSvg value={v.sku} />}
                       </div>
                     </td>
                     <td>{v.name}</td>
@@ -576,7 +541,7 @@ export default function EstimatePage() {
         )}
       </div>
 
-      {/* ===== Editable grid (screen only; hidden on print) ===== */}
+      {/* ---- Screen editable grid (hidden on print) ---- */}
       {view.length > 0 && (
         <div className="card no-print">
           <div className="overflow-auto">
