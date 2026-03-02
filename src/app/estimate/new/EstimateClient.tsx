@@ -46,19 +46,15 @@ interface ItemRow {
 /* =========================
    SKU normalization helpers
    ========================= */
-// Replace all “fancy” hyphens with ASCII '-'
 function normalizeHyphens(s: string) {
   return String(s || '').replace(/[\u2010\u2011\u2012\u2013\u2014\u2212]/g, '-');
 }
-// Trim + collapse spaces + normalize hyphens
 function canonicalSku(s: string) {
   return normalizeHyphens(String(s || '').trim()).replace(/\s+/g, ' ');
 }
-// Remove all non-alphanumeric for a robust “core” compare
 function skuCore(s: string) {
   return canonicalSku(s).toLowerCase().replace(/[^a-z0-9]/g, '');
 }
-// Build variants to try in an IN() call
 function variantsFor(s: string): string[] {
   const c = canonicalSku(s);
   const v = new Set<string>([
@@ -208,33 +204,26 @@ function parseLinesParam(linesParam: string | null): EstimateLineReq[] {
 }
 
 /* =========================
-   ROBUST DB loader
+   Robust DB loader (fallback only)
    ========================= */
 async function loadItemsForSkus(skusInput: string[]): Promise<ItemRow[]> {
-  // 0) normalize inputs
   const wantedCanon = Array.from(new Set(skusInput.map(canonicalSku).filter(Boolean)));
-  const wantedCore  = wantedCanon.map(skuCore);
-
   if (wantedCanon.length === 0) return [];
 
-  // 1) Single IN() with many variants
+  // 1) IN() with variants
   const varSet = new Set<string>();
   wantedCanon.forEach(w => variantsFor(w).forEach(v => varSet.add(v)));
   const variants = Array.from(varSet);
 
   let fetched: any[] = [];
   try {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from('items')
       .select('id, sku, name, unit_cost, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
       .in('sku', variants);
-    if (error) throw error;
     fetched = data ?? [];
-  } catch (e) {
-    console.warn('[Estimate] IN fetch failed:', e);
-  }
+  } catch (e) {}
 
-  // Index both by canonical and by core
   const byCanon = new Map<string, any>();
   const byCore  = new Map<string, any>();
   for (const it of fetched) {
@@ -244,26 +233,23 @@ async function loadItemsForSkus(skusInput: string[]): Promise<ItemRow[]> {
     if (k) byCore.set(k, it);
   }
 
-  // 2) ILIKE fallback per missing canonical (exact-ish and wildcard) + permissive core
+  // 2) ILIKE fallback per missing
   const missingCanon = wantedCanon.filter(c => !byCanon.has(c) && !byCore.has(skuCore(c)));
   for (const c of missingCanon) {
     const tries = variantsFor(c);
     let hit: any = null;
 
-    // precise ILIKE
     for (const t of tries) {
       try {
-        const { data, error } = await supabase
+        const { data } = await supabase
           .from('items')
           .select('id, sku, name, unit_cost, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
           .ilike('sku', t)
           .limit(1);
-        if (error) throw error;
         if (data && data[0]) { hit = data[0]; break; }
       } catch {}
     }
 
-    // wildcard ILIKE and hyphenless wildcard
     if (!hit) {
       for (const t of tries) {
         try {
@@ -274,7 +260,6 @@ async function loadItemsForSkus(skusInput: string[]): Promise<ItemRow[]> {
             .or(`sku.ilike.%${t}%,sku.ilike.%${tNoHyphen}%`)
             .limit(3);
           const candidates = (data ?? []);
-          // pick the one whose core matches best
           const cCore = skuCore(c);
           const pick = candidates.find(x => skuCore(x.sku) === cCore) || candidates[0] || null;
           if (pick) { hit = pick; break; }
@@ -290,26 +275,7 @@ async function loadItemsForSkus(skusInput: string[]): Promise<ItemRow[]> {
     }
   }
 
-  // 3) If still missing, do a very broad fetch once and match by core
-  const finalMissing = wantedCanon.filter(c => !byCanon.has(c) && !byCore.has(skuCore(c)));
-  if (finalMissing.length > 0) {
-    try {
-      // Fetch a reasonable slice; adjust if your catalog is huge
-      const { data } = await supabase
-        .from('items')
-        .select('id, sku, name, unit_cost, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
-        .limit(2000);
-      (data ?? []).forEach(it => {
-        const c = canonicalSku(it.sku); const k = skuCore(it.sku);
-        if (c && !byCanon.has(c)) byCanon.set(c, it);
-        if (k && !byCore.has(k))   byCore.set(k, it);
-      });
-    } catch (e) {
-      console.warn('[Estimate] broad fetch failed:', e);
-    }
-  }
-
-  // 4) UOM codes
+  // 3) UOM lookup
   const allRows = Array.from(new Set([...byCanon.values(), ...byCore.values()]));
   const uomIds = Array.from(new Set(allRows.map((it: any) => it?.uom_id).filter(Boolean)));
   const uomMap = new Map<any, string>();
@@ -320,11 +286,8 @@ async function loadItemsForSkus(skusInput: string[]): Promise<ItemRow[]> {
     } catch {}
   }
 
-  // 5) Return in requested order using core match first
   return wantedCanon.map((c) => {
-    const k = skuCore(c);
-    const it = byCore.get(k) || byCanon.get(c) || null;
-
+    const it = byCore.get(skuCore(c)) || byCanon.get(c) || null;
     if (!it) {
       return {
         sku: c, name: '(Unknown item)', uom_code: '-',
@@ -332,7 +295,6 @@ async function loadItemsForSkus(skusInput: string[]): Promise<ItemRow[]> {
         unit_cost: null, selling_price_per_unit: null, selling_price: 0,
       };
     }
-
     const base = Number(it.purchase_price ?? it.unit_cost ?? 0);
     const gst = Number(it.gst_percent ?? 0);
     const margin = Number(it.margin_percent ?? 0);
@@ -359,28 +321,23 @@ async function loadItemsForSkus(skusInput: string[]): Promise<ItemRow[]> {
 /* =========================
    Page
    ========================= */
-export default function EstimatePage() {
+export default function EstimateClient() {
   const sp = useSearchParams();
 
-  // Inputs from Inventory
   const seedFlag   = sp?.get('seed')  || null;
   const linesParam = sp?.get('lines') || null;
   const singleSku  = sp?.get('sku')   || null;
   const singleQty  = sp?.get('qty')   || null;
 
-  // UI
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
 
-  // Lines + items
   const [lines, setLines] = useState<EstimateLineReq[]>([]);
   const [items, setItems] = useState<ItemRow[]>([]);
 
-  // Manual add
   const [addSku, setAddSku] = useState('');
   const [addQty, setAddQty] = useState(1);
 
-  // Print extras
   const [showBarcode, setShowBarcode] = useState(true);
   const [showQr, setShowQr] = useState(false);
 
@@ -389,25 +346,49 @@ export default function EstimatePage() {
       try {
         setLoading(true); setErrorMsg('');
 
-        let req: EstimateLineReq[] = parseLinesParam(linesParam);
-
-        if (req.length === 0 && seedFlag) {
+        // 1) Prefer seed with full details (Option A)
+        let seedArr: any[] = [];
+        if (seedFlag) {
           try {
             const seed = localStorage.getItem('estimate-seed');
-            if (seed) {
-              const arr = JSON.parse(seed) as EstimateLineReq[];
-              if (Array.isArray(arr) && arr.length > 0) {
-                req = arr.map(x => ({
-                  sku: canonicalSku(x?.sku || ''),
-                  qty: Math.max(1, Math.min(500, Math.floor(Number(x?.qty) || 1))),
-                })).filter(x => x.sku);
-              }
-            }
-          } catch (e) {
-            console.warn('[Estimate] seed parse failed:', e);
+            if (seed) seedArr = JSON.parse(seed) as any[];
+          } catch {}
+        }
+        if (Array.isArray(seedArr) && seedArr.length > 0 && seedArr[0]?.selling != null) {
+          // Build from seed directly (no DB)
+          const mm = new Map<string, { sku: string; qty: number; name: string; uom_code: string; selling: number }>();
+          for (const it of seedArr) {
+            const sku = canonicalSku(it?.sku || '');
+            if (!sku) continue;
+            const qty = Math.max(1, Math.min(500, Math.floor(Number(it?.qty) || 1)));
+            const prev = mm.get(sku);
+            mm.set(sku, {
+              sku,
+              qty: (prev?.qty ?? 0) + qty,
+              name: String(it?.name ?? sku),
+              uom_code: String(it?.uom_code ?? ''),
+              selling: Math.max(0, Math.floor(Number(it?.selling) || 0)),
+            });
           }
+          const merged = Array.from(mm.values());
+          setLines(merged.map(x => ({ sku: x.sku, qty: x.qty })));
+          setItems(merged.map(x => ({
+            id: undefined,
+            sku: x.sku,
+            name: x.name || x.sku,
+            uom_code: x.uom_code || '-',
+            purchase_price: null, gst_percent: null, margin_percent: null, unit_cost: null,
+            selling_price_per_unit: x.selling,
+            selling_price: x.selling,
+          })));
+          setLoading(false);
+          return;
         }
 
+        // 2) Otherwise parse ?lines=
+        let req: EstimateLineReq[] = parseLinesParam(linesParam);
+
+        // 3) Legacy single
         if (req.length === 0 && (singleSku || singleQty)) {
           const sku = canonicalSku(singleSku || '');
           const qty = Math.max(1, Math.min(500, Math.floor(parseInt(singleQty || '1', 10) || 1)));
@@ -418,14 +399,14 @@ export default function EstimatePage() {
           setLines([]); setItems([]); setLoading(false); return;
         }
 
-        // Merge duplicates
-        const mm = new Map<string, number>();
-        for (const r of req) mm.set(canonicalSku(r.sku), (mm.get(canonicalSku(r.sku)) || 0) + r.qty);
-        const merged = Array.from(mm.entries()).map(([sku, qty]) => ({ sku, qty }));
-        setLines(merged);
+        // Merge dups
+        const mm2 = new Map<string, number>();
+        for (const r of req) mm2.set(canonicalSku(r.sku), (mm2.get(canonicalSku(r.sku)) || 0) + r.qty);
+        const merged2 = Array.from(mm2.entries()).map(([sku, qty]) => ({ sku, qty }));
+        setLines(merged2);
 
-        // Robust item load
-        const rows = await loadItemsForSkus(merged.map(r => r.sku));
+        // DB fallback
+        const rows = await loadItemsForSkus(merged2.map(r => r.sku));
         setItems(rows);
       } catch (e: any) {
         console.error(e);
@@ -437,7 +418,6 @@ export default function EstimatePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [linesParam, seedFlag, singleSku, singleQty]);
 
-  // join items + quantities
   const view = useMemo(() => {
     const qtyByCore = new Map(lines.map(l => [skuCore(l.sku), l.qty]));
     return items.map(it => {
@@ -449,7 +429,6 @@ export default function EstimatePage() {
 
   const grand = useMemo(() => view.reduce((s, v) => s + v.lineTotal, 0), [view]);
 
-  // handlers
   const setQtyLine = (sku: string, qty: number) => {
     const key = skuCore(sku);
     const q = Math.max(1, Math.min(500, Math.floor(qty || 1)));
@@ -460,18 +439,17 @@ export default function EstimatePage() {
     setLines(prev => prev.filter(l => skuCore(l.sku) !== key));
     setItems(prev => prev.filter(i => skuCore(i.sku) !== key));
   };
+
   const addLineBySku = async () => {
     const sku = canonicalSku(addSku);
     const qty = Math.max(1, Math.min(500, Math.floor(addQty || 1)));
     if (!sku) return alert('Enter a SKU');
-
     try {
-      setLoading(true);
+      // Try DB (manual add needs DB)
       const rows = await loadItemsForSkus([sku]);
       const found = rows[0];
       if (!found || !found.sku) return alert(`Item not found: ${sku}`);
 
-      // merge/insert
       setLines(prev => {
         const exists = prev.find(l => skuCore(l.sku) === skuCore(found.sku));
         if (exists) {
@@ -488,8 +466,6 @@ export default function EstimatePage() {
     } catch (e: any) {
       console.error(e);
       alert(e?.message || 'Add failed');
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -583,56 +559,7 @@ export default function EstimatePage() {
           </div>
         </div>
 
-        {loading ? (
-          <div className="py-8 text-center text-gray-600">Loading…</div>
-        ) : errorMsg ? (
-          <div className="py-8 text-center text-red-600">{errorMsg}</div>
-        ) : view.length === 0 ? (
-          <div className="py-8 text-center text-gray-700">
-            No lines to estimate yet.<br />
-            Use <b>Inventory → Estimate</b> or add lines here.
-          </div>
-        ) : (
-          <div className="overflow-auto">
-            <table className="table w-full">
-              <thead>
-                <tr>
-                  <th>SKU</th>
-                  <th style={{ minWidth: 240 }}>Item</th>
-                  <th>UoM</th>
-                  <th className="num">Selling</th>
-                  <th className="num">Qty</th>
-                  <th className="num">Line Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                {view.map(v => (
-                  <tr key={skuCore(v.sku)}>
-                    <td>
-                      <div className="flex flex-col gap-1">
-                        <div>{v.sku}</div>
-                        {showBarcode && <BarcodeSvg value={v.sku} />}
-                        {showQr && <QrSvg value={v.sku} />}
-                      </div>
-                    </td>
-                    <td>{v.name}</td>
-                    <td>{v.uom_code || '-'}</td>
-                    <td className="num">{INR0.format(v.selling_price)}</td>
-                    <td className="num">{v.qty}</td>
-                    <td className="num">{INR0.format(v.lineTotal)}</td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr className="font-semibold">
-                  <td colSpan={4}></td>
-                  <td className="num">Total</td>
-                  <td className="num">{INR0.format(grand)}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        )}
+        <EstimateTable view={view} showBarcode={showBarcode} showQr={showQr} grand={grand} />
       </div>
 
       {/* ---- Editable grid (screen), hidden on print ---- */}
@@ -695,5 +622,71 @@ export default function EstimatePage() {
         </div>
       )}
     </div>
+  );
+}
+
+/* -----------------------
+   Small presentational table for print area
+   ----------------------- */
+function EstimateTable({
+  view, showBarcode, showQr, grand,
+}: {
+  view: Array<{
+    sku: string; name: string; uom_code: string;
+    selling_price: number; qty: number; lineTotal: number;
+  }>;
+  showBarcode: boolean;
+  showQr: boolean;
+  grand: number;
+}) {
+  return (
+    <>
+      {view.length === 0 ? (
+        <div className="py-8 text-center text-gray-700">
+          No lines to estimate yet.<br />
+          Use <b>Inventory → Estimate</b> or add lines here.
+        </div>
+      ) : (
+        <div className="overflow-auto">
+          <table className="table w-full">
+            <thead>
+              <tr>
+                <th>SKU</th>
+                <th style={{ minWidth: 240 }}>Item</th>
+                <th>UoM</th>
+                <th className="num">Selling</th>
+                <th className="num">Qty</th>
+                <th className="num">Line Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {view.map(v => (
+                <tr key={skuCore(v.sku)}>
+                  <td>
+                    <div className="flex flex-col gap-1">
+                      <div>{v.sku}</div>
+                      {showBarcode && <BarcodeSvg value={v.sku} />}
+                      {showQr && <QrSvg value={v.sku} />}
+                    </div>
+                  </td>
+                  <td>{v.name}</td>
+                  <td>{v.uom_code || '-'}</td>
+                  <td className="num">{INR0.format(v.selling_price)}</td>
+                  <td className="num">{v.qty}</td>
+                  <td className="num">{INR0.format(v.lineTotal)}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="font-semibold">
+                <td colSpan={4}></td>
+                <td className="num">Total</td>
+                <td className="num">{INR0.format(grand)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+    </>
   );
 }
