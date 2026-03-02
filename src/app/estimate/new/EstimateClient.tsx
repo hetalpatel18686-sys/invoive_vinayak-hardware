@@ -40,21 +40,15 @@ interface ItemRow {
   margin_percent: number | null;
   unit_cost: number | null;
   selling_price_per_unit?: number | null;
-  selling_price: number; // computed
+  selling_price: number; // computed (whole rupees)
 }
 
 /* =========================
    SKU normalization helpers
    ========================= */
-function normalizeHyphens(s: string) {
-  return String(s || '').replace(/[\u2010\u2011\u2012\u2013\u2014\u2212]/g, '-');
-}
-function canonicalSku(s: string) {
-  return normalizeHyphens(String(s || '').trim()).replace(/\s+/g, ' ');
-}
-function skuCore(s: string) {
-  return canonicalSku(s).toLowerCase().replace(/[^a-z0-9]/g, '');
-}
+function normalizeHyphens(s: string) { return String(s || '').replace(/[\u2010\u2011\u2012\u2013\u2014\u2212]/g, '-'); }
+function canonicalSku(s: string) { return normalizeHyphens(String(s || '').trim()).replace(/\s+/g, ' '); }
+function skuCore(s: string) { return canonicalSku(s).toLowerCase().replace(/[^a-z0-9]/g, ''); }
 function variantsFor(s: string): string[] {
   const c = canonicalSku(s);
   const v = new Set<string>([
@@ -350,7 +344,7 @@ export default function EstimateClient() {
       try {
         setLoading(true); setErrorMsg('');
 
-        // 1) Prefer seed with full details (Option A)
+        // 1) Prefer SEED path (works even if seed has only sku/qty)
         let seedArr: any[] = [];
         if (seedFlag) {
           try {
@@ -358,22 +352,42 @@ export default function EstimateClient() {
             if (seed) seedArr = JSON.parse(seed) as any[];
           } catch {}
         }
-        if (Array.isArray(seedArr) && seedArr.length > 0 && seedArr[0]?.selling != null) {
-          // Build from seed directly (no DB)
-          const mm = new Map<string, { sku: string; qty: number; name: string; uom_code: string; selling: number }>();
+        if (Array.isArray(seedArr) && seedArr.length > 0) {
+          // Normalize any seed shape
+          type NSeed = { sku: string; qty: number; name?: string; uom_code?: string; selling?: number };
+          const mm = new Map<string, NSeed>();
+
           for (const it of seedArr) {
-            const sku = canonicalSku(it?.sku || '');
+            const rawSku = it?.sku ?? '';
+            const sku = canonicalSku(String(rawSku));
             if (!sku) continue;
+
             const qty = Math.max(1, Math.min(500, Math.floor(Number(it?.qty) || 1)));
+
+            // Accept various field names from seed:
+            const name =
+              it?.name ?? it?.item ?? it?.description ?? sku;
+
+            const uom_code =
+              it?.uom_code ?? it?.uom ?? '';
+
+            const sellingCandidate =
+              it?.selling ?? it?.sellingPrice ?? it?.selling_price ?? it?.price ?? it?.unit_price ?? it?.unitPrice;
+
+            const selling = Number.isFinite(Number(sellingCandidate))
+              ? rupeeCeil(Number(sellingCandidate))
+              : 0;
+
             const prev = mm.get(sku);
             mm.set(sku, {
               sku,
               qty: (prev?.qty ?? 0) + qty,
-              name: String(it?.name ?? sku),
-              uom_code: String(it?.uom_code ?? ''),
-              selling: Math.max(0, Math.floor(Number(it?.selling) || 0)),
+              name,
+              uom_code,
+              selling,
             });
           }
+
           const merged = Array.from(mm.values());
           setLines(merged.map(x => ({ sku: x.sku, qty: x.qty })));
           setItems(merged.map(x => ({
@@ -444,19 +458,16 @@ export default function EstimateClient() {
     setItems(prev => prev.filter(i => skuCore(i.sku) !== key));
   };
 
-  /**
-   * Add line from UI:
-   * - If user provided Name/UoM/Selling => add a CUSTOM line (no DB).
-   * - Else try DB; if not found => still add a placeholder so it’s never blank.
+  /** Manual Add:
+   *  - If Name/UoM/Selling provided -> add custom line (no DB).
+   *  - Else try DB; if not found -> add placeholder (never blank).
    */
   const addLineBySku = async () => {
     const sku = canonicalSku(addSku);
     const qty = Math.max(1, Math.min(500, Math.floor(addQty || 1)));
     const hasCustom = Boolean(addName || addUom || addSelling);
-
     if (!sku) return alert('Enter a SKU');
 
-    // A) custom details -> no DB
     if (hasCustom) {
       const selling = Math.max(0, Math.floor(Number(addSelling || 0)));
       const customRow: ItemRow = {
@@ -477,28 +488,19 @@ export default function EstimateClient() {
         }
         return [...prev, { sku, qty }];
       });
-      setItems(prev => {
-        const found = prev.find(p => skuCore(p.sku) === skuCore(sku));
-        return found ? prev : [...prev, customRow];
-      });
+      setItems(prev => prev.some(p => skuCore(p.sku) === skuCore(sku)) ? prev : [...prev, customRow]);
+
       setAddSku(''); setAddQty(1); setAddName(''); setAddUom(''); setAddSelling('');
       return;
     }
 
-    // B) no custom -> try DB, else placeholder
     try {
       const rows = await loadItemsForSkus([sku]);
       const found = rows[0];
-
       const rowToUse: ItemRow = found && found.sku ? found : {
-        sku,
-        name: sku,
-        uom_code: '-',
-        purchase_price: null, gst_percent: null, margin_percent: null, unit_cost: null,
-        selling_price_per_unit: 0,
-        selling_price: 0,
+        sku, name: sku, uom_code: '-', purchase_price: null, gst_percent: null, margin_percent: null,
+        unit_cost: null, selling_price_per_unit: 0, selling_price: 0,
       };
-
       setLines(prev => {
         const exists = prev.find(l => skuCore(l.sku) === skuCore(sku));
         if (exists) {
