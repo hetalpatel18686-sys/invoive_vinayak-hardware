@@ -249,7 +249,7 @@ function ThermalLabel2x1({
   name,
   sku,
   uom,
-  priceRupees, // NEW: show selling price on label
+  priceRupees, // NEW: show selling price
 }: {
   brand?: string;
   name: string;
@@ -292,7 +292,7 @@ function ThermalLabel2x1({
         {name}
       </div>
 
-      {/* Barcode + QR row (layout-safe) */}
+      {/* Barcode + QR row */}
       <div
         className="label-row"
         style={{
@@ -304,7 +304,7 @@ function ThermalLabel2x1({
           minHeight: 0,
         }}
       >
-        {/* Barcode stretches to remaining width */}
+        {/* Barcode */}
         <div className="barcode-wrap" style={{ flex: 1, minWidth: 0 }}>
           <BarcodeSvg
             value={sku}
@@ -319,7 +319,7 @@ function ThermalLabel2x1({
           />
         </div>
 
-        {/* QR has fixed physical size */}
+        {/* QR */}
         <div className="qr-wrap" style={{ width: '11mm', height: '11mm', flex: '0 0 11mm' }}>
           <QrSvg value={sku} sizeMm={11} />
         </div>
@@ -345,7 +345,7 @@ export default function InventoryPage() {
   const [locationScope, setLocationScope] = useState<LocationScope>('all_items');
   const [showZeroQtyLocations, setShowZeroQtyLocations] = useState<boolean>(false);
 
-  // selection for labels + multi-estimate
+  // selection for labels
   const [sel, setSel] = useState<Sel>({});
   const [bulkQtyState, setBulkQtyState] = useState<number>(1);
   const setBulkQtyInput = (n: number) => setBulkQtyState(Math.max(1, Math.min(500, Math.floor(n || 1))));
@@ -361,14 +361,27 @@ export default function InventoryPage() {
     });
   };
 
+  // Try WITH selling_price_per_unit; if your env misses it, fallback w/o it (keeps data visible)
+  const fetchItemsSafe = async () => {
+    const q1 = await supabase
+      .from('items')
+      .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
+      .order('sku', { ascending: true });
+
+    if (!q1.error) return q1;
+
+    // Fallback (no selling_price_per_unit)
+    return await supabase
+      .from('items')
+      .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id, purchase_price, gst_percent, margin_percent')
+      .order('sku', { ascending: true });
+  };
+
   const loadInventory = async () => {
     try {
       setLoading(true);
-      // Pull pricing fields too (including selling_price_per_unit from your Supabase)
-      const { data: itemsData, error: itemsErr } = await supabase
-        .from('items')
-        .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
-        .order('sku', { ascending: true });
+
+      const { data: itemsData, error: itemsErr } = await fetchItemsSafe();
       if (itemsErr) throw itemsErr;
 
       const { data: uoms } = await supabase.from('units_of_measure').select('id, code');
@@ -419,7 +432,7 @@ export default function InventoryPage() {
           purchase_price: it.purchase_price ?? null,
           gst_percent: it.gst_percent ?? null,
           margin_percent: it.margin_percent ?? null,
-          selling_price_per_unit: it.selling_price_per_unit ?? null, // NEW
+          selling_price_per_unit: it.selling_price_per_unit ?? null, // may be undefined if fallback
         };
       });
 
@@ -470,7 +483,7 @@ export default function InventoryPage() {
 
       const unitCostGst = withGst(base, gst); // rounded ₹
 
-      // Prefer DB selling price when present; else compute Purchase+GST+Margin
+      // Prefer DB selling price when present; else (Purchase + GST) + Margin
       const sellingDb = r.selling_price_per_unit;
       const sellingPrice = Number.isFinite(Number(sellingDb)) && Number(sellingDb) > 0
         ? rupeeCeil(Number(sellingDb))
@@ -537,6 +550,7 @@ export default function InventoryPage() {
      PRINT thermal labels
      -------------------------------- */
   const handlePrintThermal = () => {
+    // Build selected items from current selection map
     const selectedItems = (() => {
       const arr: { row: InvRow & { unitCostGst: number; sellingPrice: number; total_value: number }; qty: number }[] = [];
       for (const r of sorted) {
@@ -573,6 +587,7 @@ export default function InventoryPage() {
       display: flex; flex-direction: column; gap: 0.6mm; justify-content: space-between;
     }
 
+    /* ---- Layout-safe row ---- */
     .thermal-label-2x1 .label-row { display: flex; align-items: center; gap: 1mm; width: 100%; flex: 1; min-height: 0; }
     .thermal-label-2x1 .label-row .barcode-wrap { flex: 1 1 auto; min-width: 0; }
     .thermal-label-2x1 .label-row .qr-wrap { flex: 0 0 11mm; width: 11mm; height: 11mm; }
@@ -623,7 +638,7 @@ export default function InventoryPage() {
   };
 
   /* --------------------------------
-     CSV export uses rounded values
+     CSV export uses rounded values (now includes Selling)
      -------------------------------- */
   const exportCsv = () => {
     const header = ['SKU','Item','UoM','Qty','Minimum','Purchase Price','GST %','Margin %','Unit Cost (GST)','Selling Price','Total Value (₹)','Locations'];
@@ -638,7 +653,7 @@ export default function InventoryPage() {
         String(r.gst_percent ?? 0),
         String(r.margin_percent ?? 0),
         String(r.unitCostGst),
-        String(r.sellingPrice),                // NEW
+        String(r.sellingPrice),                 // NEW
         String(r.total_value),
         (r.locations_text ?? '').replaceAll('"','""'),
       ].map(v => `"${v}"`).join(',');
@@ -648,7 +663,7 @@ export default function InventoryPage() {
   };
 
   /* --------------------------------
-     Multi-estimate from selection
+     Multi-estimate from selection (keeps your single-item Estimate link)
      -------------------------------- */
   const estimateSelected = () => {
     const items = Object.entries(sel).flatMap(([id, s]) => {
@@ -704,12 +719,11 @@ export default function InventoryPage() {
 
           <Button type="button" onClick={exportCsv}>Export CSV</Button>
           <Button type="button" onClick={loadInventory}>Refresh</Button>
-
-          {/* NEW: multi-estimate from selected */}
           <Button type="button" className="bg-emerald-600 hover:bg-emerald-700" onClick={estimateSelected}>
             Estimate (Selected)
           </Button>
 
+          {/* Your original single-item Estimate link stays: */}
           <Link href="/estimate/new" className="rounded border px-3 py-2 hover:bg-neutral-50">Estimate</Link>
         </div>
 
@@ -767,7 +781,7 @@ export default function InventoryPage() {
                     name={row.name || row.sku}
                     sku={row.sku}
                     uom={row.uom_code}
-                    priceRupees={row.sellingPrice}  // NEW: show selling price on label
+                    priceRupees={row.sellingPrice}   // NEW: ₹ on label
                   />
                 ));
               })}
@@ -775,8 +789,8 @@ export default function InventoryPage() {
           </div>
         </div>
 
-        {/* Inventory table with alignment + delete + estimate */}
-        {/* NEW: fixed max height so horizontal bar is reachable after ~15 rows */}
+        {/* Inventory table */}
+        {/* NEW: fixed max height so the horizontal scrollbar is visible after ~15 rows */}
         <div className="table-scroll" style={{ maxHeight: 720, overflow: 'auto' }}>
           <table className="inventory-table">
             {/* Exact widths per column */}
@@ -791,7 +805,7 @@ export default function InventoryPage() {
               <col style={{ width: 90  }} />   {/* GST % */}
               <col style={{ width: 90  }} />   {/* Margin % */}
               <col style={{ width: 140 }} />   {/* Unit Cost (GST) */}
-              <col style={{ width: 140 }} />   {/* Selling Price (NEW) */}
+              <col style={{ width: 140 }} />   {/* Selling (NEW) */}
               <col style={{ width: 160 }} />   {/* Total Value (₹) */}
               <col style={{ width: 140 }} />   {/* Actions */}
               <col style={{ width: 360 }} />   {/* Locations */}
@@ -909,7 +923,7 @@ export default function InventoryPage() {
                 <td className="num">—</td>
                 <td className="num">—</td>
                 <td className="num">—</td>
-                <td className="num">—</td>{/* Selling total not used */}
+                <td className="num">—</td> {/* Selling total not shown */}
                 <td className="num">{INR0.format(totals.value)}</td>
                 <td>—</td>
                 <td>—</td>
