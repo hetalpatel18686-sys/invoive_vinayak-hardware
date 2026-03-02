@@ -335,8 +335,12 @@ export default function EstimateClient() {
   const [lines, setLines] = useState<EstimateLineReq[]>([]);
   const [items, setItems] = useState<ItemRow[]>([]);
 
+  // Manual add (now supports custom line without DB)
   const [addSku, setAddSku] = useState('');
   const [addQty, setAddQty] = useState(1);
+  const [addName, setAddName] = useState('');     // optional
+  const [addUom, setAddUom] = useState('');       // optional
+  const [addSelling, setAddSelling] = useState(''); // optional (string to allow empty)
 
   const [showBarcode, setShowBarcode] = useState(true);
   const [showQr, setShowQr] = useState(false);
@@ -385,7 +389,7 @@ export default function EstimateClient() {
           return;
         }
 
-        // 2) Otherwise parse ?lines=
+        // 2) Otherwise parse ?lines= (small/mid selections)
         let req: EstimateLineReq[] = parseLinesParam(linesParam);
 
         // 3) Legacy single
@@ -440,27 +444,79 @@ export default function EstimateClient() {
     setItems(prev => prev.filter(i => skuCore(i.sku) !== key));
   };
 
+  /**
+   * Add line from UI:
+   * - If user provided Name/UoM/Selling => add a CUSTOM line (no DB).
+   * - Else try DB; if not found => still add a placeholder line with what user typed (not blank).
+   */
   const addLineBySku = async () => {
     const sku = canonicalSku(addSku);
     const qty = Math.max(1, Math.min(500, Math.floor(addQty || 1)));
-    if (!sku) return alert('Enter a SKU');
-    try {
-      // Try DB (manual add needs DB)
-      const rows = await loadItemsForSkus([sku]);
-      const found = rows[0];
-      if (!found || !found.sku) return alert(`Item not found: ${sku}`);
+    const hasCustom = Boolean(addName || addUom || addSelling);
 
+    if (!sku) return alert('Enter a SKU');
+
+    // Case A: user provided manual details -> add custom line directly
+    if (hasCustom) {
+      const selling = Math.max(0, Math.floor(Number(addSelling || 0)));
+      const customRow: ItemRow = {
+        sku,
+        name: addName || sku,
+        uom_code: addUom || '-',
+        purchase_price: null, gst_percent: null, margin_percent: null, unit_cost: null,
+        selling_price_per_unit: selling,
+        selling_price: selling,
+      };
       setLines(prev => {
-        const exists = prev.find(l => skuCore(l.sku) === skuCore(found.sku));
+        const exists = prev.find(l => skuCore(l.sku) === skuCore(sku));
         if (exists) {
-          return prev.map(l => skuCore(l.sku) === skuCore(found.sku)
+          return prev.map(l => skuCore(l.sku) === skuCore(sku)
             ? { sku: l.sku, qty: Math.max(1, Math.min(500, (l.qty || 0) + qty)) }
             : l
           );
         }
-        return [...prev, { sku: found.sku, qty }];
+        return [...prev, { sku, qty }];
       });
-      setItems(prev => prev.some(p => skuCore(p.sku) === skuCore(found.sku)) ? prev : [...prev, found]);
+      setItems(prev => {
+        const found = prev.find(p => skuCore(p.sku) === skuCore(sku));
+        return found ? prev : [...prev, customRow];
+      });
+      // clear inputs
+      setAddSku(''); setAddQty(1); setAddName(''); setAddUom(''); setAddSelling('');
+      return;
+    }
+
+    // Case B: no manual details -> try DB, fallback to placeholder
+    try {
+      const rows = await loadItemsForSkus([sku]);
+      const found = rows[0];
+
+      let rowToUse: ItemRow;
+      if (!found || !found.sku) {
+        // placeholder so page isn't blank
+        rowToUse = {
+          sku,
+          name: sku,
+          uom_code: '-',
+          purchase_price: null, gst_percent: null, margin_percent: null, unit_cost: null,
+          selling_price_per_unit: 0,
+          selling_price: 0,
+        };
+      } else {
+        rowToUse = found;
+      }
+
+      setLines(prev => {
+        const exists = prev.find(l => skuCore(l.sku) === skuCore(sku));
+        if (exists) {
+          return prev.map(l => skuCore(l.sku) === skuCore(sku)
+            ? { sku: l.sku, qty: Math.max(1, Math.min(500, (l.qty || 0) + qty)) }
+            : l
+          );
+        }
+        return [...prev, { sku: rowToUse.sku, qty }];
+      });
+      setItems(prev => prev.some(p => skuCore(p.sku) === skuCore(rowToUse.sku)) ? prev : [...prev, rowToUse]);
 
       setAddSku(''); setAddQty(1);
     } catch (e: any) {
@@ -501,10 +557,10 @@ export default function EstimateClient() {
           <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={handlePrint}>Print</Button>
         </div>
 
-        {/* Manual add */}
-        <div className="grid sm:grid-cols-3 gap-2">
+        {/* Manual add (now supports custom lines without DB) */}
+        <div className="grid lg:grid-cols-5 md:grid-cols-4 sm:grid-cols-2 gap-2">
           <div>
-            <label className="label">Add by SKU</label>
+            <label className="label">SKU</label>
             <input
               className="input"
               placeholder="e.g. VH-001"
@@ -522,6 +578,39 @@ export default function EstimateClient() {
               max={500}
               value={addQty}
               onChange={(e) => setAddQty(Math.max(1, Math.min(500, Math.floor(parseInt(e.target.value || '1', 10)))))}
+              onKeyDown={(e) => { if (e.key === 'Enter') addLineBySku(); }}
+            />
+          </div>
+          <div>
+            <label className="label">Name (optional)</label>
+            <input
+              className="input"
+              placeholder="Item name"
+              value={addName}
+              onChange={(e) => setAddName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') addLineBySku(); }}
+            />
+          </div>
+          <div>
+            <label className="label">UoM (optional)</label>
+            <input
+              className="input"
+              placeholder="PCS / BOX / MTR"
+              value={addUom}
+              onChange={(e) => setAddUom(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') addLineBySku(); }}
+            />
+          </div>
+          <div>
+            <label className="label">Selling ₹ (optional)</label>
+            <input
+              className="input"
+              type="number"
+              min={0}
+              step={1}
+              placeholder="e.g. 125"
+              value={addSelling}
+              onChange={(e) => setAddSelling(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') addLineBySku(); }}
             />
           </div>
@@ -562,7 +651,7 @@ export default function EstimateClient() {
         <EstimateTable view={view} showBarcode={showBarcode} showQr={showQr} grand={grand} />
       </div>
 
-      {/* ---- Editable grid (screen), hidden on print ---- */}
+      {/* ---- Editable grid (screen), hidden on print) ---- */}
       {view.length > 0 && (
         <div className="card no-print">
           <div className="overflow-auto">
@@ -665,8 +754,7 @@ function EstimateTable({
                   <td>
                     <div className="flex flex-col gap-1">
                       <div>{v.sku}</div>
-                      {showBarcode && <BarcodeSvg value={v.sku} />}
-                      {showQr && <QrSvg value={v.sku} />}
+                     howQr && <QrSvg value={v.sku} />}
                     </div>
                   </td>
                   <td>{v.name}</td>
