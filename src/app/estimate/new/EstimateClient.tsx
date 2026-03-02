@@ -1,435 +1,417 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
+import Button from '@/components/Button';
 
-/* ---------- helpers: prices always in whole rupees ---------- */
+/* =========================
+   Helpers (whole-rupee math)
+   ========================= */
 const rupeeCeil = (n: number) => Math.ceil((n ?? 0) + Number.EPSILON);
-const INR0 = new Intl.NumberFormat('en-IN', {
-  style: 'currency',
-  currency: 'INR',
-  maximumFractionDigits: 0,
-});
+const INR0 = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 });
+
 const withGst = (base: number, gstPct: number) =>
   rupeeCeil((base ?? 0) * (1 + (gstPct ?? 0) / 100));
+
 const withGstAndMargin = (base: number, gstPct: number, marginPct: number) =>
   rupeeCeil(withGst(base ?? 0, gstPct ?? 0) * (1 + (marginPct ?? 0) / 100));
 
-type Line = { sku: string; name: string; qty: number; price: number };
+/* =========================
+   Types
+   ========================= */
+interface EstimateLine {
+  sku: string;
+  qty: number;
+}
 
-type ItemRow = {
+interface ItemRow {
+  id?: string;
   sku: string;
   name: string;
+  uom_code: string;
+  // Pricing ingredients
   purchase_price: number | null;
   gst_percent: number | null;
   margin_percent: number | null;
-  unit_cost: number | null;
-  barcode?: string | null; // optional
-};
+  unit_cost: number | null; // fallback avg cost
+  selling_price_per_unit?: number | null;
 
-/* Build a WhatsApp message with all lines */
-function buildWhatsappMessage(customer: string, lines: Line[], grand: number) {
-  const title = `*Estimate / Quotation*${customer ? `\nTo: ${customer}` : ''}`;
-  const list = lines
-    .map(
-      (l, i) =>
-        `${i + 1}. ${l.sku} — ${l.name}\n   Qty: ${l.qty} × ₹${l.price} = ₹${l.qty * l.price}`
-    )
-    .join('\n');
-  const total = `\n*Grand Total:* ₹${grand}`;
-  const footer = `\n\nPrices include GST & margin, rounded to next rupee.`;
-  return `${title}\n\n${list}\n${total}${footer}`;
+  // Final computed for the estimate UI
+  selling_price: number; // whole rupees
 }
 
-/* Safe phone normalizer for wa.me (expects country code, no +, no spaces) */
-function normalizePhoneForWa(raw: string) {
-  return raw.replace(/\D+/g, '');
+/* =========================
+   Parse incoming lines
+   ========================= */
+function parseLinesParam(linesParam: string | null): EstimateLine[] {
+  if (!linesParam) return [];
+  // lines=SKU1:QTY1,SKU2:QTY2
+  return linesParam
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(pair => {
+      const [skuRaw, qtyRaw] = pair.split(':');
+      const sku = (skuRaw || '').trim();
+      const qty = Math.max(1, Math.min(500, Math.floor(parseInt((qtyRaw || '1').trim(), 10) || 1)));
+      return sku ? { sku, qty } : null;
+    })
+    .filter(Boolean) as EstimateLine[];
 }
 
-/* ---------- Supabase helpers that TRY barcode and fall back ---------- */
-async function selectWithOptionalBarcode(like: string, limitOne = false) {
-  // Try with barcode column first
-  let q1 = supabase
+async function loadItemsForSkus(skus: string[]): Promise<ItemRow[]> {
+  if (skus.length === 0) return [];
+
+  // 1) items
+  const { data: items, error: itemsErr } = await supabase
     .from('items')
-    .select('sku, name, purchase_price, gst_percent, margin_percent, unit_cost, barcode')
-    .or(`sku.ilike.${like},name.ilike.${like},barcode.ilike.${like}`)
-    .order('sku', { ascending: true });
-  if (limitOne) q1 = q1.limit(1);
+    .select('id, sku, name, unit_cost, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
+    .in('sku', skus);
 
-  let r1 = await q1;
-  if (!r1.error) return r1;
-
-  // Fallback without barcode (if column doesn't exist)
-  let q2 = supabase
-    .from('items')
-    .select('sku, name, purchase_price, gst_percent, margin_percent, unit_cost')
-    .or(`sku.ilike.${like},name.ilike.${like}`)
-    .order('sku', { ascending: true });
-  if (limitOne) q2 = q2.limit(1);
-
-  return await q2;
-}
-
-async function selectExactWithOptionalBarcode(equal: string) {
-  // Try exact SKU or exact barcode
-  let r1 = await supabase
-    .from('items')
-    .select('sku, name, purchase_price, gst_percent, margin_percent, unit_cost, barcode')
-    .or(`sku.ilike.${equal},barcode.eq.${equal}`)
-    .limit(1);
-
-  if (!r1.error) return r1;
-
-  // Fallback: only exact SKU (case-insensitive)
-  return await supabase
-    .from('items')
-    .select('sku, name, purchase_price, gst_percent, margin_percent, unit_cost')
-    .or(`sku.ilike.${equal}`)
-    .limit(1);
-}
-
-export default function EstimateClient() {
-  const params = useSearchParams();
-
-  const [skuInput, setSkuInput] = useState('');
-  const [customer, setCustomer] = useState('');
-  const [notes, setNotes] = useState('');
-  const [lines, setLines] = useState<Line[]>([]);
-
-  /** live suggestions */
-  const [suggest, setSuggest] = useState<ItemRow[]>([]);
-  const [loadingSuggest, setLoadingSuggest] = useState(false);
-
-  /** WhatsApp phone number (with country code, e.g., 91XXXXXXXXXX) */
-  const [waPhone, setWaPhone] = useState('');
-
-  /* ---------- add one item by sku | name | barcode (case-insensitive) ---------- */
-  async function fetchBestItem(query: string): Promise<ItemRow | null> {
-    const q = query.trim();
-    if (!q) return null;
-
-    // 1) Try exact SKU or exact barcode (case-insensitive for SKU, exact for barcode)
-    {
-      const { data, error } = await selectExactWithOptionalBarcode(q);
-      if (!error && data && data.length > 0) return data[0] as ItemRow;
-    }
-
-    // 2) Partial match by SKU or NAME (and barcode if available)
-    {
-      const like = `%${q}%`;
-      const { data, error } = await selectWithOptionalBarcode(like, true);
-      if (!error && data && data.length > 0) return data[0] as ItemRow;
-    }
-
-    return null;
+  if (itemsErr) {
+    console.error('[Estimate] items load error:', itemsErr);
+    return skus.map(sku => ({
+      sku,
+      name: '(Unknown item)',
+      uom_code: '',
+      purchase_price: null,
+      gst_percent: null,
+      margin_percent: null,
+      unit_cost: null,
+      selling_price_per_unit: null,
+      selling_price: 0,
+    }));
   }
 
-  async function addSkuOnce(query: string, qty = 1) {
-    const item = await fetchBestItem(query);
-    if (!item) {
-      alert(`Item not found for "${query}"`);
-      return;
+  // 2) UOMs
+  const uomIds = Array.from(new Set((items ?? []).map(it => it.uom_id).filter(Boolean)));
+  let uomMap = new Map<any, string>();
+  if (uomIds.length > 0) {
+    const { data: uoms, error: uomsErr } = await supabase
+      .from('units_of_measure')
+      .select('id, code')
+      .in('id', uomIds);
+    if (uomsErr) {
+      console.warn('[Estimate] uom load error:', uomsErr.message);
+    } else {
+      (uoms ?? []).forEach((u: any) => uomMap.set(u.id, u.code));
     }
-    const base = Number(item.purchase_price ?? item.unit_cost ?? 0);
-    const price = withGstAndMargin(
-      base,
-      Number(item.gst_percent ?? 0),
-      Number(item.margin_percent ?? 0)
-    ); // integer ₹
-
-    setLines((prev) => {
-      const idx = prev.findIndex((l) => l.sku === item.sku);
-      if (idx >= 0) {
-        const next = [...prev];
-        next[idx] = { ...next[idx], qty: next[idx].qty + qty };
-        return next;
-      }
-      return [...prev, { sku: item.sku, name: item.name, qty, price }];
-    });
   }
 
-  /* ---------- read ?sku= and ?qty= on first load ---------- */
-  useEffect(() => {
-    const skuParam = params.get('sku'); // supports "SKU-001" or "SKU-001,SKU-007"
-    const qtyParam = params.get('qty');
-    const qty = Math.max(1, Number(qtyParam ?? 1) || 1);
+  // 3) Normalize + compute selling price (prefer DB)
+  const rows: ItemRow[] = (items ?? []).map((it: any) => {
+    const base = Number(it.purchase_price ?? it.unit_cost ?? 0);
+    const gst = Number(it.gst_percent ?? 0);
+    const margin = Number(it.margin_percent ?? 0);
 
-    if (skuParam) {
-      const skus = skuParam.split(',').map((s) => s.trim()).filter(Boolean);
-      (async () => {
-        for (const s of skus) await addSkuOnce(s, qty);
-      })();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // only once
+    const sellingDb = it.selling_price_per_unit;
+    const selling = Number.isFinite(Number(sellingDb)) && Number(sellingDb) > 0
+      ? rupeeCeil(Number(sellingDb))
+      : withGstAndMargin(base, gst, margin);
 
-  /* ---------- suggestions: runs when user types ---------- */
+    return {
+      id: it.id,
+      sku: it.sku,
+      name: it.name || it.sku,
+      uom_code: it.uom_id ? (uomMap.get(it.uom_id) ?? '') : '',
+      purchase_price: it.purchase_price ?? null,
+      gst_percent: it.gst_percent ?? null,
+      margin_percent: it.margin_percent ?? null,
+      unit_cost: it.unit_cost ?? null,
+      selling_price_per_unit: it.selling_price_per_unit ?? null,
+      selling_price: selling,
+    };
+  });
+
+  // 4) Ensure all requested SKUs are represented (handles unknown SKUs gracefully)
+  const bySku = new Map(rows.map(r => [r.sku, r]));
+  const complete = skus.map(sku => {
+    const found = bySku.get(sku);
+    return found ?? {
+      sku,
+      name: '(Unknown item)',
+      uom_code: '',
+      purchase_price: null,
+      gst_percent: null,
+      margin_percent: null,
+      unit_cost: null,
+      selling_price_per_unit: null,
+      selling_price: 0,
+    };
+  });
+
+  return complete;
+}
+
+/* =========================
+   Main page
+   ========================= */
+export default function NewEstimatePage() {
+  const sp = useSearchParams();
+
+  // ---- read inputs
+  const seedFlag = sp?.get('seed') || null; // from Inventory large-selection path
+  const linesParam = sp?.get('lines') || null; // small-selection path
+  const singleSku = sp?.get('sku') || null;    // backward-compatible
+  const singleQty = sp?.get('qty') || null;    // backward-compatible
+
+  // ---- UI state
+  const [loading, setLoading] = useState(true);
+  const [rawLines, setRawLines] = useState<EstimateLine[]>([]);
+  const [items, setItems] = useState<ItemRow[]>([]);
+  const [errorMsg, setErrorMsg] = useState<string>('');
+
+  // Seed name (for debug button tooltips)
+  const [seedUsed, setSeedUsed] = useState<'lines' | 'localStorage' | 'single' | 'none'>('none');
+
+  // 1) Build the requested lines (in priority order)
   useEffect(() => {
-    let active = true;
     (async () => {
-      const q = skuInput.trim();
-      if (!q) {
-        if (active) setSuggest([]);
-        return;
-      }
-      setLoadingSuggest(true);
-      const like = `%${q}%`;
+      try {
+        setLoading(true);
+        setErrorMsg('');
 
-      const { data, error } = await selectWithOptionalBarcode(like, false);
+        // Priority A: lines query (small/medium selections)
+        let lines: EstimateLine[] = parseLinesParam(linesParam);
 
-      setLoadingSuggest(false);
-      if (!active) return;
-      if (error || !data) {
-        setSuggest([]);
-      } else {
-        setSuggest((data as ItemRow[]).slice(0, 8));
+        // Priority B: long selections via seed=1
+        if ((!lines || lines.length === 0) && seedFlag) {
+          try {
+            const seed = localStorage.getItem('estimate-seed');
+            if (seed) {
+              const arr = JSON.parse(seed) as EstimateLine[];
+              if (Array.isArray(arr) && arr.length > 0) {
+                lines = arr.map(x => ({
+                  sku: String(x.sku || '').trim(),
+                  qty: Math.max(1, Math.min(500, Math.floor(Number(x.qty) || 1))),
+                })).filter(x => x.sku);
+                setSeedUsed('localStorage');
+              }
+            }
+          } catch (e) {
+            console.warn('[Estimate] Failed to parse estimate-seed:', e);
+          }
+        }
+
+        // Priority C: backward-compat single sku & qty
+        if ((!lines || lines.length === 0) && (singleSku || singleQty)) {
+          const sku = (singleSku || '').trim();
+          const qty = Math.max(1, Math.min(500, Math.floor(parseInt(singleQty || '1', 10) || 1)));
+          if (sku) {
+            lines = [{ sku, qty }];
+            setSeedUsed('single');
+          }
+        }
+
+        // If nothing provided, remain blank state (friendly message)
+        if (!lines || lines.length === 0) {
+          setRawLines([]);
+          setItems([]);
+          setSeedUsed('none');
+          setLoading(false);
+          return;
+        }
+
+        setRawLines(lines);
+
+        // 2) Load item records for those SKUs
+        const skus = Array.from(new Set(lines.map(l => l.sku)));
+        const rows = await loadItemsForSkus(skus);
+        setItems(rows);
+      } catch (e: any) {
+        console.error('[Estimate] init failed:', e);
+        setErrorMsg(e?.message || 'Failed to build estimate.');
+      } finally {
+        setLoading(false);
       }
     })();
+    // NOTE: watch params only (not local state)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linesParam, seedFlag, singleSku, singleQty]);
 
-    return () => {
-      active = false;
-    };
-  }, [skuInput]);
+  // Compose line+item view
+  const view = useMemo(() => {
+    const qtyBySku = new Map(rawLines.map(l => [l.sku, l.qty]));
+    return items.map(it => {
+      const qty = Math.max(1, Math.min(500, Math.floor(qtyBySku.get(it.sku) || 1)));
+      const lineTotal = rupeeCeil(qty * Number(it.selling_price || 0));
+      return { ...it, qty, lineTotal };
+    });
+  }, [items, rawLines]);
 
-  const addSkuFromInput = async () => {
-    if (!skuInput.trim()) return;
-    // also allow comma-separated input for multiple items
-    const parts = skuInput.split(',').map((s) => s.trim()).filter(Boolean);
-    for (const p of parts) await addSkuOnce(p, 1);
-    setSkuInput('');
-    setSuggest([]);
+  const total = useMemo(() => {
+    let s = 0;
+    for (const v of view) s += v.lineTotal;
+    return rupeeCeil(s);
+  }, [view]);
+
+  // UI handlers
+  const setQty = (sku: string, qty: number) => {
+    const q = Math.max(1, Math.min(500, Math.floor(qty || 1)));
+    setRawLines(prev => {
+      const idx = prev.findIndex(l => l.sku === sku);
+      if (idx === -1) return prev;
+      const next = [...prev];
+      next[idx] = { ...next[idx], qty: q };
+      return next;
+    });
   };
 
-  const totals = useMemo(() => {
-    const sub = lines.reduce((s, l) => s + l.qty * l.price, 0);
-    return { sub, grand: sub }; // already GST+margin included and rounded
-  }, [lines]);
+  const removeLine = (sku: string) => {
+    setRawLines(prev => prev.filter(l => l.sku !== sku));
+    setItems(prev => prev.filter(i => i.sku !== sku));
+  };
 
-  const printNow = () => window.print();
-  const remove = (sku: string) =>
-    setLines((prev) => prev.filter((l) => l.sku !== sku));
+  const clearSeed = () => {
+    try { localStorage.removeItem('estimate-seed'); } catch {}
+    alert('Estimate seed cleared from this browser.');
+  };
 
-  const sendWhatsapp = () => {
-    const phone = normalizePhoneForWa(waPhone);
-    if (!phone) {
-      alert('Enter WhatsApp number with country code (e.g., 91XXXXXXXXXX)');
-      return;
-    }
-    if (lines.length === 0) {
-      alert('Add at least one item before sending.');
-      return;
-    }
-    const text = buildWhatsappMessage(customer, lines, totals.grand);
-    const url = `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
-    window.open(url, '_blank', 'noopener,noreferrer');
+  const reimportSeed = () => {
+    // force reload from seed
+    window.location.href = '/estimate/new?seed=1';
   };
 
   return (
-    <div className="p-6 print:p-0">
-      {/* Toolbar */}
-      <div className="no-print flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Estimate / Quotation</h1>
-        <div className="flex flex-wrap gap-2">
-          <input
-            className="input w-48"
-            placeholder="WhatsApp (e.g., 91XXXXXXXXXX)"
-            value={waPhone}
-            onChange={(e) => setWaPhone(e.target.value)}
-          />
-          <button
-            onClick={sendWhatsapp}
-            className="rounded bg-green-600 px-3 py-2 text-white hover:bg-green-700"
-            title="Send to WhatsApp"
-          >
-            Send WhatsApp
-          </button>
-          <button
-            onClick={printNow}
-            className="rounded bg-sky-600 px-3 py-2 text-white hover:bg-sky-700"
-          >
-            Print
-          </button>
-          <Link href="/inventory" className="rounded border px-3 py-2 hover:bg-neutral-50">
-            Back to Inventory
-          </Link>
-        </div>
-      </div>
+    <div className="space-y-4">
+      <div className="card">
+        <div className="flex items-center gap-3 mb-3">
+          <div className="text-lg font-semibold mr-auto">Estimate</div>
 
-      {/* Customer + Notes */}
-      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 no-print">
-        <div>
-          <label className="text-sm text-neutral-600">Customer (optional)</label>
-          <input
-            className="mt-1 w-full rounded border px-3 py-2"
-            value={customer}
-            onChange={(e) => setCustomer(e.target.value)}
-            placeholder="Walk-in / Company name"
-          />
-        </div>
-        <div>
-          <label className="text-sm text-neutral-600">Notes (optional)</label>
-          <input
-            className="mt-1 w-full rounded border px-3 py-2"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="Payment terms, validity, etc."
-          />
-        </div>
-      </div>
-
-      {/* Search box with suggestions (SKU / Name / (optional) Barcode) */}
-      <div className="no-print mt-6">
-        <div className="flex items-center gap-2">
-          <input
-            value={skuInput}
-            onChange={(e) => setSkuInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') addSkuFromInput();
-            }}
-            placeholder="Search by SKU, Name, or Barcode…"
-            className="w-full max-w-lg rounded border px-3 py-2"
-          />
-          <button
-            onClick={addSkuFromInput}
-            className="rounded border px-3 py-2 hover:bg-neutral-50"
-          >
-            Add
-          </button>
+          {/* Quick actions */}
+          <Link href="/inventory" className="rounded border px-3 py-2 hover:bg-neutral-50">Back to Inventory</Link>
+          <Button type="button" onClick={() => window.location.reload()}>Refresh</Button>
+          <Button type="button" className="bg-gray-700 hover:bg-gray-800" onClick={clearSeed} title="Remove large-selection seed stored in this browser">Clear Seed</Button>
+          <Button type="button" onClick={reimportSeed} title="Reload items from saved seed">Re-import Seed</Button>
         </div>
 
-        {/* suggestions dropdown */}
-        {skuInput && suggest.length > 0 && (
-          <div className="mt-2 w-full max-w-lg rounded border bg-white shadow-sm">
-            {suggest.map((it) => (
-              <button
-                key={it.sku}
-                type="button"
-                onClick={() => {
-                  addSkuOnce(it.sku, 1);
-                  setSkuInput('');
-                  setSuggest([]);
-                }}
-                className="block w-full text-left px-3 py-2 hover:bg-neutral-50"
-              >
-                <div className="font-medium">{it.sku}</div>
-                <div className="text-xs text-neutral-600">{it.name}</div>
-              </button>
-            ))}
-            {loadingSuggest && (
-              <div className="px-3 py-2 text-xs text-neutral-500">Searching…</div>
-            )}
+        {/* State banners */}
+        {seedUsed === 'localStorage' && (
+          <div className="mb-3 text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-3 py-2">
+            Loaded from localStorage seed (large selection). You can clear the seed after use.
           </div>
         )}
-      </div>
-
-      {/* Printable area */}
-      <div className="mt-6 border rounded">
-        <div className="p-4">
-          <div className="flex items-baseline justify-between">
-            <div>
-              <h2 className="text-lg font-semibold">Vinayak Hardware</h2>
-              <p className="text-xs text-neutral-600">Estimate / Quotation</p>
-              {customer && (
-                <p className="text-sm mt-1">
-                  <b>To:</b> {customer}
-                </p>
-              )}
-            </div>
-            <div className="text-right text-sm">
-              <div>Date: {new Date().toLocaleDateString('en-IN')}</div>
-              <div>Estimate #: {Date.now().toString().slice(-6)}</div>
-            </div>
+        {seedUsed === 'lines' && (
+          <div className="mb-3 text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded px-3 py-2">
+            Loaded from query parameter (<code>lines</code>).
           </div>
+        )}
+        {seedUsed === 'single' && (
+          <div className="mb-3 text-sm text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-3 py-2">
+            Loaded single item (backward compatible).
+          </div>
+        )}
 
-          <table className="w-full text-sm mt-4 border">
-            <thead className="bg-neutral-50">
-              <tr>
-                <th className="border px-2 py-1 text-left">SKU</th>
-                <th className="border px-2 py-1 text-left">Item</th>
-                <th className="border px-2 py-1 text-right">Qty</th>
-                <th className="border px-2 py-1 text-right">Price</th>
-                <th className="border px-2 py-1 text-right">Amount</th>
-                <th className="border px-2 py-1 no-print"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {lines.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="p-6 text-center text-neutral-500">
-                    Use the search above or click <em>Estimate</em> from Inventory
-                  </td>
-                </tr>
-              ) : (
-                lines.map((l, i) => {
-                  const amount = l.qty * l.price; // already whole ₹
-                  return (
-                    <tr key={l.sku} className="odd:bg-white even:bg-neutral-50/50">
-                      <td className="border px-2 py-1">{l.sku}</td>
-                      <td className="border px-2 py-1">{l.name}</td>
-                      <td className="border px-2 py-1 text-right">
+        {loading ? (
+          <div className="py-12 text-center text-gray-600">Loading…</div>
+        ) : errorMsg ? (
+          <div className="py-12 text-center text-red-600">{errorMsg}</div>
+        ) : view.length === 0 ? (
+          <div className="py-12 text-center text-gray-700">
+            No lines to estimate yet.<br />
+            Use <b>Inventory → Estimate (Selected)</b> or open with <code>?lines=SKU:QTY,SKU2:QTY2</code>
+          </div>
+        ) : (
+          <>
+            {/* Table */}
+            <div className="table-scroll" style={{ maxHeight: 720, overflow: 'auto' }}>
+              <table className="table">
+                <colgroup>
+                  <col style={{ width: 120 }} />  {/* SKU */}
+                  <col style={{ width: 260 }} />  {/* Item */}
+                  <col style={{ width: 80  }} />  {/* UoM */}
+                  <col style={{ width: 110 }} />  {/* Selling */}
+                  <col style={{ width: 100 }} />  {/* Qty */}
+                  <col style={{ width: 140 }} />  {/* Line Total */}
+                  <col style={{ width: 120 }} />  {/* Actions */}
+                </colgroup>
+                <thead className="sticky-head">
+                  <tr>
+                    <th>SKU</th>
+                    <th>Item</th>
+                    <th>UoM</th>
+                    <th className="num">Selling</th>
+                    <th className="num">Qty</th>
+                    <th className="num">Line Total</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {view.map(v => (
+                    <tr key={v.sku}>
+                      <td>{v.sku}</td>
+                      <td className="truncate-cell">{v.name}</td>
+                      <td>{v.uom_code || '-'}</td>
+                      <td className="num">{INR0.format(v.selling_price)}</td>
+                      <td className="num">
                         <input
-                          className="w-16 rounded border px-1 py-0.5 text-right"
+                          className="input text-right w-24"
                           type="number"
                           min={1}
-                          value={l.qty}
-                          onChange={(e) => {
-                            const n = Math.max(1, Number(e.target.value || 1));
-                            setLines((prev) =>
-                              prev.map((x, idx) => (idx === i ? { ...x, qty: n } : x))
-                            );
-                          }}
+                          max={500}
+                          value={v.qty}
+                          onChange={(e) => setQty(v.sku, parseInt(e.target.value || '1', 10))}
                         />
                       </td>
-                      <td className="border px-2 py-1 text-right">{INR0.format(l.price)}</td>
-                      <td className="border px-2 py-1 text-right">{INR0.format(amount)}</td>
-                      <td className="border px-2 py-1 text-center no-print">
+                      <td className="num">{INR0.format(v.lineTotal)}</td>
+                      <td>
                         <button
-                          className="rounded border px-2 py-0.5 text-xs hover:bg-red-50"
-                          onClick={() => remove(l.sku)}
+                          type="button"
+                          className="rounded bg-red-600 text-white px-2 py-1 text-sm hover:bg-red-700"
+                          onClick={() => removeLine(v.sku)}
+                          title="Remove line"
                         >
                           Remove
                         </button>
                       </td>
                     </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-
-          <div className="flex justify-end mt-4">
-            <div className="w-full sm:w-80 border rounded p-3">
-              <div className="flex justify-between">
-                <span>Subtotal</span>
-                <span>{INR0.format(totals.sub)}</span>
-              </div>
-              <div className="flex justify-between font-semibold mt-2 border-t pt-2">
-                <span>Grand Total</span>
-                <span>{INR0.format(totals.grand)}</span>
-              </div>
-              {notes && (
-                <div className="text-xs text-neutral-600 mt-2">
-                  <b>Notes:</b> {notes}
-                </div>
-              )}
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="font-semibold">
+                    <td colSpan={4}></td>
+                    <td className="num">Total</td>
+                    <td className="num">{INR0.format(total)}</td>
+                    <td></td>
+                  </tr>
+                </tfoot>
+              </table>
             </div>
-          </div>
 
-          <div className="text-center text-xs text-neutral-500 mt-8">
-            * Prices include GST and margin, rounded up to the next whole rupee.
-          </div>
-        </div>
+            {/* Next actions area */}
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button
+                type="button"
+                onClick={() => {
+                  // Optional: hand over to an Invoice/New page with a seed as well
+                  try {
+                    const out = view.map(v => ({ sku: v.sku, qty: v.qty }));
+                    localStorage.setItem('invoice-seed', JSON.stringify(out));
+                  } catch {}
+                  window.open('/invoice/new?seed=1', '_blank', 'noopener,noreferrer');
+                }}
+                className="bg-emerald-600 hover:bg-emerald-700"
+                title="(Optional) Continue to Invoice editor with these lines"
+              >
+                Continue to Invoice (seed)
+              </Button>
+
+              <Button
+                type="button"
+                onClick={() => {
+                  try { localStorage.removeItem('estimate-seed'); } catch {}
+                  alert('Estimate seed cleared.');
+                }}
+                className="bg-gray-700 hover:bg-gray-800"
+              >
+                Clear Seed Now
+              </Button>
+            </div>
+          </>
+        )}
       </div>
-
-      <style>{`
-        @media print {
-          .no-print { display: none !important; }
-          body { background: white; }
-          @page { margin: 10mm; }
-        }
-      `}</style>
     </div>
   );
 }
