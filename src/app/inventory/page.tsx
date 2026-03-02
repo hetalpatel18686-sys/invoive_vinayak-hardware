@@ -37,7 +37,7 @@ interface InvRow {
   gst_percent: number | null;
   margin_percent: number | null;
 
-  // NEW: optional selling price column from DB (if present)
+  // Optional selling price column (from DB if present)
   selling_price_per_unit?: number | null;
 }
 
@@ -93,7 +93,7 @@ function SortHeader({
 }
 
 /* ======================================================
-   Barcode + QR loaders
+   Barcode + QR loaders (for Thermal Labels)
    ====================================================== */
 const JSBARCODE_STATIC_URL =
   process.env.NEXT_PUBLIC_JSBARCODE_URL
@@ -249,7 +249,7 @@ function ThermalLabel2x1({
   name,
   sku,
   uom,
-  priceRupees, // NEW: show selling price
+  priceRupees, // NEW: print selling price on label
 }: {
   brand?: string;
   name: string;
@@ -292,7 +292,7 @@ function ThermalLabel2x1({
         {name}
       </div>
 
-      {/* Barcode + QR row */}
+      {/* Barcode + QR row (layout-safe) */}
       <div
         className="label-row"
         style={{
@@ -304,7 +304,7 @@ function ThermalLabel2x1({
           minHeight: 0,
         }}
       >
-        {/* Barcode */}
+        {/* Barcode stretches to remaining width */}
         <div className="barcode-wrap" style={{ flex: 1, minWidth: 0 }}>
           <BarcodeSvg
             value={sku}
@@ -319,7 +319,7 @@ function ThermalLabel2x1({
           />
         </div>
 
-        {/* QR */}
+        {/* QR has fixed physical size */}
         <div className="qr-wrap" style={{ width: '11mm', height: '11mm', flex: '0 0 11mm' }}>
           <QrSvg value={sku} sizeMm={11} />
         </div>
@@ -345,7 +345,7 @@ export default function InventoryPage() {
   const [locationScope, setLocationScope] = useState<LocationScope>('all_items');
   const [showZeroQtyLocations, setShowZeroQtyLocations] = useState<boolean>(false);
 
-  // selection for labels
+  // selection for labels & estimate
   const [sel, setSel] = useState<Sel>({});
   const [bulkQtyState, setBulkQtyState] = useState<number>(1);
   const setBulkQtyInput = (n: number) => setBulkQtyState(Math.max(1, Math.min(500, Math.floor(n || 1))));
@@ -361,7 +361,7 @@ export default function InventoryPage() {
     });
   };
 
-  // Try WITH selling_price_per_unit; if your env misses it, fallback w/o it (keeps data visible)
+  // === Safe items fetch: tries WITH selling_price_per_unit, falls back WITHOUT if not available ===
   const fetchItemsSafe = async () => {
     const q1 = await supabase
       .from('items')
@@ -370,7 +370,7 @@ export default function InventoryPage() {
 
     if (!q1.error) return q1;
 
-    // Fallback (no selling_price_per_unit)
+    // Fallback if that column doesn't exist in your env
     return await supabase
       .from('items')
       .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id, purchase_price, gst_percent, margin_percent')
@@ -432,7 +432,7 @@ export default function InventoryPage() {
           purchase_price: it.purchase_price ?? null,
           gst_percent: it.gst_percent ?? null,
           margin_percent: it.margin_percent ?? null,
-          selling_price_per_unit: it.selling_price_per_unit ?? null, // may be undefined if fallback
+          selling_price_per_unit: it.selling_price_per_unit ?? null,
         };
       });
 
@@ -483,7 +483,7 @@ export default function InventoryPage() {
 
       const unitCostGst = withGst(base, gst); // rounded ₹
 
-      // Prefer DB selling price when present; else (Purchase + GST) + Margin
+      // Prefer DB selling price when present; else compute Purchase+GST+Margin
       const sellingDb = r.selling_price_per_unit;
       const sellingPrice = Number.isFinite(Number(sellingDb)) && Number(sellingDb) > 0
         ? rupeeCeil(Number(sellingDb))
@@ -550,7 +550,7 @@ export default function InventoryPage() {
      PRINT thermal labels
      -------------------------------- */
   const handlePrintThermal = () => {
-    // Build selected items from current selection map
+    // Build selected items
     const selectedItems = (() => {
       const arr: { row: InvRow & { unitCostGst: number; sellingPrice: number; total_value: number }; qty: number }[] = [];
       for (const r of sorted) {
@@ -587,7 +587,6 @@ export default function InventoryPage() {
       display: flex; flex-direction: column; gap: 0.6mm; justify-content: space-between;
     }
 
-    /* ---- Layout-safe row ---- */
     .thermal-label-2x1 .label-row { display: flex; align-items: center; gap: 1mm; width: 100%; flex: 1; min-height: 0; }
     .thermal-label-2x1 .label-row .barcode-wrap { flex: 1 1 auto; min-width: 0; }
     .thermal-label-2x1 .label-row .qr-wrap { flex: 0 0 11mm; width: 11mm; height: 11mm; }
@@ -638,7 +637,7 @@ export default function InventoryPage() {
   };
 
   /* --------------------------------
-     CSV export uses rounded values (now includes Selling)
+     CSV export uses rounded values (includes Selling)
      -------------------------------- */
   const exportCsv = () => {
     const header = ['SKU','Item','UoM','Qty','Minimum','Purchase Price','GST %','Margin %','Unit Cost (GST)','Selling Price','Total Value (₹)','Locations'];
@@ -653,7 +652,7 @@ export default function InventoryPage() {
         String(r.gst_percent ?? 0),
         String(r.margin_percent ?? 0),
         String(r.unitCostGst),
-        String(r.sellingPrice),                 // NEW
+        String(r.sellingPrice),
         String(r.total_value),
         (r.locations_text ?? '').replaceAll('"','""'),
       ].map(v => `"${v}"`).join(',');
@@ -663,9 +662,10 @@ export default function InventoryPage() {
   };
 
   /* --------------------------------
-     Multi-estimate from selection (keeps your single-item Estimate link)
+     Estimate (Selected) — with LARGE SELECTION handling
      -------------------------------- */
   const estimateSelected = () => {
+    // 1) Gather selected items with qty
     const items = Object.entries(sel).flatMap(([id, s]) => {
       if (!s?.checked) return [];
       const row = sorted.find(r => r.id === id);
@@ -673,15 +673,46 @@ export default function InventoryPage() {
       const qty = Math.max(1, Math.min(500, Math.floor(s.qty || 1)));
       return [{ sku: row.sku, qty }];
     });
+
     if (items.length === 0) {
       alert('Select items (checkbox) and set quantities to create Estimate.');
       return;
     }
-    try {
-      localStorage.setItem('estimate-seed', JSON.stringify(items));
-    } catch {}
-    const linesParam = encodeURIComponent(items.map(i => `${i.sku}:${i.qty}`).join(','));
-    window.open(`/estimate/new?lines=${linesParam}`, '_blank', 'noopener,noreferrer');
+
+    // 2) Build lines param; if it gets too long, use seed fallback
+    const linesStr = items.map(i => `${i.sku}:${i.qty}`).join(',');
+    const urlMaxSafe = 1500; // conservative for browser URL length
+    let url = '';
+
+    if (linesStr.length <= urlMaxSafe) {
+      // Small/medium selection: use query param
+      const qs = encodeURIComponent(linesStr);
+      url = `/estimate/new?lines=${qs}`;
+    } else {
+      // Large selection: put items into localStorage seed
+      try {
+        localStorage.setItem('estimate-seed', JSON.stringify(items));
+      } catch (e) {
+        console.warn('Failed to store estimate-seed. Falling back to chunked URL.');
+      }
+      if (localStorage.getItem('estimate-seed')) {
+        // Use small URL and let Estimate page read from localStorage
+        url = `/estimate/new?seed=1`;
+      } else {
+        // Emergency fallback: chunk into multiple tabs (rare)
+        const CHUNK = 50; // 50 lines per tab to keep URL short
+        const chunks: typeof items[] = [];
+        for (let i = 0; i < items.length; i += CHUNK) chunks.push(items.slice(i, i + CHUNK));
+        chunks.forEach((chunk, idx) => {
+          const part = encodeURIComponent(chunk.map(c => `${c.sku}:${c.qty}`).join(','));
+          const u = `/estimate/new?lines=${part}&part=${idx+1}&of=${chunks.length}`;
+          window.open(u, '_blank', 'noopener,noreferrer');
+        });
+        return;
+      }
+    }
+
+    window.open(url, '_blank', 'noopener,noreferrer');
   };
 
   /* ========= RENDER ========= */
@@ -719,11 +750,18 @@ export default function InventoryPage() {
 
           <Button type="button" onClick={exportCsv}>Export CSV</Button>
           <Button type="button" onClick={loadInventory}>Refresh</Button>
-          <Button type="button" className="bg-emerald-600 hover:bg-emerald-700" onClick={estimateSelected}>
+
+          {/* NEW: Multi-line estimate from selected rows */}
+          <Button
+            type="button"
+            className="bg-emerald-600 hover:bg-emerald-700"
+            onClick={estimateSelected}
+            title="Create one Estimate with all selected items and quantities"
+          >
             Estimate (Selected)
           </Button>
 
-          {/* Your original single-item Estimate link stays: */}
+          {/* Your original single-row Estimate link is untouched */}
           <Link href="/estimate/new" className="rounded border px-3 py-2 hover:bg-neutral-50">Estimate</Link>
         </div>
 
@@ -781,7 +819,7 @@ export default function InventoryPage() {
                     name={row.name || row.sku}
                     sku={row.sku}
                     uom={row.uom_code}
-                    priceRupees={row.sellingPrice}   // NEW: ₹ on label
+                    priceRupees={row.sellingPrice}  // NEW: show selling price on label
                   />
                 ));
               })}
@@ -789,8 +827,8 @@ export default function InventoryPage() {
           </div>
         </div>
 
-        {/* Inventory table */}
-        {/* NEW: fixed max height so the horizontal scrollbar is visible after ~15 rows */}
+        {/* Inventory table with alignment + delete + estimate */}
+        {/* Keep horizontal scrollbar reachable after ~15 rows */}
         <div className="table-scroll" style={{ maxHeight: 720, overflow: 'auto' }}>
           <table className="inventory-table">
             {/* Exact widths per column */}
