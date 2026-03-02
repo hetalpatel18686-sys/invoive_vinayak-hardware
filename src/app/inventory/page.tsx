@@ -662,16 +662,26 @@ export default function InventoryPage() {
   };
 
   /* --------------------------------
-     Estimate (Selected) — with LARGE SELECTION handling
+     Estimate (Selected) — OPTION A: send FULL details in seed
      -------------------------------- */
   const estimateSelected = () => {
-    // 1) Gather selected items with qty
+    // Build selected items with ALL details needed by Estimate page (no DB reads)
     const items = Object.entries(sel).flatMap(([id, s]) => {
       if (!s?.checked) return [];
       const row = sorted.find(r => r.id === id);
       if (!row || !row.sku) return [];
       const qty = Math.max(1, Math.min(500, Math.floor(s.qty || 1)));
-      return [{ sku: row.sku, qty }];
+
+      // Use the already-computed whole-rupee selling price
+      const selling = Math.max(0, Math.floor(Number((row as any).sellingPrice ?? 0)));
+
+      return [{
+        sku: row.sku,
+        qty,
+        name: row.name || row.sku,
+        uom_code: row.uom_code || '',
+        selling, // whole-rupee price to show on Estimate
+      }];
     });
 
     if (items.length === 0) {
@@ -679,40 +689,12 @@ export default function InventoryPage() {
       return;
     }
 
-    // 2) Build lines param; if it gets too long, use seed fallback
-    const linesStr = items.map(i => `${i.sku}:${i.qty}`).join(',');
-    const urlMaxSafe = 1500; // conservative for browser URL length
-    let url = '';
+    try {
+      localStorage.setItem('estimate-seed', JSON.stringify(items));
+    } catch {}
 
-    if (linesStr.length <= urlMaxSafe) {
-      // Small/medium selection: use query param
-      const qs = encodeURIComponent(linesStr);
-      url = `/estimate/new?lines=${qs}`;
-    } else {
-      // Large selection: put items into localStorage seed
-      try {
-        localStorage.setItem('estimate-seed', JSON.stringify(items));
-      } catch (e) {
-        console.warn('Failed to store estimate-seed. Falling back to chunked URL.');
-      }
-      if (localStorage.getItem('estimate-seed')) {
-        // Use small URL and let Estimate page read from localStorage
-        url = `/estimate/new?seed=1`;
-      } else {
-        // Emergency fallback: chunk into multiple tabs (rare)
-        const CHUNK = 50; // 50 lines per tab to keep URL short
-        const chunks: typeof items[] = [];
-        for (let i = 0; i < items.length; i += CHUNK) chunks.push(items.slice(i, i + CHUNK));
-        chunks.forEach((chunk, idx) => {
-          const part = encodeURIComponent(chunk.map(c => `${c.sku}:${c.qty}`).join(','));
-          const u = `/estimate/new?lines=${part}&part=${idx+1}&of=${chunks.length}`;
-          window.open(u, '_blank', 'noopener,noreferrer');
-        });
-        return;
-      }
-    }
-
-    window.open(url, '_blank', 'noopener,noreferrer');
+    // Always open with seed flag — Estimate reads seed and SKIPS DB
+    window.open(`/estimate/new?seed=1`, '_blank', 'noopener,noreferrer');
   };
 
   /* ========= RENDER ========= */
@@ -968,8 +950,8 @@ export default function InventoryPage() {
               </tr>
             </tfoot>
           </table>
-        </div>
+        </div>HOW IT IS SHOWING HERE AND WHY NOT SHOWING FROM THAT CODE
       </div>
     </div>
   );
-}
+} 
