@@ -6,7 +6,9 @@ import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 
-/* ---------------- Whole-rupee helpers ---------------- */
+/* =========================
+   Whole-rupee helpers
+   ========================= */
 const rupeeCeil = (n: number) => Math.ceil((n ?? 0) + Number.EPSILON);
 const INR0 = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 });
 
@@ -16,15 +18,18 @@ const withGst = (base: number, gstPct: number) =>
 const withGstAndMargin = (base: number, gstPct: number, marginPct: number) =>
   rupeeCeil(withGst(base ?? 0, gstPct ?? 0) * (1 + (marginPct ?? 0) / 100));
 
-/* ---------------- Branding (env overrides) ---------------- */
+/* =========================
+   Branding (env or defaults)
+   ========================= */
 const BRAND_NAME    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
 const BRAND_LOGO    = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png';
 const BRAND_ADDRESS = process.env.NEXT_PUBLIC_BRAND_ADDRESS  || 'Bilimora, Gandevi, Navsari, Gujarat, 396321';
 const BRAND_PHONE   = process.env.NEXT_PUBLIC_BRAND_PHONE    || '+91 7046826808';
 
-/* ---------------- Types ---------------- */
+/* =========================
+   Types
+   ========================= */
 interface EstimateLineReq { sku: string; qty: number; }
-
 interface ItemRow {
   id?: string;
   sku: string;
@@ -35,10 +40,35 @@ interface ItemRow {
   margin_percent: number | null;
   unit_cost: number | null;
   selling_price_per_unit?: number | null;
-  selling_price: number; // computed
+  selling_price: number; // computed whole-rupee
 }
 
-/* ---------------- Barcode / QR helpers ---------------- */
+/* =========================
+   SKU normalization helpers
+   ========================= */
+// Map any unicode dash to a plain ASCII hyphen
+function normalizeHyphens(s: string) {
+  // -, – (U+2013), — (U+2014), ‑ (U+2011), − (U+2212)
+  return s.replace(/[\u2010\u2011\u2012\u2013\u2014\u2212]/g, '-');
+}
+// Trim + collapse inner spaces; fix hyphens
+function canonicalSku(s: string) {
+  return normalizeHyphens(String(s || '').trim()).replace(/\s+/g, ' ');
+}
+// Build multiple variants to try to match DB rows
+function buildSkuVariants(s: string): string[] {
+  const c = canonicalSku(s);
+  const variants = new Set<string>([c, c.toUpperCase(), c.toLowerCase()]);
+  // Also try removing spaces in case DB saved without
+  variants.add(c.replace(/\s+/g, ''));
+  variants.add(c.toUpperCase().replace(/\s+/g, ''));
+  variants.add(c.toLowerCase().replace(/\s+/g, ''));
+  return Array.from(variants);
+}
+
+/* =========================
+   Barcode + QR (print only)
+   ========================= */
 const JSBARCODE_STATIC_URL =
   process.env.NEXT_PUBLIC_JSBARCODE_URL ||
   '/vendor/jsbarcode.min.js' ||
@@ -163,7 +193,9 @@ function QrSvg({ value, sizePx = 56 }: { value: string; sizePx?: number }) {
   return <div ref={ref} style={{ width: sizePx, height: sizePx }} />;
 }
 
-/* ---------------- Parse helpers ---------------- */
+/* =========================
+   Parse helpers
+   ========================= */
 function parseLinesParam(linesParam: string | null): EstimateLineReq[] {
   if (!linesParam) return [];
   return linesParam
@@ -172,59 +204,85 @@ function parseLinesParam(linesParam: string | null): EstimateLineReq[] {
     .filter(Boolean)
     .map(pair => {
       const [skuRaw, qtyRaw] = pair.split(':');
-      const sku = (skuRaw || '').trim();
+      const sku = canonicalSku(skuRaw || '');
       const qty = Math.max(1, Math.min(500, Math.floor(parseInt((qtyRaw || '1').trim(), 10) || 1)));
       return sku ? { sku, qty } : null;
     })
     .filter(Boolean) as EstimateLineReq[];
 }
 
-/**
- * Robust loader:
- *  1) try IN(skus) exact match
- *  2) for any missing skus, fetch individually with ILIKE (case-insensitive exact)
- */
+/* =========================
+   Robust item loader
+   ========================= */
 async function loadItemsForSkus(skusInput: string[]): Promise<ItemRow[]> {
-  const skus = Array.from(new Set(skusInput.map(s => (s ?? '').trim()).filter(Boolean)));
-  if (skus.length === 0) return [];
+  // Normalize incoming
+  const wanted = Array.from(new Set(skusInput.map(canonicalSku).filter(Boolean)));
+  if (wanted.length === 0) return [];
 
-  // 1) fast path: IN
-  let got: any[] = [];
+  // 1) Build variant list for a single IN() call
+  const variantSet = new Set<string>();
+  wanted.forEach(w => buildSkuVariants(w).forEach(v => variantSet.add(v)));
+  const variants = Array.from(variantSet);
+
+  // 2) Try IN() with all variants
+  let fetched: any[] = [];
   try {
     const { data, error } = await supabase
       .from('items')
       .select('id, sku, name, unit_cost, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
-      .in('sku', skus);
+      .in('sku', variants);
     if (error) throw error;
-    got = data ?? [];
+    fetched = data ?? [];
   } catch (e) {
     console.warn('[Estimate] IN fetch failed; will use ILIKE per sku:', e);
   }
 
-  // Index what we have
-  const bySku = new Map<string, any>((got || []).map((it: any) => [String(it.sku || '').trim(), it]));
+  // Index by a canonical key
+  const foundByCanon = new Map<string, any>();
+  for (const it of fetched) {
+    const key = canonicalSku(String(it?.sku || ''));
+    if (key) foundByCanon.set(key, it);
+  }
 
-  // 2) fill missing via ILIKE (exact, case-insensitive)
-  const missing = skus.filter(sku => !bySku.has(sku));
-  if (missing.length > 0) {
-    for (const sku of missing) {
-      try {
-        const { data, error } = await supabase
-          .from('items')
-          .select('id, sku, name, unit_cost, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
-          .ilike('sku', sku)  // exact string, case-insensitive
-          .limit(1);
-        if (error) throw error;
-        const it = (data ?? [])[0];
-        if (it?.sku) bySku.set(String(it.sku).trim(), it);
-      } catch (e) {
-        console.warn('[Estimate] ILIKE fetch failed for', sku, e);
+  // 3) ILIKE fallback for any still missing
+  const stillMissing = wanted.filter(w => !foundByCanon.has(w));
+  if (stillMissing.length > 0) {
+    for (const w of stillMissing) {
+      // Try exact-ish ILIKE with/without spaces
+      const tries = buildSkuVariants(w);
+      let hit: any = null;
+      for (const t of tries) {
+        try {
+          // First precise ILIKE (no %), then a wild %t% if needed
+          let { data, error } = await supabase
+            .from('items')
+            .select('id, sku, name, unit_cost, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
+            .ilike('sku', t)
+            .limit(1);
+          if (error) throw error;
+          hit = (data ?? [])[0] || null;
+          if (!hit) {
+            const { data: data2 } = await supabase
+              .from('items')
+              .select('id, sku, name, unit_cost, uom_id, purchase_price, gst_percent, margin_percent, selling_price_per_unit')
+              .ilike('sku', `%${t}%`)
+              .limit(1);
+            hit = (data2 ?? [])[0] || null;
+          }
+          if (hit) break;
+        } catch (e) {
+          console.warn('[Estimate] ILIKE fallback failed for', t, e);
+        }
+      }
+      if (hit?.sku) {
+        const key = canonicalSku(String(hit.sku));
+        if (key) foundByCanon.set(key, hit);
       }
     }
   }
 
-  // 3) UOM codes
-  const all = Array.from(bySku.values());
+  // 4) UOM codes
+  const all = Array.from(foundByCanon.values());
   const uomIds = Array.from(new Set(all.map((it: any) => it?.uom_id).filter(Boolean)));
   const uomMap = new Map<any, string>();
   if (uomIds.length > 0) {
@@ -236,16 +294,20 @@ async function loadItemsForSkus(skusInput: string[]): Promise<ItemRow[]> {
     }
   }
 
-  // 4) Normalize + compute selling
-  const normalized: ItemRow[] = skus.map(sku => {
-    const it = bySku.get(sku);
+  // 5) Return rows in the same order as requested `wanted`
+  const normalized: ItemRow[] = wanted.map(w => {
+    const it = foundByCanon.get(w);
     if (!it) {
       return {
-        sku,
+        sku: w,
         name: '(Unknown item)',
         uom_code: '',
-        purchase_price: null, gst_percent: null, margin_percent: null,
-        unit_cost: null, selling_price_per_unit: null, selling_price: 0,
+        purchase_price: null,
+        gst_percent: null,
+        margin_percent: null,
+        unit_cost: null,
+        selling_price_per_unit: null,
+        selling_price: 0,
       };
     }
     const base = Number(it.purchase_price ?? it.unit_cost ?? 0);
@@ -273,42 +335,36 @@ async function loadItemsForSkus(skusInput: string[]): Promise<ItemRow[]> {
   return normalized;
 }
 
-/* ---------------- Page ---------------- */
+/* =========================
+   Page
+   ========================= */
 export default function EstimatePage() {
   const sp = useSearchParams();
 
-  // Inputs
   const seedFlag   = sp?.get('seed')  || null;
   const linesParam = sp?.get('lines') || null;
-  const singleSku  = sp?.get('sku')   || null;  // legacy single
+  const singleSku  = sp?.get('sku')   || null;
   const singleQty  = sp?.get('qty')   || null;
 
-  // UI
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
-  const [seedUsed, setSeedUsed] = useState<'none'|'lines'|'localStorage'|'single'>('none');
-
-  // Lines + items
   const [lines, setLines] = useState<EstimateLineReq[]>([]);
   const [items, setItems] = useState<ItemRow[]>([]);
 
-  // Manual add
+  // manual add
   const [addSku, setAddSku] = useState('');
   const [addQty, setAddQty] = useState(1);
 
-  // Print extras
+  // print toggles
   const [showBarcode, setShowBarcode] = useState(true);
   const [showQr, setShowQr] = useState(false);
 
-  // Build request
   useEffect(() => {
     (async () => {
       try {
-        setLoading(true);
-        setErrorMsg('');
+        setLoading(true); setErrorMsg('');
 
         let req: EstimateLineReq[] = parseLinesParam(linesParam);
-        if (req.length > 0) setSeedUsed('lines');
 
         if (req.length === 0 && seedFlag) {
           try {
@@ -317,36 +373,33 @@ export default function EstimatePage() {
               const arr = JSON.parse(seed) as EstimateLineReq[];
               if (Array.isArray(arr) && arr.length > 0) {
                 req = arr.map(x => ({
-                  sku: String(x?.sku || '').trim(),
+                  sku: canonicalSku(x?.sku || ''),
                   qty: Math.max(1, Math.min(500, Math.floor(Number(x?.qty) || 1))),
                 })).filter(x => x.sku);
-                setSeedUsed('localStorage');
               }
             }
           } catch (e) {
-            console.warn('[Estimate] seed read failed:', e);
+            console.warn('[Estimate] seed parse failed:', e);
           }
         }
 
         if (req.length === 0 && (singleSku || singleQty)) {
-          const sku = (singleSku || '').trim();
+          const sku = canonicalSku(singleSku || '');
           const qty = Math.max(1, Math.min(500, Math.floor(parseInt(singleQty || '1', 10) || 1)));
-          if (sku) { req = [{ sku, qty }]; setSeedUsed('single'); }
+          if (sku) req = [{ sku, qty }];
         }
 
         if (req.length === 0) {
-          setLines([]); setItems([]); setSeedUsed('none'); setLoading(false); return;
+          setLines([]); setItems([]); setLoading(false); return;
         }
 
-        // Merge dups
+        // merge duplicates
         const mm = new Map<string, number>();
         for (const r of req) mm.set(r.sku, (mm.get(r.sku) || 0) + r.qty);
         const merged = Array.from(mm.entries()).map(([sku, qty]) => ({ sku, qty }));
-
         setLines(merged);
 
-        // Robust item load
-        const rows = await loadItemsForSkus(merged.map(r => r.sku));
+        const rows = await loadItemsForSkus(merged.map(m => m.sku));
         setItems(rows);
       } catch (e: any) {
         console.error(e);
@@ -358,11 +411,12 @@ export default function EstimatePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [linesParam, seedFlag, singleSku, singleQty]);
 
-  // View join
+  // join items + quantities
   const view = useMemo(() => {
-    const qtyBySku = new Map(lines.map(l => [l.sku, l.qty]));
+    const qtyBySku = new Map(lines.map(l => [canonicalSku(l.sku), l.qty]));
     return items.map(it => {
-      const qty = Math.max(1, Math.min(500, Math.floor(qtyBySku.get(it.sku) || 1)));
+      const q = qtyBySku.get(canonicalSku(it.sku)) ?? 1;
+      const qty = Math.max(1, Math.min(500, Math.floor(q || 1)));
       const lineTotal = rupeeCeil(qty * Number(it.selling_price || 0));
       return { ...it, qty, lineTotal };
     });
@@ -370,43 +424,50 @@ export default function EstimatePage() {
 
   const grand = useMemo(() => view.reduce((s, v) => s + v.lineTotal, 0), [view]);
 
-  // Handlers
+  // handlers
   const setQty = (sku: string, qty: number) => {
     const q = Math.max(1, Math.min(500, Math.floor(qty || 1)));
-    setLines(prev => prev.map(l => l.sku === sku ? { ...l, qty: q } : l));
+    const key = canonicalSku(sku);
+    setLines(prev => prev.map(l => canonicalSku(l.sku) === key ? { ...l, qty: q } : l));
   };
   const removeLine = (sku: string) => {
-    setLines(prev => prev.filter(l => l.sku !== sku));
-    setItems(prev => prev.filter(i => i.sku !== sku));
+    const key = canonicalSku(sku);
+    setLines(prev => prev.filter(l => canonicalSku(l.sku) !== key));
+    setItems(prev => prev.filter(i => canonicalSku(i.sku) !== key));
   };
   const addLineBySku = async () => {
-    const sku = (addSku || '').trim();
+    const sku = canonicalSku(addSku);
     const qty = Math.max(1, Math.min(500, Math.floor(addQty || 1)));
     if (!sku) return alert('Enter a SKU');
+
     try {
       setLoading(true);
       const rows = await loadItemsForSkus([sku]);
       const found = rows[0];
       if (!found || !found.sku) return alert(`Item not found: ${sku}`);
 
+      // merge/insert
       setLines(prev => {
-        const idx = prev.findIndex(l => l.sku === sku);
-        if (idx >= 0) {
-          const next = [...prev];
-          next[idx] = { sku, qty: Math.max(1, Math.min(500, (next[idx].qty || 0) + qty)) };
-          return next;
+        const exists = prev.find(l => canonicalSku(l.sku) === canonicalSku(found.sku));
+        if (exists) {
+          return prev.map(l => canonicalSku(l.sku) === canonicalSku(found.sku)
+            ? { sku: l.sku, qty: Math.max(1, Math.min(500, (l.qty || 0) + qty)) }
+            : l
+          );
         }
-        return [...prev, { sku, qty }];
+        return [...prev, { sku: found.sku, qty }];
       });
-      setItems(prev => prev.some(p => p.sku === found.sku) ? prev : [...prev, found]);
+      setItems(prev => prev.some(p => canonicalSku(p.sku) === canonicalSku(found.sku)) ? prev : [...prev, found]);
+
       setAddSku(''); setAddQty(1);
     } catch (e: any) {
       console.error(e);
       alert(e?.message || 'Add failed');
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+    }
   };
 
-  // Print only the estimate (branding + lines)
   const handlePrint = () => { try { window.print(); } catch {} };
 
   return (
@@ -422,7 +483,7 @@ export default function EstimatePage() {
         }
       `}</style>
 
-      {/* ---- Screen toolbar (not printed) ---- */}
+      {/* -------- Toolbar (screen only) -------- */}
       <div className="card no-print">
         <div className="flex flex-wrap items-end gap-3 mb-3">
           <div className="text-lg font-semibold mr-auto">Estimate</div>
@@ -443,17 +504,25 @@ export default function EstimatePage() {
         <div className="grid sm:grid-cols-3 gap-2">
           <div>
             <label className="label">Add by SKU</label>
-            <input className="input" placeholder="e.g. VH-001"
+            <input
+              className="input"
+              placeholder="e.g. VH-001"
               value={addSku}
               onChange={(e) => setAddSku(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') addLineBySku(); }} />
+              onKeyDown={(e) => { if (e.key === 'Enter') addLineBySku(); }}
+            />
           </div>
           <div>
             <label className="label">Qty</label>
-            <input className="input" type="number" min={1} max={500}
+            <input
+              className="input"
+              type="number"
+              min={1}
+              max={500}
               value={addQty}
               onChange={(e) => setAddQty(Math.max(1, Math.min(500, Math.floor(parseInt(e.target.value || '1', 10)))))}
-              onKeyDown={(e) => { if (e.key === 'Enter') addLineBySku(); }} />
+              onKeyDown={(e) => { if (e.key === 'Enter') addLineBySku(); }}
+            />
           </div>
           <div className="self-end">
             <Button type="button" onClick={addLineBySku}>Add Line</Button>
@@ -473,7 +542,7 @@ export default function EstimatePage() {
         </div>
       </div>
 
-      {/* ---- PRINT AREA (branding + lines only) ---- */}
+      {/* -------- PRINT AREA: branding + table only -------- */}
       <div className="print-area">
         <div className="mb-3 flex items-start gap-3">
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -513,7 +582,7 @@ export default function EstimatePage() {
               </thead>
               <tbody>
                 {view.map(v => (
-                  <tr key={v.sku}>
+                  <tr key={canonicalSku(v.sku)}>
                     <td>
                       <div className="flex flex-col gap-1">
                         <div>{v.sku}</div>
@@ -541,7 +610,7 @@ export default function EstimatePage() {
         )}
       </div>
 
-      {/* ---- Screen editable grid (hidden on print) ---- */}
+      {/* -------- Editable grid (screen), hidden on print -------- */}
       {view.length > 0 && (
         <div className="card no-print">
           <div className="overflow-auto">
@@ -559,7 +628,7 @@ export default function EstimatePage() {
               </thead>
               <tbody>
                 {view.map(v => (
-                  <tr key={v.sku}>
+                  <tr key={canonicalSku(v.sku)}>
                     <td>{v.sku}</td>
                     <td className="truncate-cell">{v.name}</td>
                     <td>{v.uom_code || '-'}</td>
