@@ -52,6 +52,9 @@ interface Row {
   location?: string; // selected location or typed "new" location
   use_custom_location?: boolean; // for return: true when typing "Other/New"
   loc_balances?: { name: string; qty: number }[]; // per-item balances
+
+  // FIX: Dedup repeated not-found alerts/attempts
+  last_sku_tried?: string;
 }
 
 // -------- Helpers (always round up to next rupee) --------
@@ -211,6 +214,8 @@ export default function NewInvoicePage() {
       issued_margin_pct: 0, return_qty: 0,
       // NEW
       location: '', use_custom_location: false, loc_balances: [],
+      // FIX
+      last_sku_tried: '',
     };
   }
 
@@ -319,11 +324,28 @@ export default function NewInvoicePage() {
   // refs to SKU inputs (for restoring focus after alert)
   const skuInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
-  // ----- set item by SKU (sale) — unit_price always ceil
-  // 🆕 added 'opts' to control alert behaviour and restore focus if not found
+  // ---------- NEW helper: pick default location ----------
+  function pickDefaultLocation(balances: { name: string; qty: number }[]): string {
+    if (!balances || balances.length === 0) return '';
+    const withStock = balances.filter(b => Number(b.qty || 0) > 0);
+    return (withStock[0]?.name) ?? balances[0].name ?? '';
+  }
+
+  // ----- set item by SKU (sale/return) — unit_price always ceil
+  // FIX: added 'opts' to control alert behaviour + dedup + auto-location default
   const setItemBySku = async (rowId: string, skuRaw: string, opts?: { silentNotFound?: boolean }) => {
     const sku = (skuRaw || '').trim();
     if (!sku) return;
+
+    // If a debounce timer exists for this row, clear it (prevent duplicate later)
+    if (skuTimersRef.current[rowId]) {
+      try { clearTimeout(skuTimersRef.current[rowId]); } catch {}
+      delete skuTimersRef.current[rowId];
+    }
+
+    const rowSnapshot = rows.find(r => r.id === rowId);
+    const alreadyTriedSame = rowSnapshot && rowSnapshot.last_sku_tried && rowSnapshot.last_sku_tried.trim().toLowerCase() === sku.toLowerCase();
+
     const { data, error } = await supabase
       .from('items')
       .select(
@@ -331,11 +353,13 @@ export default function NewInvoicePage() {
       )
       .ilike('sku', sku)
       .limit(1);
+
     if (error) return alert(error.message);
     const rec = (data ?? [])[0] as ItemDb | undefined;
 
     if (!rec) {
-      if (!opts?.silentNotFound) {
+      // FIX: Dedup alerts if the same SKU was just tried
+      if (!opts?.silentNotFound && !alreadyTriedSame) {
         alert(`No item found for SKU "${sku}"`);
         // Restore focus+select so user can correct immediately
         setTimeout(() => {
@@ -343,6 +367,8 @@ export default function NewInvoicePage() {
           if (el) { el.focus(); try { el.select(); } catch {} }
         }, 0);
       }
+      // Mark last tried to avoid repeat alert from blur/other triggers
+      setRows(prev => prev.map(r => r.id === rowId ? { ...r, last_sku_tried: sku } : r));
       return;
     }
 
@@ -350,10 +376,11 @@ export default function NewInvoicePage() {
     const balances = await loadLocBalances(rec.id);
 
     // Determine defaults (auto-fill) for GST and Margin
-    const autoGst = Number(
-      (rec.gst_percent ?? rec.tax_rate ?? 0)
-    );
+    const autoGst = Number((rec.gst_percent ?? rec.tax_rate ?? 0));
     const autoMargin = Number(rec.margin_percent ?? 0);
+
+    // FIX: auto-select default location (first with stock; else first)
+    const defaultLoc = pickDefaultLocation(balances);
 
     setRows(prev => prev.map(r => {
       if (r.id !== rowId) return r;
@@ -361,6 +388,14 @@ export default function NewInvoicePage() {
       const margin = Number.isFinite(autoMargin) ? autoMargin : 0;
       const calc = base * (1 + (margin || 0) / 100);
       const unit = ceilRupee(calc); // round up
+
+      // Decide auto location:
+      // - For sale: always set default location if blank
+      // - For return: prefill with default but user can switch to Other/New
+      const nextLocation = r.location && r.location.trim()
+        ? r.location
+        : defaultLoc;
+
       return {
         ...r,
         sku_input: rec.sku,
@@ -369,12 +404,12 @@ export default function NewInvoicePage() {
         uom_code,
         base_cost: base,
         tax_rate: Number.isFinite(autoGst) ? autoGst : Number(rec.tax_rate || 0),
-        margin_pct: margin,                // <-- auto-filled, but still editable
+        margin_pct: margin,                // auto-filled, but still editable
         unit_price: unit,
-        // NEW: reset location for this row + provide options
-        location: '',
+        location: nextLocation,            // FIX: auto-populate
         use_custom_location: false,
         loc_balances: balances,
+        last_sku_tried: rec.sku,           // FIX: mark as tried, so blur doesn't refire
       };
     }));
   };
@@ -409,7 +444,7 @@ export default function NewInvoicePage() {
 
   // ----- row setters (respect rounding rule)
   const setSkuInput = (rowId: string, text: string) => {
-    setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text } : r));
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text, /* FIX: new typing resets tried */ last_sku_tried: '' } : r));
 
     // Debounced lookup only in SALE + normal typing mode
     if (docType !== 'return' && !barcodeMode) {
@@ -417,6 +452,7 @@ export default function NewInvoicePage() {
 
       if (skuTimersRef.current[rowId]) {
         try { clearTimeout(skuTimersRef.current[rowId]); } catch {}
+        delete skuTimersRef.current[rowId];
       }
 
       if (trimmed) {
@@ -470,6 +506,7 @@ export default function NewInvoicePage() {
       issued_margin_pct: 0, return_qty: 0,
       // NEW:
       location: '', use_custom_location: false, loc_balances: [],
+      last_sku_tried: '',
     };
     setRows(prev => [...prev, newRow]);
     setTimeout(() => focusSku(newRow.id), 0);
@@ -544,6 +581,10 @@ export default function NewInvoicePage() {
         issued_margin_pct = baseNow > 0 ? Math.ceil(((Number(ln.unit_price || 0) - baseNow) / baseNow) * 100) : 0;
       }
 
+      // FIX: set default location for return rows too (user can change or type new)
+      const balances = balByItem[ln.item_id] || [];
+      const defaultLoc = pickDefaultLocation(balances);
+
       return {
         id: makeId(),
         sku_input: it?.sku || '',
@@ -557,10 +598,10 @@ export default function NewInvoicePage() {
         unit_price: Number(ln.unit_price || 0),
         issued_margin_pct,
         return_qty: 0,
-        // NEW: populate per-item location balances; no default selection
-        location: '',
+        location: defaultLoc || '',
         use_custom_location: false,
-        loc_balances: balByItem[ln.item_id] || [],
+        loc_balances: balances,
+        last_sku_tried: '',
       };
     });
 
@@ -680,13 +721,6 @@ export default function NewInvoicePage() {
     }
     return null;
   };
-
-  // ---------- NEW helper: pick default location ----------
-  function pickDefaultLocation(balances: { name: string; qty: number }[]): string {
-    if (!balances || balances.length === 0) return '';
-    const withStock = balances.filter(b => Number(b.qty || 0) > 0);
-    return (withStock[0]?.name) ?? balances[0].name ?? '';
-  }
 
   // ----- save invoice/return
   const savingLatch = () => {
@@ -821,22 +855,53 @@ export default function NewInvoicePage() {
   };
 
   // ----- open customer views
-  const openCustomerScreen = () => {
-    try { live.post(buildLivePayload()); } catch {}
+  const makeCustomerViewUrl = () => {
     const qs = new URLSearchParams();
     qs.set('display', 'customer');
-    const final = `${window.location.pathname}?${qs.toString()}`;
+    return `${window.location.origin}${window.location.pathname}?${qs.toString()}`;
+  };
+
+  const openCustomerScreen = () => {
+    try { live.post(buildLivePayload()); } catch {}
+    const final = makeCustomerViewUrl();
     const w = window.open(final, '_blank');
     if (!w) alert('Please allow pop-ups for this site to open the Customer Screen.');
   };
   const openCustomerPrint = () => {
-    // NOTE: auto print removed — just open the Customer View; user can click Print manually there
     try { live.post(buildLivePayload()); } catch {}
-    const qs = new URLSearchParams();
-    qs.set('display', 'customer');
-    const final = `${window.location.pathname}?${qs.toString()}`;
+    const final = makeCustomerViewUrl();
     const w = window.open(final, '_blank');
     if (!w) alert('Please allow pop-ups for this site to open the Print view.');
+  };
+
+  // ----- WhatsApp share (Editor + Customer View)
+  // FIX: single helper usable in both views
+  const shareWhatsApp = (fromCustomerView?: boolean) => {
+    try { live.post(buildLivePayload()); } catch {}
+    // Compute values depending on current view/state
+    const invNo =
+      (fromCustomerView ? (liveState?.header?.invoiceNo ?? null) : null)
+      ?? (invoiceNoJustSaved ?? null);
+
+    const grand =
+      (fromCustomerView ? (liveState?.totals?.grand ?? 0) : 0)
+      || (invoiceGrandTotalAtSave ?? totals.grand);
+
+    const url = makeCustomerViewUrl();
+    const text = `${brandName} • ${docType === 'return' ? 'Return' : 'Invoice'}${invNo ? ' #' + invNo : ''}\nTotal: ₹ ${Number(grand || 0).toFixed(2)}\n${url}`;
+
+    // Try native share first (best on mobile)
+    if ((navigator as any).share) {
+      try {
+        (navigator as any).share({ text, url });
+        return;
+      } catch (e) {
+        // fall back to WhatsApp web link
+      }
+    }
+
+    const wa = `https://wa.me/?text=${encodeURIComponent(text)}`;
+    window.open(wa, '_blank', 'noopener,noreferrer');
   };
 
   // ===== Auto-generate QR (UPI read-only) =====
@@ -927,7 +992,6 @@ export default function NewInvoicePage() {
         window.open(url, '_blank', 'noopener,noreferrer');
       }
 
-      // ⚠️ Auto-print removed — no window.print() here
     } catch (err: any) {
       console.error(err);
       alert(err?.message || String(err));
@@ -1017,14 +1081,15 @@ export default function NewInvoicePage() {
           location: '',
           use_custom_location: false,
           loc_balances: [],
+          last_sku_tried: '',
         };
         setRows(prev => [...prev, target!]);
       }
 
-      // Fill via the common setter (it sets GST/Margin + pricing)
+      // Fill via the common setter (it sets GST/Margin + pricing + default location)
       await setItemBySku(target.id, code, { silentNotFound: true });
 
-      // Set qty = scanQty and auto-select default location (if any)
+      // Set qty = scanQty and ensure location is auto-selected (if still blank)
       setQty(target.id, addQty);
       setRows(prev =>
         prev.map(r => {
@@ -1063,17 +1128,17 @@ export default function NewInvoicePage() {
           /* Shared numeric alignment for screen & print */
           .num { text-align: right; font-variant-numeric: tabular-nums; }
 
- /* Fix alignment of Qty, Unit, Tax%, Line Total */
-  table.table th,
-  table.table td {
-    padding: 4px 8px !important;
-    vertical-align: middle !important;
-  }
+          /* Fix alignment of Qty, Unit, Tax%, Line Total */
+          table.table th,
+          table.table td {
+            padding: 4px 8px !important;
+            vertical-align: middle !important;
+          }
 
-  table.table .num {
-    text-align: right !important;
-    white-space: nowrap;
-  }
+          table.table .num {
+            text-align: right !important;
+            white-space: nowrap;
+          }
 
           @media print {
             @page { margin: 8mm; }
@@ -1106,6 +1171,12 @@ export default function NewInvoicePage() {
           </Button>
 
           <Button type="button" onClick={() => window.print()}>Print</Button>
+
+          {/* NEW: WhatsApp share from customer view */}
+          <Button type="button" onClick={() => shareWhatsApp(true)} className="bg-[#25D366] hover:bg-[#1ebe57]">
+            WhatsApp
+          </Button>
+
           <Button type="button" onClick={() => window.close()} className="bg-gray-700 hover:bg-gray-800">Close</Button>
         </div>
 
@@ -1474,6 +1545,12 @@ export default function NewInvoicePage() {
 
             <Button type="button" onClick={openCustomerScreen}>Open Customer Screen</Button>
             <Button type="button" onClick={openCustomerPrint} className="bg-gray-700 hover:bg-gray-800">Print</Button>
+
+            {/* NEW: WhatsApp share (Editor) */}
+            <Button type="button" onClick={() => shareWhatsApp(false)} className="bg-[#25D366] hover:bg-[#1ebe57]">
+              WhatsApp
+            </Button>
+
             <Button type="button" onClick={handleNewInvoice} className="bg-gray-700 hover:bg-gray-800">
               New {isReturn ? 'Return' : 'Invoice'}
             </Button>
@@ -1633,14 +1710,21 @@ export default function NewInvoicePage() {
                           value={r.sku_input}
                           onChange={(e) => setSkuInput(r.id, e.target.value)}
                           onKeyDown={(e) => {
-                            if (e.key === 'Enter') { 
-                              e.preventDefault(); 
-                              setItemBySku(r.id, r.sku_input); 
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              const sku = r.sku_input.trim();
+                              // FIX: mark as tried to avoid blur-dupe
+                              setRows(prev => prev.map(x => x.id === r.id ? { ...x, last_sku_tried: sku } : x));
+                              setItemBySku(r.id, sku);
                             }
                           }}
                           onBlur={() => {
+                            // FIX: only lookup on blur if this SKU wasn't tried yet
                             const v = (r.sku_input || '').trim();
-                            if (!r.item_id && v) setItemBySku(r.id, v);
+                            if (!r.item_id && v && v.toLowerCase() !== (r.last_sku_tried || '').toLowerCase()) {
+                              setRows(prev => prev.map(x => x.id === r.id ? { ...x, last_sku_tried: v } : x));
+                              setItemBySku(r.id, v);
+                            }
                           }}
                           readOnly={barcodeMode}
                           title={barcodeMode ? 'Barcode Mode ON: SKU is read-only. Scan to add/increase.' : undefined}
@@ -1777,6 +1861,10 @@ export default function NewInvoicePage() {
                 {saving ? 'Saving…' : isReturn ? 'Save Return' : 'Save Invoice'}
               </Button>
               <Button type="button" onClick={openCustomerPrint} className="bg-gray-700 hover:bg-gray-800">Print</Button>
+
+              {/* NEW: WhatsApp share button in editor totals area (same as header) */}
+              <Button type="button" onClick={() => shareWhatsApp(false)} className="bg-[#25D366] hover:bg-[#1ebe57]">WhatsApp</Button>
+
               <Button
                 type="button"
                 onClick={() => {
