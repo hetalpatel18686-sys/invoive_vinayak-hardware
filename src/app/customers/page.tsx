@@ -11,18 +11,23 @@ interface Customer {
   first_name: string;
   last_name: string;
   phone?: string | null;
-  street_name?: string | null;   // NEW
-  village_town?: string | null;  // NEW
+  street_name?: string | null;
+  village_town?: string | null;
   city?: string | null;
   state?: string | null;
   postal_code?: string | null;
 }
 
 export default function Customers() {
+  // --- role guard state ---
+  const [checkingRole, setCheckingRole] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  // --- page data state ---
   const [list, setList] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Form state (no email; new street_name & village_town)
+  // Form state
   const [form, setForm] = useState({
     first_name: '',
     last_name: '',
@@ -34,25 +39,75 @@ export default function Customers() {
     postal_code: '',
   });
 
+  // ===== 1) ADMIN-ONLY GUARD =====
+  useEffect(() => {
+    (async () => {
+      // Must be signed in
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        window.location.href = '/login';
+        return;
+      }
+
+      // Get role from user_metadata first, fallback to profiles table
+      let role: string | undefined = (session.user.user_metadata as any)?.role;
+      if (!role) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', session.user.id)
+          .single();
+        role = profile?.role ?? 'user';
+      }
+
+      if (role !== 'admin') {
+        // Normal users are sent to Invoice
+        window.location.href = '/invoice';
+        return;
+      }
+
+      // Admin confirmed
+      setIsAdmin(true);
+      setCheckingRole(false);
+    })();
+  }, []);
+
+  // ===== 2) LOAD DATA (only when admin) =====
   const load = async () => {
-    setLoading(true);
-    const { data, error } = await supabase
-      .from('customers')
-      .select('id, first_name, last_name, phone, street_name, village_town, city, state, postal_code')
-      .order('created_at', { ascending: false });
-    if (!error && data) setList(data as Customer[]);
-    setLoading(false);
+    try {
+      setLoading(true);
+      const { data, error } = await supabase
+        .from('customers')
+        .select(
+          'id, first_name, last_name, phone, street_name, village_town, city, state, postal_code'
+        )
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setList((data || []) as Customer[]);
+    } catch (err: any) {
+      alert(err.message ?? 'Failed to load customers');
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
-    load();
-  }, []);
+    if (isAdmin) {
+      load();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin]);
 
+  // ===== 3) ADD NEW CUSTOMER =====
   const add = async (e: React.FormEvent) => {
     e.preventDefault();
-    const payload = { ...form };
-    const { error } = await supabase.from('customers').insert([payload]);
-    if (!error) {
+    try {
+      const payload = { ...form };
+      const { error } = await supabase.from('customers').insert([payload]);
+      if (error) throw error;
+
+      // reset form
       setForm({
         first_name: '',
         last_name: '',
@@ -63,12 +118,26 @@ export default function Customers() {
         state: '',
         postal_code: '',
       });
+
+      // reload list
       load();
-    } else {
-      alert(error.message);
+    } catch (err: any) {
+      alert(err.message ?? 'Failed to save customer');
     }
   };
 
+  // While checking role, show a tiny placeholder (prevents flicker)
+  if (checkingRole) {
+    return (
+      <Protected>
+        <div className="card">
+          <p>Checking permission…</p>
+        </div>
+      </Protected>
+    );
+  }
+
+  // Render the page for admin
   return (
     <Protected>
       <div className="grid md:grid-cols-3 gap-4">
