@@ -3,14 +3,14 @@
 export const dynamic = 'force-dynamic';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 import Protected from '@/components/Protected';
 
 /* =============================
-   Minimal types for Estimate UI
+   Types
    ============================= */
-
 interface Customer {
   id: string;
   first_name: string;
@@ -40,25 +40,25 @@ interface Row {
   item_id: string;
   description: string;
   uom_code: string;
-  base_cost: number;     // current cost from item
+  base_cost: number;   // "current cost" as base reference
+  gst_pct: number;     // GST % (hidden in UI)
+  margin_pct: number;  // Margin % (hidden in UI)
   qty: number;
 
-  // Hidden in UI, used for computation only
-  gst_pct: number;       // GST% (from item.gst_percent || item.tax_rate || 0)
-  margin_pct: number;    // Margin% (from item.margin_percent || 0)
-
-  // internal UI helpers
+  // internal helper
   last_sku_tried?: string;
 }
 
-function ceilRupee(n: number) {
-  const x = Number(n || 0);
-  return Number.isFinite(x) ? Math.ceil(x) : 0;
-}
+/* =============================
+   Utils
+   ============================= */
+const ceilRupee = (n: number) => Math.ceil((Number(n) || 0) + Number.EPSILON);
+
 function safeUomCode(u: ItemDb['uom']): string {
   if (Array.isArray(u)) return u[0]?.code ?? '';
   return (u as any)?.code ?? '';
 }
+
 function makeId(): string {
   try {
     // @ts-ignore
@@ -80,32 +80,9 @@ function oneLineAddress(c: Partial<Customer>) {
     .join(', ');
 }
 
-/* =========================================
-   Lightweight bridge from Inventory → Here
-   - Inventory page can post localStorage:
-     localStorage.setItem('inventory-selected-item', JSON.stringify({ sku, id? }))
-   - Or navigate with ?add_sku=SKU
-   ========================================= */
-class StorageBus {
-  key: string;
-  constructor(key = 'inventory-selected-item') { this.key = key; }
-  on(fn: (payload: any) => void) {
-    const handler = (ev: StorageEvent) => {
-      try {
-        if (ev.key !== this.key || !ev.newValue) return;
-        const payload = JSON.parse(ev.newValue);
-        fn(payload);
-      } catch (e) { console.error('StorageBus.on parse error', e); }
-    };
-    window.addEventListener('storage', handler);
-    return () => window.removeEventListener('storage', handler);
-  }
-}
-const fromInventory = new StorageBus('inventory-selected-item');
-
-/* ============================
-   QR cache per-SKU (data URLs)
-   ============================ */
+/* =============================
+   QR generator (cached)
+   ============================= */
 const qrCache = new Map<string, string>();
 async function getQrDataUrl(value: string) {
   const v = (value || '').trim();
@@ -117,25 +94,25 @@ async function getQrDataUrl(value: string) {
     const dataUrl = await toDataURL(v, { margin: 0, scale: 4 });
     qrCache.set(v, dataUrl);
     return dataUrl;
-  } catch (e) {
-    console.error('QR generate failed', e);
+  } catch {
     return '';
   }
 }
 
-/* ============================
-   Estimate Page (No Stock/Pay)
-   ============================ */
+/* =============================
+   Main: Estimate Page
+   ============================= */
 export default function EstimatePage() {
-  // Brand
+  // Brand (optional)
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
   const brandLogo    = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png';
   const brandAddress = process.env.NEXT_PUBLIC_BRAND_ADDRESS  || 'Bilimora, Gandevi, Navsari, Gujarat, 396321';
   const brandPhone   = process.env.NEXT_PUBLIC_BRAND_PHONE    || '+91 7046826808';
 
-  // Header (Estimate)
+  // Header
   const [issuedAt, setIssuedAt] = useState<string>(() => new Date().toISOString().slice(0,10));
-  const [estimateNo, setEstimateNo] = useState<string>(''); // can be auto on save
+  const [estimateNo, setEstimateNo] = useState<string>('');
+  const [notes, setNotes] = useState('');
 
   // Customer
   const [customerPhone, setCustomerPhone] = useState('');
@@ -143,32 +120,28 @@ export default function EstimatePage() {
   const [customerName, setCustomerName] = useState<string>('');
   const [customerAddress1Line, setCustomerAddress1Line] = useState<string>('');
   const [showCreateCustomer, setShowCreateCustomer] = useState(false);
-
   const [newCust, setNewCust] = useState({
     first_name: '', last_name: '', phone: '',
     street_name: '', village_town: '', city: '', state: '', postal_code: '',
   });
 
-  // Rows
+  // Lines
   const [rows, setRows] = useState<Row[]>([]);
-  const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
 
-  // Barcode Scan (optional)
+  // QR per row
+  const [qrMap, setQrMap] = useState<Record<string, string>>({});
+
+  // Optional barcode scan mode
   const [barcodeMode, setBarcodeMode] = useState(false);
   const barcodeInputRef = useRef<HTMLInputElement | null>(null);
   const [barcodeBuffer, setBarcodeBuffer] = useState('');
   const [scanQty, setScanQty] = useState<number>(1);
-
-  // QR cache state for rendering (rowId -> dataUrl)
-  const [qrMap, setQrMap] = useState<Record<string, string>>({});
-
-  // focus map for SKU inputs
   const skuInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
+  // Boot with one row
   useEffect(() => { setRows([makeEmptyRow()]); }, []);
-
   function makeEmptyRow(): Row {
     return {
       id: makeId(),
@@ -177,89 +150,130 @@ export default function EstimatePage() {
       description: '',
       uom_code: '',
       base_cost: 0,
-      qty: 1,
       gst_pct: 0,
       margin_pct: 0,
+      qty: 1,
       last_sku_tried: '',
     };
   }
 
-  // Derived totals (only Line Total shown; includes cost+gst+margin)
+  /* =================================
+     Compute Totals
+     ================================= */
+  function computeUnit(base: number, gst: number, margin: number) {
+    // As requested: current cost + GST + Margin (additive on base)
+    const b = Number(base || 0);
+    const g = Number(gst || 0);
+    const m = Number(margin || 0);
+    return ceilRupee(b + b * g / 100 + b * m / 100);
+  }
   const totals = useMemo(() => {
     let grand = 0;
     for (const r of rows) {
-      if (!r.item_id || !r.qty) continue;
-      const perUnit = computeUnitEstimate(r.base_cost, r.gst_pct, r.margin_pct);
-      grand += ceilRupee(perUnit * r.qty);
+      if (!r.item_id && !r.sku_input) continue;
+      const perUnit = computeUnit(r.base_cost, r.gst_pct, r.margin_pct);
+      grand += ceilRupee(perUnit * (Number(r.qty) || 0));
     }
     return { grand: ceilRupee(grand) };
   }, [rows]);
 
-  // --- Computation helpers ---
-  function computeUnitEstimate(base: number, gst: number, margin: number) {
-    const b = Number(base || 0);
-    const g = Number(gst || 0);
-    const m = Number(margin || 0);
-    // As requested: current cost + GST + margin (additive on base)
-    const unit = b + (b * g / 100) + (b * m / 100);
-    return ceilRupee(unit);
-  }
-
-  // ====== SKU lookup / set ======
-  const SKU_LOOKUP_DEBOUNCE_MS = 250;
-  const skuTimersRef = useRef<Record<string, any>>({});
-
+  /* =================================
+     Seed from Inventory (Estimate Selected)
+     - Inventory sets localStorage.estimate-seed = [{ sku, qty, name, uom_code, selling }]
+     - Opens /estimate/new?seed=1
+     ================================= */
   useEffect(() => {
-    return () => {
-      const timers = skuTimersRef.current || {};
-      Object.keys(timers).forEach(k => {
-        try { clearTimeout(timers[k]); } catch {}
-      });
-    };
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      if (sp.get('seed') !== '1') return;
+
+      const raw = localStorage.getItem('estimate-seed');
+      if (!raw) return;
+
+      const items = JSON.parse(raw);
+      if (!Array.isArray(items) || items.length === 0) return;
+
+      const seeded = items
+        .map((it: any) => ({
+          id: makeId(),
+          sku_input: String(it.sku || it.SKU || ''),
+          item_id: '', // optional (we can fill later via lookup if you want)
+          description: String(it.name || it.sku || ''),
+          uom_code: String(it.uom_code || ''),
+          // Treat Inventory "selling" (already cost+GST+margin) as unit price by setting it as base_cost
+          // and zeroing gst/margin → perUnit = base_cost
+          base_cost: Number(it.selling || 0),
+          gst_pct: 0,
+          margin_pct: 0,
+          qty: Math.max(1, Number(it.qty || 1)),
+          last_sku_tried: String(it.sku || ''),
+        }))
+        .filter(r => !!r.sku_input);
+
+      if (seeded.length === 0) return;
+
+      setRows(seeded);
+
+      // Preload QR images
+      Promise.all(seeded.map(async r => [r.id, await getQrDataUrl(r.sku_input)] as const))
+        .then(pairs => {
+          const obj: Record<string, string> = {};
+          for (const [id, url] of pairs) obj[id] = url || '';
+          setQrMap(prev => ({ ...prev, ...obj }));
+        })
+        .catch(() => {});
+
+      // Optional: clear seed to avoid reapplying on refresh
+      // localStorage.removeItem('estimate-seed');
+    } catch (e) {
+      console.error('Failed to read estimate-seed:', e);
+    }
   }, []);
 
-  const setSkuInput = (rowId: string, text: string) => {
-    setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text, last_sku_tried: '' } : r));
+  /* =================================
+     Support single add via ?sku=...&qty=...
+     ================================= */
+  useEffect(() => {
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      const sku = sp.get('sku');
+      const qty = Number(sp.get('qty') || '1');
+      if (!sku) return;
 
-    if (!barcodeMode) {
-      const trimmed = (text || '').trim();
-
-      if (skuTimersRef.current[rowId]) {
-        try { clearTimeout(skuTimersRef.current[rowId]); } catch {}
-        delete skuTimersRef.current[rowId];
+      // use first empty or add new
+      let target = rows.find(r => !r.item_id && !r.sku_input);
+      if (!target) {
+        target = makeEmptyRow();
+        setRows(prev => [...prev, target!]);
       }
+      setItemBySku(target.id, sku, { silentNotFound: false }).then(() => {
+        setQty(target!.id, Math.max(1, qty));
+      });
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-      if (trimmed) {
-        skuTimersRef.current[rowId] = setTimeout(() => {
-          if (trimmed.length >= 3) {
-            setItemBySku(rowId, trimmed, { silentNotFound: true });
-          }
-        }, SKU_LOOKUP_DEBOUNCE_MS);
-      }
-    }
-  };
-
+  /* =================================
+     SKU lookup (DB) and updates
+     ================================= */
   const setItemBySku = async (rowId: string, skuRaw: string, opts?: { silentNotFound?: boolean }) => {
     const sku = (skuRaw || '').trim();
     if (!sku) return;
 
-    if (skuTimersRef.current[rowId]) {
-      try { clearTimeout(skuTimersRef.current[rowId]); } catch {}
-      delete skuTimersRef.current[rowId];
-    }
-
     const rowSnapshot = rows.find(r => r.id === rowId);
-    const alreadyTriedSame = rowSnapshot && rowSnapshot.last_sku_tried && rowSnapshot.last_sku_tried.trim().toLowerCase() === sku.toLowerCase();
+    const alreadyTriedSame =
+      rowSnapshot?.last_sku_tried?.trim().toLowerCase() === sku.toLowerCase();
 
     const { data, error } = await supabase
       .from('items')
-      .select(
-        'id, sku, name, unit_cost, tax_rate, gst_percent, margin_percent, uom:units_of_measure ( code )'
-      )
+      .select('id, sku, name, unit_cost, tax_rate, gst_percent, margin_percent, uom:units_of_measure ( code )')
       .ilike('sku', sku)
       .limit(1);
 
-    if (error) return alert(error.message);
+    if (error) {
+      alert(error.message);
+      return;
+    }
     const rec = (data ?? [])[0] as ItemDb | undefined;
 
     if (!rec) {
@@ -270,7 +284,7 @@ export default function EstimatePage() {
           if (el) { el.focus(); try { el.select(); } catch {} }
         }, 0);
       }
-      setRows(prev => prev.map(r => r.id === rowId ? { ...r, last_sku_tried: sku } : r));
+      setRows(prev => prev.map(r => r.id === rowId ? ({ ...r, last_sku_tried: sku }) : r));
       return;
     }
 
@@ -293,41 +307,30 @@ export default function EstimatePage() {
       };
     }));
 
-    // Generate QR for this SKU (for display)
     const qr = await getQrDataUrl(rec.sku);
     setQrMap(prev => ({ ...prev, [rowId]: qr }));
   };
 
-  const addRow = () => {
-    const newRow: Row = makeEmptyRow();
-    setRows(prev => [...prev, newRow]);
-    setTimeout(() => focusSku(newRow.id), 0);
-  };
-
-  const removeRow = (rowId: string) => setRows(prev => prev.filter(r => r.id !== rowId));
-
+  const setSkuInput = (rowId: string, text: string) =>
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text, last_sku_tried: '' } : r));
   const setDescription = (rowId: string, desc: string) =>
     setRows(prev => prev.map(r => r.id === rowId ? { ...r, description: desc } : r));
-
   const setQty = (rowId: string, qty: number) =>
     setRows(prev => prev.map(r => r.id === rowId ? { ...r, qty: qty || 0 } : r));
 
-  const focusSku = (rowId: string) => {
-    requestAnimationFrame(() => {
-      const el = skuInputRefs.current[rowId];
-      if (el) {
-        el.focus();
-        try { el.select(); } catch {}
-      } else {
-        setTimeout(() => {
-          const el2 = skuInputRefs.current[rowId];
-          if (el2) { el2.focus(); try { el2.select(); } catch {} }
-        }, 50);
-      }
-    });
+  const addRow = () => {
+    const newRow: Row = makeEmptyRow();
+    setRows(prev => [...prev, newRow]);
+    setTimeout(() => {
+      const el = skuInputRefs.current[newRow.id];
+      if (el) { el.focus(); try { el.select(); } catch {} }
+    }, 0);
   };
+  const removeRow = (rowId: string) => setRows(prev => prev.filter(r => r.id !== rowId));
 
-  // Add item via barcode scan
+  /* =================================
+     Barcode scan (optional)
+     ================================= */
   useEffect(() => {
     if (!barcodeMode) return;
     const t = setTimeout(() => barcodeInputRef.current?.focus(), 0);
@@ -337,15 +340,12 @@ export default function EstimatePage() {
   const processBarcode = async (codeRaw: string) => {
     const code = (codeRaw || '').trim();
     if (!code) return;
-
     const addQty = Number.isFinite(Number(scanQty)) && Number(scanQty) > 0 ? Number(scanQty) : 1;
 
     try {
       const { data, error } = await supabase
         .from('items')
-        .select(
-          'id, sku, name, unit_cost, tax_rate, gst_percent, margin_percent, uom:units_of_measure ( code )'
-        )
+        .select('id, sku, name, unit_cost, tax_rate, gst_percent, margin_percent, uom:units_of_measure ( code )')
         .ilike('sku', code)
         .limit(1);
       if (error) throw error;
@@ -357,7 +357,7 @@ export default function EstimatePage() {
         return;
       }
 
-      // If existing row for item, bump qty
+      // If exists, bump qty
       const existing = rows.find(r => r.item_id === rec.id);
       if (existing) {
         setRows(prev => prev.map(r => {
@@ -370,15 +370,14 @@ export default function EstimatePage() {
             margin_pct: Number(rec.margin_percent ?? r.margin_pct ?? 0),
           };
         }));
-        // ensure QR cached
         const qr = await getQrDataUrl(rec.sku);
         setQrMap(prev => ({ ...prev, [existing.id]: qr }));
         setTimeout(() => barcodeInputRef.current?.focus(), 0);
         return;
       }
 
-      // else use first empty row or add a new one
-      let target = rows.find(r => !r.item_id);
+      // else use empty row or new
+      let target = rows.find(r => !r.item_id && !r.sku_input);
       if (!target) {
         target = makeEmptyRow();
         setRows(prev => [...prev, target!]);
@@ -386,7 +385,6 @@ export default function EstimatePage() {
 
       await setItemBySku(target.id, code, { silentNotFound: true });
       setQty(target.id, addQty);
-
       setTimeout(() => barcodeInputRef.current?.focus(), 0);
     } catch (e: any) {
       console.error(e);
@@ -397,47 +395,9 @@ export default function EstimatePage() {
     }
   };
 
-  // Auto-add from Inventory page via localStorage event
-  useEffect(() => {
-    const off = fromInventory.on(async (payload) => {
-      try {
-        const sku = payload?.sku || payload?.SKU || payload?.code;
-        if (!sku) return;
-        // use first empty row or add
-        let target = rows.find(r => !r.item_id);
-        if (!target) {
-          target = makeEmptyRow();
-          setRows(prev => [...prev, target!]);
-        }
-        await setItemBySku(target.id, String(sku), { silentNotFound: false });
-        setQty(target.id, 1);
-      } catch (e) {
-        console.error('Inventory add failed', e);
-      }
-    });
-    return off;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows]);
-
-  // Auto-add via query param ?add_sku=SKU
-  useEffect(() => {
-    try {
-      const sp = new URLSearchParams(window.location.search);
-      const sku = sp.get('add_sku');
-      if (!sku) return;
-      let target = rows.find(r => !r.item_id);
-      if (!target) {
-        target = makeEmptyRow();
-        setRows(prev => [...prev, target!]);
-      }
-      setItemBySku(target.id, sku, { silentNotFound: false }).then(() => {
-        setQty(target!.id, 1);
-      });
-    } catch {}
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // ===== Customer lookup/create (unchanged semantics) =====
+  /* =================================
+     Customer lookup/create
+     ================================= */
   const lookupCustomerByPhone = async () => {
     const phone = (customerPhone || '').trim();
     if (!phone) return alert('Please enter a mobile number');
@@ -476,28 +436,31 @@ export default function EstimatePage() {
     setShowCreateCustomer(false);
   };
 
-  // ===== Save (Estimate only; no stock ops, no payments) =====
-  const savingLatch = () => {
+  /* =================================
+     Save (Estimate only; no stock ops)
+     - Try 'estimates' & 'estimate_items' first
+     - Fallback to 'invoices' with doc_type='estimate'
+     ================================= */
+  const latch = () => {
     if (savingRef.current || saving) return true;
     savingRef.current = true; setSaving(true);
     return false;
   };
-  const saveDone = () => { setSaving(false); savingRef.current = false; };
+  const release = () => { setSaving(false); savingRef.current = false; };
 
   const saveEstimate = async () => {
-    if (savingLatch()) return;
+    if (latch()) return;
 
-    const hasLine = rows.some(r => r.item_id && Number(r.qty || 0) > 0);
-    if (!hasLine) { saveDone(); return alert('Add at least one line item'); }
+    const hasLine = rows.some(r => (r.item_id || r.sku_input) && Number(r.qty || 0) > 0);
+    if (!hasLine) { release(); return alert('Add at least one line item'); }
 
     if (!customerId) {
-      // Not hard error, but warn
-      const cont = confirm('No customer selected. Save estimate without customer?');
-      if (!cont) { saveDone(); return; }
+      const proceed = confirm('No customer selected. Save estimate without customer?');
+      if (!proceed) { release(); return; }
     }
 
     try {
-      // Number generation: prefer next_estimate_no; fallback to EST-{ts}
+      // Build estimate number
       let estNo = (estimateNo || '').trim();
       if (!estNo) {
         try {
@@ -505,7 +468,6 @@ export default function EstimatePage() {
           if (!eNo && nextNo) estNo = String(nextNo);
         } catch {}
         if (!estNo) {
-          // fallback: try next_invoice_no and convert
           try {
             const { data: nextInv, error: eInv } = await supabase.rpc('next_invoice_no');
             if (!eInv && nextInv) estNo = String(nextInv).replace(/^INV/i, 'EST');
@@ -515,29 +477,31 @@ export default function EstimatePage() {
         setEstimateNo(estNo);
       }
 
-      // compute per-line, build payload
-      const grand = totals.grand;
-      const lineRows = rows
-        .filter(r => r.item_id && Number(r.qty || 0) > 0)
+      // Lines (unit already includes gst+margin through computeUnit)
+      const lines = rows
+        .filter(r => (r.item_id || r.sku_input) && Number(r.qty || 0) > 0)
         .map(r => {
-          const unit = computeUnitEstimate(r.base_cost, r.gst_pct, r.margin_pct); // includes gst + margin
+          const unit = computeUnit(r.base_cost, r.gst_pct, r.margin_pct);
           return {
-            item_id: r.item_id,
+            item_id: r.item_id || null,
+            sku: r.sku_input || null,
             description: r.description,
             qty: Number(r.qty || 0),
             unit_price: ceilRupee(unit),
-            tax_rate: 0, // tax already included in unit price for estimate (UI does not show tax)
-            line_total: ceilRupee(Number(r.qty || 0) * ceilRupee(unit)),
-            base_cost_at_sale: r.base_cost,       // store for reference
-            margin_pct_at_sale: r.margin_pct,     // store for reference
-            gst_percent_at_estimate: r.gst_pct,   // custom field (if your table has JSONB/meta)
+            tax_rate: 0, // tax included in unit for estimate view
+            line_total: ceilRupee(unit * Number(r.qty || 0)),
+            base_cost_at_sale: r.base_cost,
+            margin_pct_at_sale: r.margin_pct,
+            gst_percent_at_estimate: r.gst_pct,
+            uom_code: r.uom_code || null,
           };
         });
 
-      // Try saving to `estimates` table first (if it exists)
-      let savedId: string | null = null;
+      const grand = totals.grand;
       let usedTable: 'estimates' | 'invoices' = 'estimates';
+      let savedId: string | null = null;
 
+      // Try dedicated estimates tables
       try {
         const { data: est, error: e1 } = await supabase
           .from('estimates')
@@ -548,35 +512,27 @@ export default function EstimatePage() {
             total: grand,
             status: 'draft',
             issued_at: issuedAt,
-            meta: null, // optional JSONB if present
           }])
           .select()
           .single();
-
         if (e1) throw e1;
-        savedId = (est as any).id as string;
+        savedId = (est as any).id;
 
-        // If you have a separate `estimate_items` table, use it here.
-        // Otherwise, put lineRows into `estimate_items`. If not present,
-        // we’ll fall back to invoices below.
-        const { error: e2 } = await supabase.from('estimate_items').insert(
-          lineRows.map(lr => ({ ...lr, estimate_id: savedId }))
-        );
-        if (e2) {
-          console.warn('estimate_items insert failed (maybe table not present)', e2);
-        }
+        // Insert estimate items if table exists
+        const { error: e2 } = await supabase
+          .from('estimate_items')
+          .insert(lines.map(l => ({ ...l, estimate_id: savedId })));
+        if (e2) console.warn('estimate_items insert failed (maybe not present):', e2);
       } catch (e) {
-        // fallback to invoices with doc_type='estimate'
-        console.warn('Saving to estimates failed; falling back to invoices:', e);
+        // Fallback to invoices/doc_type=estimate
         usedTable = 'invoices';
-
         const { data: inv, error: e1 } = await supabase
           .from('invoices')
           .insert([{
             invoice_no: estNo,
             customer_id: customerId || null,
             notes,
-            subtotal: grand, // store all as subtotal since tax already embedded
+            subtotal: grand,
             tax_total: 0,
             grand_total: grand,
             status: 'estimate',
@@ -586,22 +542,22 @@ export default function EstimatePage() {
           .select()
           .single();
         if (e1) throw e1;
-        const invId = (inv as any).id as string;
-        savedId = invId;
+        savedId = (inv as any).id;
 
-        const { error: e2 } = await supabase.from('invoice_items').insert(
-          lineRows.map(lr => ({
-            invoice_id: invId,
-            item_id: lr.item_id,
-            description: lr.description,
-            qty: lr.qty,
-            unit_price: lr.unit_price,
+        const { error: e2 } = await supabase
+          .from('invoice_items')
+          .insert(lines.map(l => ({
+            invoice_id: savedId,
+            item_id: l.item_id,
+            description: l.description,
+            qty: l.qty,
+            unit_price: l.unit_price,
             tax_rate: 0,
-            line_total: lr.line_total,
-            base_cost_at_sale: lr.base_cost_at_sale,
-            margin_pct_at_sale: lr.margin_pct_at_sale,
-          }))
-        );
+            line_total: l.line_total,
+            base_cost_at_sale: l.base_cost_at_sale,
+            margin_pct_at_sale: l.margin_pct_at_sale,
+            // Optionally store sku/uom in a JSONB meta if you have it
+          })));
         if (e2) throw e2;
       }
 
@@ -609,17 +565,17 @@ export default function EstimatePage() {
     } catch (err: any) {
       console.error(err);
       alert(err?.message || String(err));
-    } finally { saveDone(); }
+    } finally { release(); }
   };
 
-  const handleNewEstimate = () => {
+  const handleNew = () => {
     setIssuedAt(new Date().toISOString().slice(0,10));
     setEstimateNo('');
+    setNotes('');
     setCustomerPhone(''); setCustomerId(''); setCustomerName(''); setCustomerAddress1Line('');
     setShowCreateCustomer(false);
     setNewCust({ first_name: '', last_name: '', phone: '', street_name: '', village_town: '', city: '', state: '', postal_code: '' });
     setRows([makeEmptyRow()]);
-    setNotes('');
     setSaving(false);
   };
 
@@ -635,8 +591,7 @@ export default function EstimatePage() {
           if (!barcodeMode) return;
           if (e.key === 'Enter') {
             e.preventDefault();
-            const code = barcodeBuffer;
-            await processBarcode(code);
+            await processBarcode(barcodeBuffer);
           }
         }}
         aria-hidden={!barcodeMode}
@@ -655,16 +610,15 @@ export default function EstimatePage() {
           </div>
 
           <div className="ml-auto flex gap-2 items-center flex-wrap">
-            {/* Barcode Mode Toggle (optional) */}
+            <Link href="/inventory" className="rounded border px-3 py-2 hover:bg-neutral-50">Back to Inventory</Link>
+
             <label className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
               <input
                 type="checkbox"
                 checked={barcodeMode}
                 onChange={(e) => {
                   setBarcodeMode(e.target.checked);
-                  if (e.target.checked) {
-                    setTimeout(() => barcodeInputRef.current?.focus(), 0);
-                  }
+                  if (e.target.checked) setTimeout(() => barcodeInputRef.current?.focus(), 0);
                 }}
               />
               <span className="text-sm font-medium">Barcode Mode</span>
@@ -687,7 +641,7 @@ export default function EstimatePage() {
               />
             </label>
 
-            <Button type="button" onClick={handleNewEstimate} className="bg-gray-700 hover:bg-gray-800">
+            <Button type="button" onClick={handleNew} className="bg-gray-700 hover:bg-gray-800">
               New Estimate
             </Button>
           </div>
@@ -752,7 +706,7 @@ export default function EstimatePage() {
           )}
         </div>
 
-        {/* Line items */}
+        {/* Lines */}
         <div className="overflow-auto">
           <table className="table">
             <thead>
@@ -766,10 +720,9 @@ export default function EstimatePage() {
                 <th></th>
               </tr>
             </thead>
-
             <tbody>
               {rows.map((r) => {
-                const perUnit = computeUnitEstimate(r.base_cost, r.gst_pct, r.margin_pct);
+                const perUnit = computeUnit(r.base_cost, r.gst_pct, r.margin_pct);
                 const lineTotal = ceilRupee((r.qty || 0) * perUnit);
                 const qr = qrMap[r.id];
 
@@ -807,9 +760,8 @@ export default function EstimatePage() {
                         placeholder="Description"
                         value={r.description}
                         onChange={(e) => setDescription(r.id, e.target.value)}
-                        disabled={!r.item_id}
+                        disabled={!r.sku_input}
                       />
-                      {/* Hidden technicals: cost + gst + margin (not shown, but retained in state) */}
                     </td>
                     <td>
                       <input className="input" value={r.uom_code || ''} readOnly placeholder="-" />
@@ -822,11 +774,11 @@ export default function EstimatePage() {
                         step="1"
                         value={r.qty}
                         onChange={(e) => setQty(r.id, parseFloat(e.target.value || '0'))}
-                        disabled={!r.item_id}
+                        disabled={!r.sku_input}
                       />
                     </td>
                     <td>
-                      {!r.item_id ? (
+                      {!r.sku_input ? (
                         <div className="text-xs text-gray-500">—</div>
                       ) : !qr ? (
                         <div className="text-xs text-gray-500">Generating…</div>
@@ -834,11 +786,11 @@ export default function EstimatePage() {
                         // eslint-disable-next-line @next/next/no-img-element
                         <img src={qr} alt={`QR ${r.sku_input}`} className="h-12 w-12 object-contain bg-white rounded" />
                       )}
-                      {r.item_id && (
+                      {r.sku_input && (
                         <div className="mt-1 text-[11px] text-gray-600">SKU: {r.sku_input}</div>
                       )}
                     </td>
-                    <td className="text-right">₹ {lineTotal.toFixed(2)}</td>
+                    <td className="text-right">₹ {lineTotal.toFixed(0)}</td>
                     <td>
                       <button type="button" className="text-red-600 hover:underline" onClick={() => removeRow(r.id)}>
                         Remove
@@ -848,7 +800,6 @@ export default function EstimatePage() {
                 );
               })}
             </tbody>
-
             <tfoot>
               <tr>
                 <td colSpan={7}>
@@ -862,18 +813,18 @@ export default function EstimatePage() {
         {/* Totals + Save */}
         <div className="mt-6 grid lg:grid-cols-3 gap-4">
           <div className="lg:col-span-2" />
-
           <div className="card">
             <div className="flex justify-between font-semibold text-lg">
               <div>Total</div>
-              <div>₹ {totals.grand.toFixed(2)}</div>
+              <div>₹ {totals.grand.toFixed(0)}</div>
             </div>
-
             <div className="mt-4 flex gap-2 flex-wrap">
               <Button type="button" onClick={saveEstimate} disabled={saving}>
                 {saving ? 'Saving…' : 'Save Estimate'}
               </Button>
-              <Button type="button" onClick={() => window.print()} className="bg-gray-700 hover:bg-gray-800">Print</Button>
+              <Button type="button" onClick={() => window.print()} className="bg-gray-700 hover:bg-gray-800">
+                Print
+              </Button>
               {estimateNo && <div className="text-sm text-gray-600 self-center">Saved #{estimateNo}</div>}
             </div>
           </div>
