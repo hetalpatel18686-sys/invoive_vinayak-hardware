@@ -142,7 +142,11 @@ export default function Customers() {
       <div className="mb-3 flex items-center justify-between">
         <h1 className="text-xl font-semibold">Customers</h1>
 
-        /dashboard
+        {/* ✅ Correct Link usage */}
+        <Link
+          href="/dashboard"
+          className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-800 hover:bg-gray-50"
+        >
           ← Back to Dashboard
         </Link>
       </div>
