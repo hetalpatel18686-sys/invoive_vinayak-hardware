@@ -6,6 +6,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 import Protected from '@/components/Protected';
+import Link from 'next/link';
 
 type DocType = 'sale' | 'return';
 
@@ -1481,6 +1482,15 @@ export default function NewInvoicePage() {
 
   return (
     <Protected>
+      {/* Back to Dashboard button */}
+<div className="mb-3">
+  <Link
+    href="/dashboard"
+    className="inline-block bg-orange-600 text-white px-3 py-1.5 rounded shadow hover:bg-orange-700"
+  >
+    ← Back to Dashboard
+  </Link>
+</div>
       {/* Hidden input to capture barcode scans when Barcode Mode is ON */}
       <input
         ref={barcodeInputRef}
