@@ -1,9 +1,9 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
-import Link from 'next/link';
 
 /* -------------------------------- Modal -------------------------------- */
 
