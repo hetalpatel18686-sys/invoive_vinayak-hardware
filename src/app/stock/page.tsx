@@ -11,7 +11,7 @@ function Modal({
   open,
   onClose,
   children,
-  maxWidth = 520,
+  maxWidth = 1000,
 }: {
   title: string;
   open: boolean;
@@ -62,16 +62,15 @@ interface FoundItem {
   name: string | null;
   description?: string | null;
   stock_qty?: number;
-  unit_cost?: number;       // moving average (from DB)
+  unit_cost?: number;
   uom_code?: string;
   low_stock_threshold?: number | null;
 
-  // pricing fields (used by Inventory page)
   purchase_price?: number | null;
   gst_percent?: number | null;
   margin_percent?: number | null;
-  tax_rate?: number | null;    // mirror of gst_percent for legacy UIs
-  unit_price?: number | null;  // selling price
+  tax_rate?: number | null;
+  unit_price?: number | null;
 }
 
 interface MoveRow {
@@ -88,6 +87,38 @@ interface MoveRow {
 
 type LocBalance = { name: string; qty: number };
 type Uom = { code: string; name: string };
+
+/** Bulk Line for multi-row operations */
+type BulkLine = {
+  /** item id after SKU lookup */
+  item_id?: string;
+  sku: string;
+  name?: string | null;
+
+  uom_code?: string; // default UoM from item, can override in Receive
+  qty: number; // positive for receive/issue/return; for adjust can be +/- delta
+
+  /** Pricing (Receive only) */
+  purchase_price?: number;
+  gst_percent?: number;
+  margin_percent?: number;
+  selling_price?: number;
+
+  /** Common fields */
+  ref?: string;
+  reason?: string;
+
+  /** Location fields */
+  location?: string;
+  useCustomLocation?: boolean; // Receive only
+  customLocationText?: string; // Receive only
+
+  /** Per-line location balances after SKU lookup */
+  locBalances?: LocBalance[];
+
+  /** Row-level error for validation */
+  error?: string | null;
+};
 
 /* ---------------------------- Small helpers ----------------------------- */
 
@@ -116,7 +147,7 @@ function downloadCsv(filename: string, rows: string[]) {
 /* ------------------------------ Component ------------------------------- */
 
 export default function Stock() {
-  /* -------- Global state -------- */
+  /* -------- Global single-item state (unchanged) -------- */
   const [sku, setSku] = useState<string>('');
   const [found, setFound] = useState<FoundItem | null>(null);
   const [locBalances, setLocBalances] = useState<LocBalance[]>([]);
@@ -150,23 +181,11 @@ export default function Stock() {
   const [showIssue, setShowIssue] = useState(false);
   const [showReturn, setShowReturn] = useState(false);
 
-  /* -------- Receive form (modal) -------- */
-  const [rcvQty, setRcvQty] = useState<number>(0);
-  const [rcvUom, setRcvUom] = useState<string>(''); // code
-  const [purchasePrice, setPurchasePrice] = useState<number>(0);
-  const [gstPct, setGstPct] = useState<number>(0);
-  const [marginPct, setMarginPct] = useState<number>(0);
-  const [salePrice, setSalePrice] = useState<number>(0);
-  const [rcvRef, setRcvRef] = useState<string>('');
-  const [rcvReason, setRcvReason] = useState<string>('');
-  const [rcvLocation, setRcvLocation] = useState<string>('');
-  const [useCustomLocation, setUseCustomLocation] = useState<boolean>(false);
-
-  /* -------- Issue / Return / Adjust forms (modals) -------- */
-  const [mQty, setMQty] = useState<number>(0);
-  const [mRef, setMRef] = useState<string>('');
-  const [mReason, setMReason] = useState<string>('');
-  const [mLocation, setMLocation] = useState<string>('');
+  /* -------- BULK state per modal -------- */
+  const [receiveLines, setReceiveLines] = useState<BulkLine[]>([]);
+  const [issueLines, setIssueLines] = useState<BulkLine[]>([]);
+  const [returnLines, setReturnLines] = useState<BulkLine[]>([]);
+  const [adjustLines, setAdjustLines] = useState<BulkLine[]>([]);
 
   /* ---------------- Effects ---------------- */
   useEffect(() => {
@@ -238,6 +257,7 @@ export default function Stock() {
     }
   };
 
+  /** Load per-location balances for an item (for single view + bulk rows) */
   const loadItemLocations = async (itemId: string) => {
     try {
       const { data, error } = await supabase
@@ -267,31 +287,64 @@ export default function Stock() {
         .sort((a, b) => a.name.localeCompare(b.name));
 
       setLocBalances(balances);
+      return balances;
     } catch (e) {
       console.warn('loadItemLocations failed:', e);
       setLocBalances([]);
+      return [];
     }
   };
 
-  const findBySku = async () => {
-    setFound(null);
-    setLocBalances([]);
-    setUseCustomLocation(false);
-    const trimmed = sku.trim();
-    if (!trimmed) return alert('Please enter SKU');
+  /** Variant that returns balances without mutating the single-item panel */
+  const getItemLocations = async (itemId: string): Promise<LocBalance[]> => {
+    try {
+      const { data, error } = await supabase
+        .from('stock_moves')
+        .select('move_type, qty, location, item_id')
+        .eq('item_id', itemId);
+
+      if (error) throw error;
+
+      const map = new Map<string, number>();
+
+      (data ?? []).forEach((r: any) => {
+        const mt = String(r.move_type || '').toLowerCase() as MoveType;
+        const loc = (String(r.location ?? '').trim()) || '(unassigned)';
+        const qRaw = Number(r.qty ?? 0);
+
+        let delta = qRaw;
+        if (mt === 'issue') delta = -Math.abs(qRaw);
+        else if (mt === 'receive' || mt === 'return') delta = Math.abs(qRaw);
+
+        map.set(loc, (map.get(loc) ?? 0) + delta);
+      });
+
+      return Array.from(map.entries())
+        .map(([name, qty]) => ({ name, qty }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch (e) {
+      console.warn('getItemLocations failed:', e);
+      return [];
+    }
+  };
+
+  /** Fetch item by SKU (case-insensitive), return FoundItem or null */
+  const fetchItemBySku = async (skuStr: string): Promise<FoundItem | null> => {
+    const trimmed = skuStr.trim();
+    if (!trimmed) return null;
 
     const { data, error } = await supabase
       .from('items')
       .select(
-        // pull pricing fields too
         'id, sku, name, description, stock_qty, unit_cost, low_stock_threshold, purchase_price, gst_percent, margin_percent, tax_rate, unit_price, uom:units_of_measure ( code )'
       )
       .ilike('sku', trimmed)
       .limit(1);
 
-    if (error) return alert(error.message);
+    if (error) throw error;
+
     const row: any = (data ?? [])[0];
-    if (!row) return alert('No item found for this SKU');
+    if (!row) return null;
 
     const uom_code = Array.isArray(row.uom) ? (row.uom?.[0]?.code ?? '') : (row.uom?.code ?? '');
 
@@ -306,36 +359,35 @@ export default function Stock() {
       low_stock_threshold: row.low_stock_threshold ?? null,
 
       purchase_price: row.purchase_price ?? null,
-      gst_percent: row.gst_percent ?? (row.tax_rate ?? null),
+      gst_percent: row.gst_percent ?? row.tax_rate ?? null,
       margin_percent: row.margin_percent ?? null,
       tax_rate: row.tax_rate ?? null,
       unit_price: row.unit_price ?? null,
     };
+    return foundItem;
+  };
 
-    setFound(foundItem);
-    setMinQty(Number(row.low_stock_threshold ?? 0));
+  const findBySku = async () => {
+    setFound(null);
+    setLocBalances([]);
+    const trimmed = sku.trim();
+    if (!trimmed) return alert('Please enter SKU');
 
-    // Prefill Receive modal from DB values
-    setRcvQty(0);
-    setRcvUom(uom_code || '');
-    setPurchasePrice(Number(row.purchase_price ?? row.unit_cost ?? 0));
-    setGstPct(Number(row.gst_percent ?? row.tax_rate ?? 0));
-    setMarginPct(Number(row.margin_percent ?? 0));
-    setSalePrice(Number(row.unit_price ?? 0));
-    setRcvRef('');
-    setRcvReason('');
-    setRcvLocation('');
-    setUseCustomLocation(false);
+    try {
+      const foundItem = await fetchItemBySku(trimmed);
+      if (!foundItem) return alert('No item found for this SKU');
 
-    // Other modals reset
-    setMQty(0);
-    setMRef('');
-    setMReason('');
-    setMLocation('');
+      setFound(foundItem);
+      setMinQty(Number(foundItem.low_stock_threshold ?? 0));
 
-    await loadItemLocations(foundItem.id);
+      // Prefill Receive modal from DB values (for single-line convenience)
+      // — these now only serve as defaults when creating first line in bulk modal
+      await loadItemLocations(foundItem.id);
 
-    requestAnimationFrame(() => skuRef.current?.focus());
+      requestAnimationFrame(() => skuRef.current?.focus());
+    } catch (e: any) {
+      alert(e?.message || String(e));
+    }
   };
 
   /* ----------------- History view helpers (search/sort/export) ----------- */
@@ -416,34 +468,26 @@ export default function Stock() {
     });
   };
 
-  /* ------------------------- Common pricing sync ------------------------- */
+  /* ------------------------- Pricing sync ------------------------- */
 
-  /**
-   * Sync pricing on the `items` row so Inventory page reflects the latest
-   * Purchase/GST/Margin and a recomputed Selling Price.
-   * - On Receive: pass the modal values (purchasePrice, gstPct, marginPct, salePrice)
-   * - On Issue/Return/Adjust: if nothing changed, we keep the last saved values from DB.
-   */
-  const syncItemPricing = async (opts?: {
+  /** Sync pricing on items row (bulk-safe) */
+  const syncItemPricingFor = async (itemId: string, opts?: {
     purchase?: number | null;
     gst?: number | null;
     margin?: number | null;
     sale?: number | null;
   }) => {
-    if (!found) return;
-    const purchase =
-      (Number.isFinite(opts?.purchase ?? NaN) ? opts!.purchase! : (found.purchase_price ?? found.unit_cost ?? 0)) as number;
-    const gst =
-      (Number.isFinite(opts?.gst ?? NaN) ? opts!.gst! : (found.gst_percent ?? found.tax_rate ?? 0)) as number;
-    const margin =
-      (Number.isFinite(opts?.margin ?? NaN) ? opts!.margin! : (found.margin_percent ?? 0)) as number;
+    const purchase = Number.isFinite(opts?.purchase ?? NaN) ? Number(opts?.purchase) : 0;
+    const gst = Number.isFinite(opts?.gst ?? NaN) ? Number(opts?.gst) : 0;
+    const margin = Number.isFinite(opts?.margin ?? NaN) ? Number(opts?.margin) : 0;
 
-    const sale =
-      Number.isFinite(opts?.sale ?? NaN) && (opts!.sale as number) > 0
-        ? (opts!.sale as number)
-        : Number((purchase * (1 + (gst || 0) / 100) * (1 + (margin || 0) / 100)).toFixed(2));
+    const computedSale = Number(
+      ( (Number.isFinite(opts?.sale ?? NaN) && Number(opts?.sale) > 0)
+          ? Number(opts?.sale)
+          : (purchase * (1 + (gst || 0) / 100) * (1 + (margin || 0) / 100))
+      ).toFixed(2)
+    );
 
-    // Persist (and keep tax_rate mirror for any legacy screens)
     const { error } = await supabase
       .from('items')
       .update({
@@ -451,249 +495,480 @@ export default function Stock() {
         gst_percent: Number.isFinite(gst) ? gst : 0,
         margin_percent: Number.isFinite(margin) ? margin : 0,
         tax_rate: Number.isFinite(gst) ? gst : 0,
-        unit_price: Number.isFinite(sale) ? sale : 0,
+        unit_price: Number.isFinite(computedSale) ? computedSale : 0,
       })
-      .eq('id', found.id);
+      .eq('id', itemId);
 
     if (error) throw error;
   };
 
-  /* ----------------------------- Handlers -------------------------------- */
+  /* ------------------------------ BULK helpers -------------------------------- */
 
-  // Save minimum
-  const saveMinimum = async () => {
-    if (!found) return;
-    setSavingMin(true);
+  const addReceiveLine = (seed?: Partial<BulkLine>) => {
+    setReceiveLines(prev => [
+      ...prev,
+      {
+        sku: seed?.sku || '',
+        qty: seed?.qty ?? 0,
+        uom_code: seed?.uom_code || '',
+        purchase_price: seed?.purchase_price ?? 0,
+        gst_percent: seed?.gst_percent ?? 0,
+        margin_percent: seed?.margin_percent ?? 0,
+        selling_price: seed?.selling_price ?? 0,
+        ref: seed?.ref || '',
+        reason: seed?.reason || '',
+        location: seed?.location || '',
+        useCustomLocation: false,
+        customLocationText: '',
+        error: null,
+      },
+    ]);
+  };
+
+  const addIssueLine = (seed?: Partial<BulkLine>) => {
+    setIssueLines(prev => [
+      ...prev,
+      {
+        sku: seed?.sku || '',
+        qty: seed?.qty ?? 0,
+        ref: seed?.ref || '',
+        reason: seed?.reason || '',
+        location: seed?.location || '',
+        error: null,
+      },
+    ]);
+  };
+
+  const addReturnLine = (seed?: Partial<BulkLine>) => {
+    setReturnLines(prev => [
+      ...prev,
+      {
+        sku: seed?.sku || '',
+        qty: seed?.qty ?? 0,
+        ref: seed?.ref || '',
+        reason: seed?.reason || '',
+        location: seed?.location || '',
+        error: null,
+      },
+    ]);
+  };
+
+  const addAdjustLine = (seed?: Partial<BulkLine>) => {
+    setAdjustLines(prev => [
+      ...prev,
+      {
+        sku: seed?.sku || '',
+        qty: seed?.qty ?? 0, // can be negative
+        ref: seed?.ref || '',
+        reason: seed?.reason || '',
+        location: seed?.location || '',
+        error: null,
+      },
+    ]);
+  };
+
+  const removeLine = (kind: MoveType, idx: number) => {
+    if (kind === 'receive') setReceiveLines(prev => prev.filter((_, i) => i !== idx));
+    if (kind === 'issue') setIssueLines(prev => prev.filter((_, i) => i !== idx));
+    if (kind === 'return') setReturnLines(prev => prev.filter((_, i) => i !== idx));
+    if (kind === 'adjust') setAdjustLines(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const updateLineField = (
+    kind: MoveType,
+    idx: number,
+    key: keyof BulkLine,
+    value: any
+  ) => {
+    const setFn = (setter: React.Dispatch<React.SetStateAction<BulkLine[]>>) => {
+      setter(prev => prev.map((ln, i) => (i === idx ? { ...ln, [key]: value, error: null } : ln)));
+    };
+    if (kind === 'receive') setFn(setReceiveLines);
+    if (kind === 'issue') setFn(setIssueLines);
+    if (kind === 'return') setFn(setReturnLines);
+    if (kind === 'adjust') setFn(setAdjustLines);
+  };
+
+  const bulkFindSku = async (kind: MoveType, idx: number) => {
+    const list = kind === 'receive' ? receiveLines
+              : kind === 'issue'   ? issueLines
+              : kind === 'return'  ? returnLines
+              : adjustLines;
+    const line = list[idx];
+    const skuStr = (line?.sku || '').trim();
+    if (!skuStr) {
+      updateLineField(kind, idx, 'error', 'Please enter SKU.');
+      return;
+    }
+
     try {
-      const { error } = await supabase
-        .from('items')
-        .update({ low_stock_threshold: Number.isFinite(minQty) ? minQty : 0 })
-        .eq('id', found.id);
-      if (error) throw error;
+      const item = await fetchItemBySku(skuStr);
+      if (!item) {
+        updateLineField(kind, idx, 'error', 'No item found for this SKU.');
+        return;
+      }
 
-      await findBySku();
-      alert('Minimum qty saved.');
-    } catch (err: any) {
-      alert(err?.message || String(err));
-    } finally {
-      setSavingMin(false);
+      const balances = await getItemLocations(item.id);
+
+      const updater = (setter: React.Dispatch<React.SetStateAction<BulkLine[]>>) => {
+        setter(prev => prev.map((ln, i) => {
+          if (i !== idx) return ln;
+          // defaults for receive pricing from DB if available
+          const purchase = Number(item.purchase_price ?? item.unit_cost ?? 0);
+          const gst = Number(item.gst_percent ?? item.tax_rate ?? 0);
+          const margin = Number(item.margin_percent ?? 0);
+          const sale = Number((purchase * (1 + (gst || 0) / 100) * (1 + (margin || 0) / 100)).toFixed(2));
+          return {
+            ...ln,
+            item_id: item.id,
+            sku: item.sku,
+            name: item.name ?? '',
+            uom_code: item.uom_code || '',
+            // Only initialize receive fields if undefined or zero
+            purchase_price: (ln.purchase_price ?? 0) || purchase,
+            gst_percent: (ln.gst_percent ?? 0) || gst,
+            margin_percent: (ln.margin_percent ?? 0) || margin,
+            selling_price: (ln.selling_price ?? 0) || sale,
+            locBalances: balances,
+            error: null,
+          };
+        }));
+      };
+
+      if (kind === 'receive') updater(setReceiveLines);
+      if (kind === 'issue') updater(setIssueLines);
+      if (kind === 'return') updater(setReturnLines);
+      if (kind === 'adjust') updater(setAdjustLines);
+    } catch (e: any) {
+      updateLineField(kind, idx, 'error', e?.message || String(e));
     }
   };
 
-  // Receive submit
-  const submitReceive = async () => {
-    if (!found) return alert('Find an item first.');
-    if (!rcvQty || rcvQty <= 0) return alert('Quantity must be > 0.');
-    const uomCode = rcvUom || found.uom_code || null;
+  const clearBulk = (kind: MoveType) => {
+    if (kind === 'receive') setReceiveLines([]);
+    if (kind === 'issue') setIssueLines([]);
+    if (kind === 'return') setReturnLines([]);
+    if (kind === 'adjust') setAdjustLines([]);
+  };
 
-    setLoading(true);
+  /* ----------------------------- Submit: BULK -------------------------------- */
+
+  const submitReceiveBulk = async () => {
     if (submittingRef.current) return;
     submittingRef.current = true;
+    setLoading(true);
 
+    // Basic validation
+    const errors: string[] = [];
+    const validLines = receiveLines.map((ln, idx) => {
+      const uomCode = ln.uom_code || '';
+      const loc =
+        (ln.useCustomLocation ? (ln.customLocationText || '').trim() : (ln.location || '').trim()) || '';
+
+      let err = '';
+      if (!ln.sku) err = 'SKU required';
+      else if (!ln.item_id) err = 'Click Find to load item';
+      else if (!ln.qty || ln.qty <= 0) err = 'Qty must be > 0';
+      else if (!Number.isFinite(ln.purchase_price)) err = 'Purchase price required';
+      if (err) {
+        errors.push(`Row ${idx + 1} (${ln.sku}): ${err}`);
+      }
+      return { ln, idx, uomCode, loc };
+    });
+
+    if (errors.length) {
+      alert('Please fix the following:\n' + errors.join('\n'));
+      setLoading(false);
+      submittingRef.current = false;
+      return;
+    }
+
+    const results: string[] = [];
     try {
-      const clientTxId = makeClientTxId();
+      for (const { ln, idx, uomCode, loc } of validLines) {
+        const clientTxId = makeClientTxId();
 
-      // 1) Record the stock receive with avg costing
-      {
+        // 1) Receive
         const { error } = await supabase.rpc('receive_stock_avg', {
-          p_item_id: found.id,
-          p_qty: rcvQty,
-          p_unit_cost: purchasePrice, // purchase price per UoM
-          p_uom_code: uomCode,
-          p_ref: rcvRef || null,
-          p_reason: rcvReason || null,
+          p_item_id: ln.item_id!,
+          p_qty: ln.qty,
+          p_unit_cost: Number(ln.purchase_price ?? 0),
+          p_uom_code: uomCode || null,
+          p_ref: (ln.ref || null),
+          p_reason: (ln.reason || null),
           p_client_tx_id: clientTxId,
         });
-        if (error) throw error;
+        if (error) {
+          results.push(`❌ Row ${idx + 1} (${ln.sku}): ${error.message}`);
+          continue;
+        }
+
+        // 2) Location
+        if (loc) {
+          try {
+            await supabase
+              .from('stock_moves')
+              .update({ location: loc })
+              .eq('client_tx_id', clientTxId);
+          } catch (e: any) {
+            results.push(`⚠️ Row ${idx + 1} (${ln.sku}): received but location not saved (${e?.message || e})`);
+          }
+        }
+
+        // 3) Sync pricing on item
+        try {
+          await syncItemPricingFor(ln.item_id!, {
+            purchase: Number(ln.purchase_price ?? 0),
+            gst: Number(ln.gst_percent ?? 0),
+            margin: Number(ln.margin_percent ?? 0),
+            sale: Number(ln.selling_price ?? 0),
+          });
+        } catch (e: any) {
+          results.push(`⚠️ Row ${idx + 1} (${ln.sku}): received but pricing not updated (${e?.message || e})`);
+        }
+
+        results.push(`✅ Row ${idx + 1} (${ln.sku}): received ${ln.qty} ${uomCode || ''}`);
       }
 
-      // 2) Attach location to that move via client_tx_id (if provided)
-      if (rcvLocation && rcvLocation.trim()) {
+      await loadHistory();
+      if (found?.id) await loadItemLocations(found.id);
+      alert(results.join('\n'));
+
+      // Close and reset
+      setShowReceive(false);
+      clearBulk('receive');
+      if (scanMode) tryFocusSku(true);
+    } catch (e: any) {
+      alert(e?.message || String(e));
+    } finally {
+      setLoading(false);
+      submittingRef.current = false;
+    }
+  };
+
+  const submitIssueBulk = async () => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    setLoading(true);
+
+    // Validate lines and location availability
+    const errors: string[] = [];
+    const validLines = issueLines.map((ln, idx) => {
+      let err = '';
+      if (!ln.sku) err = 'SKU required';
+      else if (!ln.item_id) err = 'Click Find to load item';
+      else if (!ln.location) err = 'Select location';
+      else if (!ln.qty || ln.qty <= 0) err = 'Qty must be > 0';
+
+      const locQty = (ln.locBalances || []).find(l => l.name === ln.location)?.qty ?? 0;
+      if (!err && ln.qty > locQty) err = `Insufficient qty at ${ln.location}. Available: ${locQty}`;
+
+      if (err) errors.push(`Row ${idx + 1} (${ln.sku}): ${err}`);
+      return { ln, idx };
+    });
+
+    if (errors.length) {
+      alert('Please fix the following:\n' + errors.join('\n'));
+      setLoading(false);
+      submittingRef.current = false;
+      return;
+    }
+
+    const results: string[] = [];
+    try {
+      for (const { ln, idx } of validLines) {
+        const clientTxId = makeClientTxId();
+        const { error } = await supabase.rpc('issue_stock', {
+          p_item_id: ln.item_id!,
+          p_qty: ln.qty,
+          p_ref: (ln.ref || null),
+          p_reason: (ln.reason || null),
+          p_client_tx_id: clientTxId,
+        });
+        if (error) {
+          results.push(`❌ Row ${idx + 1} (${ln.sku}): ${error.message}`);
+          continue;
+        }
+
+        // attach location
         try {
           await supabase
             .from('stock_moves')
-            .update({ location: rcvLocation.trim() })
+            .update({ location: ln.location })
             .eq('client_tx_id', clientTxId);
-        } catch (e) {
-          console.warn('location update skipped:', e);
+        } catch (e: any) {
+          results.push(`⚠️ Row ${idx + 1} (${ln.sku}): issued but location not saved (${e?.message || e})`);
         }
+
+        // Keep pricing in sync (no changes—recompute sale from last)
+        try {
+          await syncItemPricingFor(ln.item_id!);
+        } catch {}
+
+        results.push(`✅ Row ${idx + 1} (${ln.sku}): issued ${ln.qty} from ${ln.location}`);
       }
 
-      // 3) *** Persist the values that Inventory page displays ***
-      await syncItemPricing({
-        purchase: purchasePrice,
-        gst: gstPct,
-        margin: marginPct,
-        sale: salePrice && salePrice > 0 ? salePrice : null,
-      });
-
-      // Refresh
-      await findBySku();
       await loadHistory();
-      alert('Receive saved.');
+      if (found?.id) await loadItemLocations(found.id);
+      alert(results.join('\n'));
 
-      // Close modal & reset
-      setShowReceive(false);
-      setRcvQty(0);
-      setPurchasePrice(0);
-      setSalePrice(0);
-      setRcvRef('');
-      setRcvReason('');
-      setRcvLocation('');
-      setUseCustomLocation(false);
-      if (scanMode) tryFocusSku(true);
-    } catch (err: any) {
-      alert(err?.message || String(err));
-    } finally {
-      setLoading(false);
-      submittingRef.current = false;
-    }
-  };
-
-  // Issue submit
-  const submitIssue = async () => {
-    if (!found) return alert('Find an item first.');
-    if (!mLocation) return alert('Please select a location to issue from.');
-    if (!mQty || mQty <= 0) return alert('Quantity must be > 0.');
-    const loc = locBalances.find(l => l.name === mLocation);
-    if (!loc) return alert('Invalid location.');
-    if (loc.qty < mQty) return alert(`Insufficient qty at ${mLocation}. Available: ${loc.qty}`);
-
-    setLoading(true);
-    if (submittingRef.current) return;
-    submittingRef.current = true;
-
-    try {
-      const clientTxId = makeClientTxId();
-      const { error } = await supabase.rpc('issue_stock', {
-        p_item_id: found.id,
-        p_qty: mQty,
-        p_ref: mRef || null,
-        p_reason: mReason || null,
-        p_client_tx_id: clientTxId,
-      });
-      if (error) throw error;
-
-      // attach location
-      await supabase
-        .from('stock_moves')
-        .update({ location: mLocation })
-        .eq('client_tx_id', clientTxId);
-
-      // Auto-sync pricing (keeps last known Purchase/GST/Margin; recompute sale)
-      await syncItemPricing();
-
-      await findBySku();
-      await loadHistory();
-      alert('Issue saved.');
       setShowIssue(false);
-      setMQty(0);
-      setMRef('');
-      setMReason('');
-      setMLocation('');
+      clearBulk('issue');
       if (scanMode) tryFocusSku(true);
-    } catch (err: any) {
-      alert(err?.message || String(err));
+    } catch (e: any) {
+      alert(e?.message || String(e));
     } finally {
       setLoading(false);
       submittingRef.current = false;
     }
   };
 
-  // Return submit
-  const submitReturn = async () => {
-    if (!found) return alert('Find an item first.');
-    if (!mLocation) return alert('Please select a location for return.');
-    if (!mQty || mQty <= 0) return alert('Quantity must be > 0.');
-
-    setLoading(true);
+  const submitReturnBulk = async () => {
     if (submittingRef.current) return;
     submittingRef.current = true;
+    setLoading(true);
 
+    // Validate
+    const errors: string[] = [];
+    const validLines = returnLines.map((ln, idx) => {
+      let err = '';
+      if (!ln.sku) err = 'SKU required';
+      else if (!ln.item_id) err = 'Click Find to load item';
+      else if (!ln.location) err = 'Select location';
+      else if (!ln.qty || ln.qty <= 0) err = 'Qty must be > 0';
+      if (err) errors.push(`Row ${idx + 1} (${ln.sku}): ${err}`);
+      return { ln, idx };
+    });
+
+    if (errors.length) {
+      alert('Please fix the following:\n' + errors.join('\n'));
+      setLoading(false);
+      submittingRef.current = false;
+      return;
+    }
+
+    const results: string[] = [];
     try {
-      const clientTxId = makeClientTxId();
-      const { error } = await supabase.rpc('return_stock', {
-        p_item_id: found.id,
-        p_qty: mQty,
-        p_ref: mRef || null,
-        p_reason: mReason || null,
-        p_client_tx_id: clientTxId,
-      });
-      if (error) throw error;
+      for (const { ln, idx } of validLines) {
+        const clientTxId = makeClientTxId();
+        const { error } = await supabase.rpc('return_stock', {
+          p_item_id: ln.item_id!,
+          p_qty: ln.qty,
+          p_ref: (ln.ref || null),
+          p_reason: (ln.reason || null),
+          p_client_tx_id: clientTxId,
+        });
+        if (error) {
+          results.push(`❌ Row ${idx + 1} (${ln.sku}): ${error.message}`);
+          continue;
+        }
 
-      // attach location
-      await supabase
-        .from('stock_moves')
-        .update({ location: mLocation })
-        .eq('client_tx_id', clientTxId);
+        // attach location
+        try {
+          await supabase
+            .from('stock_moves')
+            .update({ location: ln.location })
+            .eq('client_tx_id', clientTxId);
+        } catch (e: any) {
+          results.push(`⚠️ Row ${idx + 1} (${ln.sku}): returned but location not saved (${e?.message || e})`);
+        }
 
-      // Auto-sync pricing
-      await syncItemPricing();
+        // Sync pricing (no change)
+        try {
+          await syncItemPricingFor(ln.item_id!);
+        } catch {}
 
-      await findBySku();
+        results.push(`✅ Row ${idx + 1} (${ln.sku}): returned ${ln.qty} to ${ln.location}`);
+      }
+
       await loadHistory();
-      alert('Return saved.');
+      if (found?.id) await loadItemLocations(found.id);
+      alert(results.join('\n'));
+
       setShowReturn(false);
-      setMQty(0);
-      setMRef('');
-      setMReason('');
-      setMLocation('');
+      clearBulk('return');
       if (scanMode) tryFocusSku(true);
-    } catch (err: any) {
-      alert(err?.message || String(err));
+    } catch (e: any) {
+      alert(e?.message || String(e));
     } finally {
       setLoading(false);
       submittingRef.current = false;
     }
   };
 
-  // Adjust submit
-  const submitAdjust = async () => {
-    if (!found) return alert('Find an item first.');
-    if (!mLocation) return alert('Please select a location for adjust.');
-    if (!mQty || mQty === 0) return alert('Adjustment delta cannot be 0.');
-
-    const loc = locBalances.find(l => l.name === mLocation);
-    if (!loc) return alert('Invalid location.');
-    if (mQty < 0 && loc.qty + mQty < 0) {
-      return alert(`This would make "${mLocation}" negative. Available: ${loc.qty}, delta: ${mQty}`);
-    }
-
-    setLoading(true);
+  const submitAdjustBulk = async () => {
     if (submittingRef.current) return;
     submittingRef.current = true;
+    setLoading(true);
 
+    // Validate & location negative check
+    const errors: string[] = [];
+    const validLines = adjustLines.map((ln, idx) => {
+      let err = '';
+      if (!ln.sku) err = 'SKU required';
+      else if (!ln.item_id) err = 'Click Find to load item';
+      else if (!ln.location) err = 'Select location';
+      else if (!ln.qty || ln.qty === 0) err = 'Adjustment delta cannot be 0';
+
+      const currentLocQty = (ln.locBalances || []).find(l => l.name === ln.location)?.qty ?? 0;
+      if (!err && ln.qty < 0 && currentLocQty + ln.qty < 0) {
+        err = `This would make "${ln.location}" negative. Available: ${currentLocQty}, delta: ${ln.qty}`;
+      }
+
+      if (err) errors.push(`Row ${idx + 1} (${ln.sku}): ${err}`);
+      return { ln, idx };
+    });
+
+    if (errors.length) {
+      alert('Please fix the following:\n' + errors.join('\n'));
+      setLoading(false);
+      submittingRef.current = false;
+      return;
+    }
+
+    const results: string[] = [];
     try {
-      const clientTxId = makeClientTxId();
-      const { error } = await supabase.rpc('adjust_stock_delta', {
-        p_item_id: found.id,
-        p_delta: mQty,
-        p_ref: mRef || null,
-        p_reason: mReason || null,
-        p_client_tx_id: clientTxId,
-      });
-      if (error) throw error;
+      for (const { ln, idx } of validLines) {
+        const clientTxId = makeClientTxId();
+        const { error } = await supabase.rpc('adjust_stock_delta', {
+          p_item_id: ln.item_id!,
+          p_delta: ln.qty,
+          p_ref: (ln.ref || null),
+          p_reason: (ln.reason || null),
+          p_client_tx_id: clientTxId,
+        });
+        if (error) {
+          results.push(`❌ Row ${idx + 1} (${ln.sku}): ${error.message}`);
+          continue;
+        }
 
-      // attach location
-      await supabase
-        .from('stock_moves')
-        .update({ location: mLocation })
-        .eq('client_tx_id', clientTxId);
+        // attach location
+        try {
+          await supabase
+            .from('stock_moves')
+            .update({ location: ln.location })
+            .eq('client_tx_id', clientTxId);
+        } catch (e: any) {
+          results.push(`⚠️ Row ${idx + 1} (${ln.sku}): adjusted but location not saved (${e?.message || e})`);
+        }
 
-      // Auto-sync pricing
-      await syncItemPricing();
+        // Sync pricing (no change)
+        try {
+          await syncItemPricingFor(ln.item_id!);
+        } catch {}
 
-      await findBySku();
+        results.push(`✅ Row ${idx + 1} (${ln.sku}): adjusted by ${ln.qty} at ${ln.location}`);
+      }
+
       await loadHistory();
-      alert('Adjustment saved.');
+      if (found?.id) await loadItemLocations(found.id);
+      alert(results.join('\n'));
+
       setShowAdjust(false);
-      setMQty(0);
-      setMRef('');
-      setMReason('');
-      setMLocation('');
+      clearBulk('adjust');
       if (scanMode) tryFocusSku(true);
-    } catch (err: any) {
-      alert(err?.message || String(err));
+    } catch (e: any) {
+      alert(e?.message || String(e));
     } finally {
       setLoading(false);
       submittingRef.current = false;
@@ -702,25 +977,102 @@ export default function Stock() {
 
   /* ------------------------- Derived values ------------------------------ */
 
-  // Receive: live sale price calculation when editing purchase/gst/margin
-  useEffect(() => {
-    const calc = purchasePrice * (1 + (gstPct || 0) / 100) * (1 + (marginPct || 0) / 100);
-    if (!Number.isFinite(calc)) return;
-    setSalePrice((prev) => {
-      const tol = 0.00001;
-      if (Math.abs((prev || 0) - calc) < tol) return prev;
-      return Number(calc.toFixed(2));
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [purchasePrice, gstPct, marginPct]);
-
   const selectedLocQty = useMemo(() => {
-    if (!mLocation) return 0;
-    const foundLoc = locBalances.find(l => l.name === mLocation);
-    return foundLoc?.qty ?? 0;
-  }, [locBalances, mLocation]);
+    if (!found) return 0;
+    // keep single-item helper
+    return 0;
+  }, [locBalances, found]);
 
   /* ------------------------------ UI ------------------------------------ */
+
+  /** Helper: renders a SKU row cell with Find button */
+  function SkuCell({
+    kind, idx, line, placeholder='SKU…'
+  }: { kind: MoveType; idx: number; line: BulkLine; placeholder?: string }) {
+    return (
+      <div className="flex gap-1">
+        <input
+          className="input"
+          placeholder={placeholder}
+          value={line.sku}
+          onChange={(e) => updateLineField(kind, idx, 'sku', e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              bulkFindSku(kind, idx);
+            }
+          }}
+        />
+        <Button type="button" onClick={() => bulkFindSku(kind, idx)}>Find</Button>
+      </div>
+    );
+  }
+
+  /** Helper: Location picker for Receive (with custom) and for others (select only) */
+  function LocationCell({
+    kind, idx, line
+  }: { kind: MoveType; idx: number; line: BulkLine }) {
+    if (kind === 'receive') {
+      const options = line.locBalances || [];
+      const currentVal = line.useCustomLocation ? '__NEW__' : (line.location || '');
+      return (
+        <div className="grid grid-cols-2 gap-1">
+          <select
+            className="input"
+            value={currentVal}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === '__NEW__') {
+                updateLineField(kind, idx, 'useCustomLocation', true);
+                updateLineField(kind, idx, 'location', '');
+              } else {
+                updateLineField(kind, idx, 'useCustomLocation', false);
+                updateLineField(kind, idx, 'location', v);
+              }
+            }}
+          >
+            <option value="">{options.length ? 'Select existing…' : 'No locations yet'}</option>
+            {options.map(l => (
+              <option key={l.name} value={l.name}>
+                {l.name} — {l.qty}
+              </option>
+            ))}
+            <option value="__NEW__">Other / New…</option>
+          </select>
+          <input
+            className="input"
+            placeholder="Type new location"
+            value={line.useCustomLocation ? (line.customLocationText || '') : ''}
+            onChange={(e) => updateLineField(kind, idx, 'customLocationText', e.target.value)}
+            disabled={!line.useCustomLocation}
+          />
+        </div>
+      );
+    }
+
+    // For Issue/Return/Adjust: select only
+    const options = line.locBalances || [];
+    return (
+      <select
+        className="input"
+        value={line.location || ''}
+        onChange={(e) => updateLineField(kind, idx, 'location', e.target.value)}
+      >
+        <option value="">Select location…</option>
+        {options.map(l => (
+          <option key={l.name} value={l.name}>
+            {l.name} — {l.qty}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
+  /** Render row-level error (if any) */
+  function RowError({ line }: { line: BulkLine }) {
+    if (!line.error) return null;
+    return <div className="text-xs text-red-600 mt-1">{line.error}</div>;
+  }
 
   return (
     <div className="grid md:grid-cols-3 gap-4">
@@ -812,7 +1164,24 @@ export default function Stock() {
             />
           </div>
           <div className="flex items-end">
-            <Button type="button" onClick={saveMinimum} disabled={!found || savingMin}>
+            <Button type="button" onClick={async () => {
+              if (!found) return;
+              setSavingMin(true);
+              try {
+                const { error } = await supabase
+                  .from('items')
+                  .update({ low_stock_threshold: Number.isFinite(minQty) ? minQty : 0 })
+                  .eq('id', found.id);
+                if (error) throw error;
+
+                await findBySku();
+                alert('Minimum qty saved.');
+              } catch (err: any) {
+                alert(err?.message || String(err));
+              } finally {
+                setSavingMin(false);
+              }
+            }} disabled={!found || savingMin}>
               {savingMin ? 'Saving…' : 'Save Min'}
             </Button>
           </div>
@@ -820,26 +1189,81 @@ export default function Stock() {
 
         {/* Action buttons */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-          <Button type="button" onClick={() => (found ? setShowReceive(true) : alert('Find an item first.'))}>
-            Receive
-          </Button>
           <Button
             type="button"
-            onClick={() => (found ? setShowAdjust(true) : alert('Find an item first.'))}
+            onClick={async () => {
+              // seed first line with found (optional)
+              const seed = found ? {
+                sku: found.sku,
+                uom_code: found.uom_code || '',
+                purchase_price: Number(found.purchase_price ?? found.unit_cost ?? 0),
+                gst_percent: Number(found.gst_percent ?? found.tax_rate ?? 0),
+                margin_percent: Number(found.margin_percent ?? 0),
+                selling_price: Number((Number(found.purchase_price ?? found.unit_cost ?? 0)
+                  * (1 + Number(found.gst_percent ?? found.tax_rate ?? 0) / 100)
+                  * (1 + Number(found.margin_percent ?? 0) / 100)).toFixed(2)),
+              } : undefined;
+
+              setReceiveLines([]);
+              if (seed) {
+                addReceiveLine(seed);
+                // auto-find to populate item_id + loc balances
+                setTimeout(() => bulkFindSku('receive', 0), 0);
+              } else {
+                addReceiveLine();
+              }
+              setShowReceive(true);
+            }}
+          >
+            Receive
+          </Button>
+
+          <Button
+            type="button"
+            onClick={() => {
+              setAdjustLines([]);
+              if (found) {
+                addAdjustLine({ sku: found.sku });
+                setTimeout(() => bulkFindSku('adjust', 0), 0);
+              } else {
+                addAdjustLine();
+              }
+              setShowAdjust(true);
+            }}
             className="bg-amber-500 hover:bg-amber-600 text-white"
           >
             Adjust
           </Button>
+
           <Button
             type="button"
-            onClick={() => (found ? setShowIssue(true) : alert('Find an item first.'))}
+            onClick={() => {
+              setIssueLines([]);
+              if (found) {
+                addIssueLine({ sku: found.sku });
+                setTimeout(() => bulkFindSku('issue', 0), 0);
+              } else {
+                addIssueLine();
+              }
+              setShowIssue(true);
+            }}
             className="bg-red-600 hover:bg-red-700 text-white"
           >
             Issue
           </Button>
+
           <Button
             type="button"
-            onClick={() => (found ? setShowReturn(true) : alert('Find an item first.'))}
+            onClick={() => {
+              setReturnLines([]);
+              if (found) {
+                addReturnLine({ sku: found.sku });
+                setTimeout(() => bulkFindSku('return', 0), 0);
+              } else {
+                addReturnLine();
+              }
+              setShowReturn(true);
+            }}
             className="bg-green-600 hover:bg-green-700 text-white"
           >
             Return
@@ -937,342 +1361,440 @@ export default function Stock() {
         </div>
       </div>
 
-      {/* ------------------------ RECEIVE MODAL ------------------------- */}
+      {/* ------------------------ RECEIVE (BULK) MODAL ------------------------- */}
       <Modal
-        title={`Receive — ${found?.sku || ''}`}
+        title="Receive — Bulk"
         open={showReceive}
         onClose={() => setShowReceive(false)}
       >
-        {!found ? (
-          <div className="text-sm text-gray-600">Find an item first.</div>
-        ) : (
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="label">Qty</label>
-                <input
-                  className="input"
-                  type="number"
-                  min={1}
-                  step="1"
-                  value={rcvQty}
-                  onChange={(e) => setRcvQty(parseInt(e.target.value || '0', 10))}
-                />
-              </div>
-              <div>
-                <label className="label">UoM</label>
-                <select
-                  className="input"
-                  value={rcvUom}
-                  onChange={(e) => setRcvUom(e.target.value)}
-                >
-                  <option value="">(use default {found.uom_code || '-'})</option>
-                  {allUoms.map((u) => (
-                    <option key={u.code} value={u.code}>
-                      {u.code} — {u.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-gray-600">
+              Tip: Fill SKU and click <b>Find</b> to load item details and locations. Add as many lines as you need.
             </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="label">Purchase Price (per {rcvUom || found.uom_code || 'UoM'})</label>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.01"
-                  min={0}
-                  value={purchasePrice}
-                  onChange={(e) => setPurchasePrice(parseFloat(e.target.value || '0'))}
-                />
-              </div>
-              <div>
-                <label className="label">GST %</label>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.01"
-                  min={0}
-                  value={gstPct}
-                  onChange={(e) => setGstPct(parseFloat(e.target.value || '0'))}
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="label">Margin %</label>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.01"
-                  value={marginPct}
-                  onChange={(e) => setMarginPct(parseFloat(e.target.value || '0'))}
-                />
-              </div>
-              <div>
-                <label className="label">Selling Price (auto, editable)</label>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.01"
-                  min={0}
-                  value={salePrice}
-                  onChange={(e) => setSalePrice(parseFloat(e.target.value || '0'))}
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="label">Reference (PO# etc.)</label>
-                <input className="input" value={rcvRef} onChange={(e) => setRcvRef(e.target.value)} />
-              </div>
-              <div>
-                <label className="label">Reason / Note</label>
-                <input className="input" value={rcvReason} onChange={(e) => setRcvReason(e.target.value)} />
-              </div>
-            </div>
-
-            {/* Location: existing or new */}
-            <div>
-              <label className="label">Location</label>
-              <div className="grid grid-cols-2 gap-2">
-                <select
-                  className="input"
-                  value={useCustomLocation ? '__NEW__' : (rcvLocation || '')}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    if (v === '__NEW__') {
-                      setUseCustomLocation(true);
-                      setRcvLocation('');
-                    } else {
-                      setUseCustomLocation(false);
-                      setRcvLocation(v);
-                    }
-                  }}
-                >
-                  <option value="">{locBalances.length ? 'Select existing…' : 'No locations yet'}</option>
-                  {locBalances.map((l) => (
-                    <option key={l.name} value={l.name}>
-                      {l.name} — {l.qty} {found.uom_code || ''}
-                    </option>
-                  ))}
-                  <option value="__NEW__">Other / New…</option>
-                </select>
-                <input
-                  className="input"
-                  placeholder="Type new location"
-                  value={useCustomLocation ? rcvLocation : ''}
-                  onChange={(e) => setRcvLocation(e.target.value)}
-                  disabled={!useCustomLocation}
-                />
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-2">
-              <Button type="button" onClick={() => setShowReceive(false)} className="bg-gray-200 hover:bg-gray-300 text-gray-900">
-                Cancel
-              </Button>
-              <Button type="button" onClick={submitReceive} disabled={loading}>
-                {loading ? 'Saving…' : 'Save'}
-              </Button>
+            <div className="flex gap-2">
+              <Button type="button" onClick={() => addReceiveLine()}>Add Line</Button>
+              <Button type="button" className="bg-gray-200 hover:bg-gray-300 text-gray-900" onClick={() => clearBulk('receive')}>Clear</Button>
             </div>
           </div>
-        )}
+
+          <div className="overflow-auto">
+            <table className="table w-full">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>SKU</th>
+                  <th>Item</th>
+                  <th>Qty</th>
+                  <th>UoM</th>
+                  <th>Purchase</th>
+                  <th>GST%</th>
+                  <th>Margin%</th>
+                  <th>Selling</th>
+                  <th>Ref</th>
+                  <th>Reason</th>
+                  <th style={{minWidth: 240}}>Location</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {receiveLines.length === 0 ? (
+                  <tr><td colSpan={13} className="p-3 text-sm text-gray-600">No lines. Click “Add Line”.</td></tr>
+                ) : receiveLines.map((ln, idx) => (
+                  <tr key={idx}>
+                    <td>{idx + 1}</td>
+                    <td>
+                      <SkuCell kind="receive" idx={idx} line={ln} />
+                      <RowError line={ln} />
+                    </td>
+                    <td style={{maxWidth: 220}}>
+                      <div className="text-sm truncate" title={ln.name || ''}>{ln.name || '—'}</div>
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        min={1}
+                        step="1"
+                        value={ln.qty || 0}
+                        onChange={(e) => updateLineField('receive', idx, 'qty', parseInt(e.target.value || '0', 10))}
+                      />
+                    </td>
+                    <td>
+                      <select
+                        className="input"
+                        value={ln.uom_code || ''}
+                        onChange={(e) => updateLineField('receive', idx, 'uom_code', e.target.value)}
+                      >
+                        <option value="">(default)</option>
+                        {allUoms.map(u => (
+                          <option key={u.code} value={u.code}>{u.code} — {u.name}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.01"
+                        min={0}
+                        value={ln.purchase_price ?? 0}
+                        onChange={(e) => {
+                          const v = parseFloat(e.target.value || '0');
+                          updateLineField('receive', idx, 'purchase_price', v);
+                          // auto compute selling
+                          const sale = Number((v * (1 + (Number(ln.gst_percent || 0) / 100)) * (1 + (Number(ln.margin_percent || 0) / 100))).toFixed(2));
+                          updateLineField('receive', idx, 'selling_price', sale);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.01"
+                        min={0}
+                        value={ln.gst_percent ?? 0}
+                        onChange={(e) => {
+                          const v = parseFloat(e.target.value || '0');
+                          updateLineField('receive', idx, 'gst_percent', v);
+                          const sale = Number(((Number(ln.purchase_price || 0)) * (1 + (v / 100)) * (1 + (Number(ln.margin_percent || 0) / 100))).toFixed(2));
+                          updateLineField('receive', idx, 'selling_price', sale);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.01"
+                        value={ln.margin_percent ?? 0}
+                        onChange={(e) => {
+                          const v = parseFloat(e.target.value || '0');
+                          updateLineField('receive', idx, 'margin_percent', v);
+                          const sale = Number(((Number(ln.purchase_price || 0)) * (1 + (Number(ln.gst_percent || 0) / 100)) * (1 + (v / 100))).toFixed(2));
+                          updateLineField('receive', idx, 'selling_price', sale);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.01"
+                        min={0}
+                        value={ln.selling_price ?? 0}
+                        onChange={(e) => updateLineField('receive', idx, 'selling_price', parseFloat(e.target.value || '0'))}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        value={ln.ref || ''}
+                        onChange={(e) => updateLineField('receive', idx, 'ref', e.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        value={ln.reason || ''}
+                        onChange={(e) => updateLineField('receive', idx, 'reason', e.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <LocationCell kind="receive" idx={idx} line={ln} />
+                    </td>
+                    <td>
+                      <Button type="button" className="bg-gray-200 hover:bg-gray-300 text-gray-900" onClick={() => removeLine('receive', idx)}>Remove</Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex items-center justify-end gap-2">
+            <Button type="button" onClick={() => setShowReceive(false)} className="bg-gray-200 hover:bg-gray-300 text-gray-900">
+              Cancel
+            </Button>
+            <Button type="button" onClick={submitReceiveBulk} disabled={loading}>
+              {loading ? 'Saving…' : 'Save All'}
+            </Button>
+          </div>
+        </div>
       </Modal>
 
-      {/* ------------------------ ISSUE MODAL --------------------------- */}
+      {/* ------------------------ ISSUE (BULK) MODAL --------------------------- */}
       <Modal
-        title={`Issue — ${found?.sku || ''}`}
+        title="Issue — Bulk"
         open={showIssue}
         onClose={() => setShowIssue(false)}
       >
-        {!found ? (
-          <div className="text-sm text-gray-600">Find an item first.</div>
-        ) : (
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="label">Qty</label>
-                <input
-                  className="input"
-                  type="number"
-                  min={1}
-                  step="1"
-                  value={mQty}
-                  onChange={(e) => setMQty(parseInt(e.target.value || '0', 10))}
-                />
-              </div>
-              <div>
-                <label className="label">Location</label>
-                <select
-                  className="input"
-                  value={mLocation}
-                  onChange={(e) => setMLocation(e.target.value)}
-                >
-                  <option value="">Select location…</option>
-                  {locBalances.map((l) => (
-                    <option key={l.name} value={l.name}>
-                      {l.name} — {l.qty} {found.uom_code || ''}
-                    </option>
-                  ))}
-                </select>
-                {mLocation && (
-                  <div className="text-xs text-gray-600 mt-1">
-                    Available at <b>{mLocation}</b>: <b>{selectedLocQty}</b> {found?.uom_code || ''}
-                  </div>
-                )}
-              </div>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-gray-600">
+              Enter multiple SKUs, select locations, and quantities to issue.
             </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="label">Reference</label>
-                <input className="input" value={mRef} onChange={(e) => setMRef(e.target.value)} />
-              </div>
-              <div>
-                <label className="label">Reason / Note</label>
-                <input className="input" value={mReason} onChange={(e) => setMReason(e.target.value)} />
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-2">
-              <Button type="button" onClick={() => setShowIssue(false)} className="bg-gray-200 hover:bg-gray-300 text-gray-900">
-                Cancel
-              </Button>
-              <Button type="button" onClick={submitIssue} disabled={loading}>
-                {loading ? 'Saving…' : 'Save'}
-              </Button>
+            <div className="flex gap-2">
+              <Button type="button" onClick={() => addIssueLine()}>Add Line</Button>
+              <Button type="button" className="bg-gray-200 hover:bg-gray-300 text-gray-900" onClick={() => clearBulk('issue')}>Clear</Button>
             </div>
           </div>
-        )}
+
+          <div className="overflow-auto">
+            <table className="table w-full">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>SKU</th>
+                  <th>Item</th>
+                  <th>Qty</th>
+                  <th>Location</th>
+                  <th>Ref</th>
+                  <th>Reason</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {issueLines.length === 0 ? (
+                  <tr><td colSpan={8} className="p-3 text-sm text-gray-600">No lines. Click “Add Line”.</td></tr>
+                ) : issueLines.map((ln, idx) => (
+                  <tr key={idx}>
+                    <td>{idx + 1}</td>
+                    <td>
+                      <SkuCell kind="issue" idx={idx} line={ln} />
+                      <RowError line={ln} />
+                    </td>
+                    <td style={{maxWidth: 220}}>
+                      <div className="text-sm truncate" title={ln.name || ''}>{ln.name || '—'}</div>
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        min={1}
+                        step="1"
+                        value={ln.qty || 0}
+                        onChange={(e) => updateLineField('issue', idx, 'qty', parseInt(e.target.value || '0', 10))}
+                      />
+                    </td>
+                    <td>
+                      <LocationCell kind="issue" idx={idx} line={ln} />
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        value={ln.ref || ''}
+                        onChange={(e) => updateLineField('issue', idx, 'ref', e.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        value={ln.reason || ''}
+                        onChange={(e) => updateLineField('issue', idx, 'reason', e.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <Button type="button" className="bg-gray-200 hover:bg-gray-300 text-gray-900" onClick={() => removeLine('issue', idx)}>Remove</Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex items-center justify-end gap-2">
+            <Button type="button" onClick={() => setShowIssue(false)} className="bg-gray-200 hover:bg-gray-300 text-gray-900">
+              Cancel
+            </Button>
+            <Button type="button" onClick={submitIssueBulk} disabled={loading}>
+              {loading ? 'Saving…' : 'Save All'}
+            </Button>
+          </div>
+        </div>
       </Modal>
 
-      {/* ------------------------ RETURN MODAL -------------------------- */}
+      {/* ------------------------ RETURN (BULK) MODAL -------------------------- */}
       <Modal
-        title={`Return — ${found?.sku || ''}`}
+        title="Return — Bulk"
         open={showReturn}
         onClose={() => setShowReturn(false)}
       >
-        {!found ? (
-          <div className="text-sm text-gray-600">Find an item first.</div>
-        ) : (
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="label">Qty</label>
-                <input
-                  className="input"
-                  type="number"
-                  min={1}
-                  step="1"
-                  value={mQty}
-                  onChange={(e) => setMQty(parseInt(e.target.value || '0', 10))}
-                />
-              </div>
-              <div>
-                <label className="label">Location</label>
-                <select
-                  className="input"
-                  value={mLocation}
-                  onChange={(e) => setMLocation(e.target.value)}
-                >
-                  <option value="">Select location…</option>
-                  {locBalances.map((l) => (
-                    <option key={l.name} value={l.name}>
-                      {l.name} — {l.qty} {found.uom_code || ''}
-                    </option>
-                  ))}
-                </select>
-              </div>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-gray-600">
+              Enter multiple SKUs, select the location to return into, and quantities.
             </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="label">Reference</label>
-                <input className="input" value={mRef} onChange={(e) => setMRef(e.target.value)} />
-              </div>
-              <div>
-                <label className="label">Reason / Note</label>
-                <input className="input" value={mReason} onChange={(e) => setMReason(e.target.value)} />
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-2">
-              <Button type="button" onClick={() => setShowReturn(false)} className="bg-gray-200 hover:bg-gray-300 text-gray-900">
-                Cancel
-              </Button>
-              <Button type="button" onClick={submitReturn} disabled={loading}>
-                {loading ? 'Saving…' : 'Save'}
-              </Button>
+            <div className="flex gap-2">
+              <Button type="button" onClick={() => addReturnLine()}>Add Line</Button>
+              <Button type="button" className="bg-gray-200 hover:bg-gray-300 text-gray-900" onClick={() => clearBulk('return')}>Clear</Button>
             </div>
           </div>
-        )}
+
+          <div className="overflow-auto">
+            <table className="table w-full">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>SKU</th>
+                  <th>Item</th>
+                  <th>Qty</th>
+                  <th>Location</th>
+                  <th>Ref</th>
+                  <th>Reason</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {returnLines.length === 0 ? (
+                  <tr><td colSpan={8} className="p-3 text-sm text-gray-600">No lines. Click “Add Line”.</td></tr>
+                ) : returnLines.map((ln, idx) => (
+                  <tr key={idx}>
+                    <td>{idx + 1}</td>
+                    <td>
+                      <SkuCell kind="return" idx={idx} line={ln} />
+                      <RowError line={ln} />
+                    </td>
+                    <td style={{maxWidth: 220}}>
+                      <div className="text-sm truncate" title={ln.name || ''}>{ln.name || '—'}</div>
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        min={1}
+                        step="1"
+                        value={ln.qty || 0}
+                        onChange={(e) => updateLineField('return', idx, 'qty', parseInt(e.target.value || '0', 10))}
+                      />
+                    </td>
+                    <td>
+                      <LocationCell kind="return" idx={idx} line={ln} />
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        value={ln.ref || ''}
+                        onChange={(e) => updateLineField('return', idx, 'ref', e.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        value={ln.reason || ''}
+                        onChange={(e) => updateLineField('return', idx, 'reason', e.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <Button type="button" className="bg-gray-200 hover:bg-gray-300 text-gray-900" onClick={() => removeLine('return', idx)}>Remove</Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex items-center justify-end gap-2">
+            <Button type="button" onClick={() => setShowReturn(false)} className="bg-gray-200 hover:bg-gray-300 text-gray-900">
+              Cancel
+            </Button>
+            <Button type="button" onClick={submitReturnBulk} disabled={loading}>
+              {loading ? 'Saving…' : 'Save All'}
+            </Button>
+          </div>
+        </div>
       </Modal>
 
-      {/* ------------------------ ADJUST MODAL -------------------------- */}
+      {/* ------------------------ ADJUST (BULK) MODAL -------------------------- */}
       <Modal
-        title={`Adjust — ${found?.sku || ''}`}
+        title="Adjust — Bulk"
         open={showAdjust}
         onClose={() => setShowAdjust(false)}
       >
-        {!found ? (
-          <div className="text-sm text-gray-600">Find an item first.</div>
-        ) : (
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="label">Delta Qty (use negative to reduce)</label>
-                <input
-                  className="input"
-                  type="number"
-                  step="1"
-                  value={mQty}
-                  onChange={(e) => setMQty(parseInt(e.target.value || '0', 10))}
-                  placeholder="-2 (lost) or 3 (found)"
-                />
-              </div>
-              <div>
-                <label className="label">Location</label>
-                <select
-                  className="input"
-                  value={mLocation}
-                  onChange={(e) => setMLocation(e.target.value)}
-                >
-                  <option value="">Select location…</option>
-                  {locBalances.map((l) => (
-                    <option key={l.name} value={l.name}>
-                      {l.name} — {l.qty} {found.uom_code || ''}
-                    </option>
-                  ))}
-                </select>
-              </div>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-gray-600">
+              Positive delta increases stock, negative delta decreases stock. Location negative check is enforced per row.
             </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="label">Reference</label>
-                <input className="input" value={mRef} onChange={(e) => setMRef(e.target.value)} />
-              </div>
-              <div>
-                <label className="label">Reason / Note</label>
-                <input className="input" value={mReason} onChange={(e) => setMReason(e.target.value)} />
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-2">
-              <Button type="button" onClick={() => setShowAdjust(false)} className="bg-gray-200 hover:bg-gray-300 text-gray-900">
-                Cancel
-              </Button>
-              <Button type="button" onClick={submitAdjust} disabled={loading}>
-                {loading ? 'Saving…' : 'Save'}
-              </Button>
+            <div className="flex gap-2">
+              <Button type="button" onClick={() => addAdjustLine()}>Add Line</Button>
+              <Button type="button" className="bg-gray-200 hover:bg-gray-300 text-gray-900" onClick={() => clearBulk('adjust')}>Clear</Button>
             </div>
           </div>
-        )}
+
+          <div className="overflow-auto">
+            <table className="table w-full">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>SKU</th>
+                  <th>Item</th>
+                  <th>Delta Qty</th>
+                  <th>Location</th>
+                  <th>Ref</th>
+                  <th>Reason</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {adjustLines.length === 0 ? (
+                  <tr><td colSpan={8} className="p-3 text-sm text-gray-600">No lines. Click “Add Line”.</td></tr>
+                ) : adjustLines.map((ln, idx) => (
+                  <tr key={idx}>
+                    <td>{idx + 1}</td>
+                    <td>
+                      <SkuCell kind="adjust" idx={idx} line={ln} />
+                      <RowError line={ln} />
+                    </td>
+                    <td style={{maxWidth: 220}}>
+                      <div className="text-sm truncate" title={ln.name || ''}>{ln.name || '—'}</div>
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        step="1"
+                        value={ln.qty || 0}
+                        onChange={(e) => updateLineField('adjust', idx, 'qty', parseInt(e.target.value || '0', 10))}
+                        placeholder="-2 (lost) or 3 (found)"
+                      />
+                    </td>
+                    <td>
+                      <LocationCell kind="adjust" idx={idx} line={ln} />
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        value={ln.ref || ''}
+                        onChange={(e) => updateLineField('adjust', idx, 'ref', e.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        value={ln.reason || ''}
+                        onChange={(e) => updateLineField('adjust', idx, 'reason', e.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <Button type="button" className="bg-gray-200 hover:bg-gray-300 text-gray-900" onClick={() => removeLine('adjust', idx)}>Remove</Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex items-center justify-end gap-2">
+            <Button type="button" onClick={() => setShowAdjust(false)} className="bg-gray-200 hover:bg-gray-300 text-gray-900">
+              Cancel
+            </Button>
+            <Button type="button" onClick={submitAdjustBulk} disabled={loading}>
+              {loading ? 'Saving…' : 'Save All'}
+            </Button>
+          </div>
+        </div>
       </Modal>
     </div>
   );
