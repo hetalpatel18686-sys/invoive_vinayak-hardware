@@ -28,8 +28,8 @@ interface ItemDb {
   sku: string;
   name: string;
   unit_cost: number;
-  tax_rate?: number | null;      // fallback for GST if gst_percent not present
-  gst_percent?: number | null;   // preferred GST% field if available
+  tax_rate?: number | null;
+  gst_percent?: number | null;
   margin_percent?: number | null;
   uom: { code?: string }[] | { code?: string } | null;
 }
@@ -40,12 +40,10 @@ interface Row {
   item_id: string;
   description: string;
   uom_code: string;
-  base_cost: number;   // "current cost" as base reference
-  gst_pct: number;     // GST % (hidden in UI)
-  margin_pct: number;  // Margin % (hidden in UI)
+  base_cost: number;   // current cost as base
+  gst_pct: number;     // hidden in UI
+  margin_pct: number;  // hidden in UI
   qty: number;
-
-  // internal helper
   last_sku_tried?: string;
 }
 
@@ -161,11 +159,13 @@ export default function EstimatePage() {
      Compute Totals
      ================================= */
   function computeUnit(base: number, gst: number, margin: number) {
-    // As requested: current cost + GST + Margin (additive on base)
+    // current cost + GST + Margin (additive on base)
     const b = Number(base || 0);
     const g = Number(gst || 0);
     const m = Number(margin || 0);
     return ceilRupee(b + b * g / 100 + b * m / 100);
+    // NOTE: When seeded from Inventory, we set base_cost = selling and gst/margin = 0,
+    // so per-unit becomes exactly the Inventory computed selling.
   }
   const totals = useMemo(() => {
     let grand = 0;
@@ -179,8 +179,6 @@ export default function EstimatePage() {
 
   /* =================================
      Seed from Inventory (Estimate Selected)
-     - Inventory sets localStorage.estimate-seed = [{ sku, qty, name, uom_code, selling }]
-     - Opens /estimate/new?seed=1
      ================================= */
   useEffect(() => {
     try {
@@ -197,12 +195,10 @@ export default function EstimatePage() {
         .map((it: any) => ({
           id: makeId(),
           sku_input: String(it.sku || it.SKU || ''),
-          item_id: '', // optional (we can fill later via lookup if you want)
+          item_id: '', // optional
           description: String(it.name || it.sku || ''),
           uom_code: String(it.uom_code || ''),
-          // Treat Inventory "selling" (already cost+GST+margin) as unit price by setting it as base_cost
-          // and zeroing gst/margin → perUnit = base_cost
-          base_cost: Number(it.selling || 0),
+          base_cost: Number(it.selling || 0), // selling already = cost+GST+margin
           gst_pct: 0,
           margin_pct: 0,
           qty: Math.max(1, Number(it.qty || 1)),
@@ -222,9 +218,6 @@ export default function EstimatePage() {
           setQrMap(prev => ({ ...prev, ...obj }));
         })
         .catch(() => {});
-
-      // Optional: clear seed to avoid reapplying on refresh
-      // localStorage.removeItem('estimate-seed');
     } catch (e) {
       console.error('Failed to read estimate-seed:', e);
     }
@@ -408,7 +401,7 @@ export default function EstimatePage() {
     if (error) return alert(error.message);
 
     if (!data || data.length === 0) {
-      setNewCust({ first_name: '', last_name: '', phone, street_name: '', village_town: '', city: '', state: '', postal_code: '' });
+      setNewCust({ first_name: '', last_name: '', phone, street_name: '', village_town: '', city, state: '', postal_code: '' });
       setShowCreateCustomer(true);
       setCustomerId(''); setCustomerName(''); setCustomerAddress1Line('');
     } else {
@@ -438,8 +431,6 @@ export default function EstimatePage() {
 
   /* =================================
      Save (Estimate only; no stock ops)
-     - Try 'estimates' & 'estimate_items' first
-     - Fallback to 'invoices' with doc_type='estimate'
      ================================= */
   const latch = () => {
     if (savingRef.current || saving) return true;
@@ -477,7 +468,7 @@ export default function EstimatePage() {
         setEstimateNo(estNo);
       }
 
-      // Lines (unit already includes gst+margin through computeUnit)
+      // Lines
       const lines = rows
         .filter(r => (r.item_id || r.sku_input) && Number(r.qty || 0) > 0)
         .map(r => {
@@ -488,7 +479,7 @@ export default function EstimatePage() {
             description: r.description,
             qty: Number(r.qty || 0),
             unit_price: ceilRupee(unit),
-            tax_rate: 0, // tax included in unit for estimate view
+            tax_rate: 0,
             line_total: ceilRupee(unit * Number(r.qty || 0)),
             base_cost_at_sale: r.base_cost,
             margin_pct_at_sale: r.margin_pct,
@@ -501,7 +492,6 @@ export default function EstimatePage() {
       let usedTable: 'estimates' | 'invoices' = 'estimates';
       let savedId: string | null = null;
 
-      // Try dedicated estimates tables
       try {
         const { data: est, error: e1 } = await supabase
           .from('estimates')
@@ -518,7 +508,6 @@ export default function EstimatePage() {
         if (e1) throw e1;
         savedId = (est as any).id;
 
-        // Insert estimate items if table exists
         const { error: e2 } = await supabase
           .from('estimate_items')
           .insert(lines.map(l => ({ ...l, estimate_id: savedId })));
@@ -556,7 +545,6 @@ export default function EstimatePage() {
             line_total: l.line_total,
             base_cost_at_sale: l.base_cost_at_sale,
             margin_pct_at_sale: l.margin_pct_at_sale,
-            // Optionally store sku/uom in a JSONB meta if you have it
           })));
         if (e2) throw e2;
       }
@@ -579,8 +567,67 @@ export default function EstimatePage() {
     setSaving(false);
   };
 
+  /* ================================
+     PRINT-ONLY STYLES + PRINT LAYOUT
+     - .no-print is hidden in print
+     - .print-area is the only thing shown
+     - Tables have compact spacing + numeric alignment
+     ================================ */
+  const PrintStyles = () => (
+    <style>{`
+      .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+      /* Screen tweaks for print block preview (optional) */
+      .print-area table { width: 100%; border-collapse: collapse; }
+      .print-area th, .print-area td {
+        padding: 6px 8px;
+        border-bottom: 1px dashed #ddd;
+        vertical-align: middle;
+      }
+      .print-area thead th {
+        border-bottom: 1px solid #bbb;
+        font-weight: 600;
+      }
+      .print-area tfoot td {
+        border-top: 1px solid #bbb;
+      }
+
+      @media print {
+        @page { margin: 10mm; }
+        body { background: #fff !important; }
+        /* Hide everything by default */
+        body * { visibility: hidden; }
+        /* Show print area only */
+        .print-area, .print-area * { visibility: visible; }
+        .print-area { position: absolute; left: 0; top: 0; right: 0; }
+        /* Ensure tables render cleanly on paper */
+        .print-area table { page-break-inside: auto; }
+        .print-area tr { page-break-inside: avoid; page-break-after: auto; }
+        .no-print { display: none !important; }
+      }
+    `}</style>
+  );
+
+  // Build the same lines structure for print
+  const printableLines = rows
+    .filter(r => (r.item_id || r.sku_input) && Number(r.qty || 0) > 0)
+    .map(r => {
+      const unit = computeUnit(r.base_cost, r.gst_pct, r.margin_pct);
+      const lineTotal = ceilRupee(unit * Number(r.qty || 0));
+      return {
+        sku: r.sku_input,
+        description: r.description,
+        uom_code: r.uom_code || '',
+        qty: r.qty,
+        unit_price: unit,
+        line_total: lineTotal,
+      };
+    });
+
   return (
     <Protected>
+      <PrintStyles />
+
       {/* Hidden input to capture barcode scans when Barcode Mode is ON */}
       <input
         ref={barcodeInputRef}
@@ -598,237 +645,312 @@ export default function EstimatePage() {
         tabIndex={barcodeMode ? 0 : -1}
       />
 
-      {/* Header */}
-      <div className="card mb-4">
-        <div className="flex items-center gap-4">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={brandLogo} alt="logo" className="h-14 w-14 rounded bg-white object-contain" />
-          <div>
-            <div className="text-2xl font-bold text-orange-600">{brandName}</div>
-            <div className="text-sm text-gray-700">{brandAddress}</div>
-            <div className="text-sm text-gray-700">Phone: {brandPhone}</div>
+      {/* ====== EDITOR (not printed) ====== */}
+      <div className="no-print">
+        {/* Header */}
+        <div className="card mb-4">
+          <div className="flex items-center gap-4">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={brandLogo} alt="logo" className="h-14 w-14 rounded bg-white object-contain" />
+            <div>
+              <div className="text-2xl font-bold text-orange-600">{brandName}</div>
+              <div className="text-sm text-gray-700">{brandAddress}</div>
+              <div className="text-sm text-gray-700">Phone: {brandPhone}</div>
+            </div>
+
+            <div className="ml-auto flex gap-2 items-center flex-wrap">
+              <Link href="/inventory" className="rounded border px-3 py-2 hover:bg-neutral-50">Back to Inventory</Link>
+
+              <label className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
+                <input
+                  type="checkbox"
+                  checked={barcodeMode}
+                  onChange={(e) => {
+                    setBarcodeMode(e.target.checked);
+                    if (e.target.checked) setTimeout(() => barcodeInputRef.current?.focus(), 0);
+                  }}
+                />
+                <span className="text-sm font-medium">Barcode Mode</span>
+              </label>
+
+              <label className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
+                <span className="text-sm font-medium">Scan Qty</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  className="input w-20"
+                  value={scanQty}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value || '1', 10);
+                    setScanQty(Number.isFinite(v) && v > 0 ? v : 1);
+                  }}
+                  disabled={!barcodeMode}
+                  title="How many units to add per scan"
+                />
+              </label>
+
+              <Button type="button" onClick={handleNew} className="bg-gray-700 hover:bg-gray-800">
+                New Estimate
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <div className="card">
+          <h1 className="text-xl font-semibold mb-4">New Estimate</h1>
+
+          {/* Top fields */}
+          <div className="grid md-grid-cols-3 md:grid-cols-3 gap-3 mb-4">
+            <div>
+              <label className="label">Estimate No</label>
+              <input
+                className="input"
+                placeholder="Auto on save or enter manually"
+                value={estimateNo}
+                onChange={(e) => setEstimateNo(e.target.value)}
+              />
+            </div>
+
+            <div>
+              <label className="label">Estimate Date</label>
+              <input className="input" type="date" value={issuedAt} onChange={(e) => setIssuedAt(e.target.value)} />
+            </div>
+
+            <div>
+              <label className="label">Notes</label>
+              <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional notes" />
+            </div>
           </div>
 
-          <div className="ml-auto flex gap-2 items-center flex-wrap">
-            <Link href="/inventory" className="rounded border px-3 py-2 hover:bg-neutral-50">Back to Inventory</Link>
+          {/* Customer */}
+          <div className="card mb-4">
+            <div className="grid md:grid-cols-3 gap-3 items-end">
+              <div>
+                <label className="label">Customer Mobile</label>
+                <input className="input" placeholder="Enter mobile number" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} />
+              </div>
+              <div><Button type="button" onClick={lookupCustomerByPhone}>Lookup Customer</Button></div>
+              <div className="text-sm">
+                <div className="font-semibold">Customer</div>
+                <div>{customerName || '—'}</div>
+                <div className="text-gray-600">{customerAddress1Line || '—'}</div>
+              </div>
+            </div>
 
-            <label className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
-              <input
-                type="checkbox"
-                checked={barcodeMode}
-                onChange={(e) => {
-                  setBarcodeMode(e.target.checked);
-                  if (e.target.checked) setTimeout(() => barcodeInputRef.current?.focus(), 0);
-                }}
-              />
-              <span className="text-sm font-medium">Barcode Mode</span>
-            </label>
+            {showCreateCustomer && (
+              <div className="mt-4 border-t pt-4">
+                <div className="grid md:grid-cols-3 gap-3">
+                  <div><label className="label">First name</label><input className="input" value={newCust.first_name} onChange={(e)=>setNewCust({ ...newCust, first_name: e.target.value })} /></div>
+                  <div><label className="label">Last name</label><input className="input" value={newCust.last_name} onChange={(e)=>setNewCust({ ...newCust, last_name: e.target.value })} /></div>
+                  <div><label className="label">Phone</label><input className="input" value={newCust.phone} onChange={(e)=>setNewCust({ ...newCust, phone: e.target.value })} /></div>
+                  <div className="md:col-span-3"><label className="label">Street</label><input className="input" value={newCust.street_name} onChange={(e)=>setNewCust({ ...newCust, street_name: e.target.value })} /></div>
+                  <div><label className="label">Village/Town</label><input className="input" value={newCust.village_town} onChange={(e)=>setNewCust({ ...newCust, village_town: e.target.value })} /></div>
+                  <div><label className="label">City</label><input className="input" value={newCust.city} onChange={(e)=>setNewCust({ ...newCust, city: e.target.value })} /></div>
+                  <div><label className="label">State</label><input className="input" value={newCust.state} onChange={(e)=>setNewCust({ ...newCust, state: e.target.value })} /></div>
+                  <div><label className="label">PIN</label><input className="input" value={newCust.postal_code} onChange={(e)=>setNewCust({ ...newCust, postal_code: e.target.value })} /></div>
+                </div>
+                <div className="mt-3"><Button type="button" onClick={createCustomer}>Create Customer</Button></div>
+              </div>
+            )}
+          </div>
 
-            <label className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
-              <span className="text-sm font-medium">Scan Qty</span>
-              <input
-                type="number"
-                min={1}
-                step={1}
-                className="input w-20"
-                value={scanQty}
-                onChange={(e) => {
-                  const v = parseInt(e.target.value || '1', 10);
-                  setScanQty(Number.isFinite(v) && v > 0 ? v : 1);
-                }}
-                disabled={!barcodeMode}
-                title="How many units to add per scan"
-              />
-            </label>
+          {/* Lines */}
+          <div className="overflow-auto">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th style={{ minWidth: 160 }}>Item (SKU)</th>
+                  <th style={{ minWidth: 220 }}>Description</th>
+                  <th style={{ minWidth: 80 }}>UoM</th>
+                  <th style={{ minWidth: 80 }}>Qty</th>
+                  <th style={{ minWidth: 140 }}>Item QR</th>
+                  <th style={{ minWidth: 140 }} className="text-right">Line Total</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => {
+                  const perUnit = computeUnit(r.base_cost, r.gst_pct, r.margin_pct);
+                  const lineTotal = ceilRupee((r.qty || 0) * perUnit);
+                  const qr = qrMap[r.id];
 
-            <Button type="button" onClick={handleNew} className="bg-gray-700 hover:bg-gray-800">
-              New Estimate
-            </Button>
+                  return (
+                    <tr key={r.id}>
+                      <td>
+                        <input
+                          className="input"
+                          placeholder={barcodeMode ? "Scan barcode…" : "Type/Scan SKU or press Enter"}
+                          value={r.sku_input}
+                          onChange={(e) => setSkuInput(r.id, e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              const sku = r.sku_input.trim();
+                              setRows(prev => prev.map(x => x.id === r.id ? { ...x, last_sku_tried: sku } : x));
+                              setItemBySku(r.id, sku);
+                            }
+                          }}
+                          onBlur={() => {
+                            const v = (r.sku_input || '').trim();
+                            if (!r.item_id && v && v.toLowerCase() !== (r.last_sku_tried || '').toLowerCase()) {
+                              setRows(prev => prev.map(x => x.id === r.id ? { ...x, last_sku_tried: v } : x));
+                              setItemBySku(r.id, v);
+                            }
+                          }}
+                          readOnly={barcodeMode}
+                          title={barcodeMode ? 'Barcode Mode ON: SKU is read-only. Scan to add/increase.' : undefined}
+                          ref={(el) => { skuInputRefs.current[r.id] = el; }}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          className="input"
+                          placeholder="Description"
+                          value={r.description}
+                          onChange={(e) => setDescription(r.id, e.target.value)}
+                          disabled={!r.sku_input}
+                        />
+                      </td>
+                      <td>
+                        <input className="input" value={r.uom_code || ''} readOnly placeholder="-" />
+                      </td>
+                      <td>
+                        <input
+                          className="input"
+                          type="number"
+                          min={0}
+                          step="1"
+                          value={r.qty}
+                          onChange={(e) => setQty(r.id, parseFloat(e.target.value || '0'))}
+                          disabled={!r.sku_input}
+                        />
+                      </td>
+                      <td>
+                        {!r.sku_input ? (
+                          <div className="text-xs text-gray-500">—</div>
+                        ) : !qr ? (
+                          <div className="text-xs text-gray-500">Generating…</div>
+                        ) : (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={qr} alt={`QR ${r.sku_input}`} className="h-12 w-12 object-contain bg-white rounded" />
+                        )}
+                        {r.sku_input && (
+                          <div className="mt-1 text-[11px] text-gray-600">SKU: {r.sku_input}</div>
+                        )}
+                      </td>
+                      <td className="text-right">₹ {lineTotal.toFixed(0)}</td>
+                      <td>
+                        <button type="button" className="text-red-600 hover:underline" onClick={() => removeRow(r.id)}>
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td colSpan={7}>
+                    <Button type="button" onClick={addRow}>+ Add Line</Button>
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+
+          {/* Totals + Save */}
+          <div className="mt-6 grid lg:grid-cols-3 gap-4">
+            <div className="lg:col-span-2" />
+            <div className="card">
+              <div className="flex justify-between font-semibold text-lg">
+                <div>Total</div>
+                <div>₹ {totals.grand.toFixed(0)}</div>
+              </div>
+              <div className="mt-4 flex gap-2 flex-wrap">
+                <Button type="button" onClick={saveEstimate} disabled={saving}>
+                  {saving ? 'Saving…' : 'Save Estimate'}
+                </Button>
+                <Button type="button" onClick={() => window.print()} className="bg-gray-700 hover:bg-gray-800">
+                  Print
+                </Button>
+                {estimateNo && <div className="text-sm text-gray-600 self-center">Saved #{estimateNo}</div>}
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
-      <div className="card">
-        <h1 className="text-xl font-semibold mb-4">New Estimate</h1>
-
-        {/* Top fields */}
-        <div className="grid md-grid-cols-3 md:grid-cols-3 gap-3 mb-4">
+      {/* ====== PRINT-ONLY AREA ====== */}
+      <div className="print-area">
+        {/* Brand header */}
+        <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', marginBottom: 12 }}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          {brandLogo ? <img src={brandLogo} alt="logo" style={{ width: 48, height: 48, objectFit: 'contain', borderRadius: 6, background: '#fff' }} /> : null}
           <div>
-            <label className="label">Estimate No</label>
-            <input
-              className="input"
-              placeholder="Auto on save or enter manually"
-              value={estimateNo}
-              onChange={(e) => setEstimateNo(e.target.value)}
-            />
-          </div>
-
-          <div>
-            <label className="label">Estimate Date</label>
-            <input className="input" type="date" value={issuedAt} onChange={(e) => setIssuedAt(e.target.value)} />
-          </div>
-
-          <div>
-            <label className="label">Notes</label>
-            <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional notes" />
+            <div style={{ fontSize: 22, fontWeight: 800, color: '#ea580c' }}>{brandName}</div>
+            <div style={{ fontSize: 12, color: '#374151' }}>{brandAddress}</div>
+            <div style={{ fontSize: 12, color: '#374151' }}>Phone: {brandPhone}</div>
           </div>
         </div>
 
-        {/* Customer */}
-        <div className="card mb-4">
-          <div className="grid md:grid-cols-3 gap-3 items-end">
-            <div>
-              <label className="label">Customer Mobile</label>
-              <input className="input" placeholder="Enter mobile number" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} />
-            </div>
-            <div><Button type="button" onClick={lookupCustomerByPhone}>Lookup Customer</Button></div>
-            <div className="text-sm">
-              <div className="font-semibold">Customer</div>
-              <div>{customerName || '—'}</div>
-              <div className="text-gray-600">{customerAddress1Line || '—'}</div>
-            </div>
+        {/* Doc header */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 600 }}>Estimate</div>
+            {estimateNo ? <div style={{ fontSize: 12, color: '#374151' }}>No: {estimateNo}</div> : null}
+            <div style={{ fontSize: 12, color: '#374151' }}>Date: {issuedAt || '—'}</div>
           </div>
-
-          {showCreateCustomer && (
-            <div className="mt-4 border-t pt-4">
-              <div className="grid md:grid-cols-3 gap-3">
-                <div><label className="label">First name</label><input className="input" value={newCust.first_name} onChange={(e)=>setNewCust({ ...newCust, first_name: e.target.value })} /></div>
-                <div><label className="label">Last name</label><input className="input" value={newCust.last_name} onChange={(e)=>setNewCust({ ...newCust, last_name: e.target.value })} /></div>
-                <div><label className="label">Phone</label><input className="input" value={newCust.phone} onChange={(e)=>setNewCust({ ...newCust, phone: e.target.value })} /></div>
-                <div className="md:col-span-3"><label className="label">Street</label><input className="input" value={newCust.street_name} onChange={(e)=>setNewCust({ ...newCust, street_name: e.target.value })} /></div>
-                <div><label className="label">Village/Town</label><input className="input" value={newCust.village_town} onChange={(e)=>setNewCust({ ...newCust, village_town: e.target.value })} /></div>
-                <div><label className="label">City</label><input className="input" value={newCust.city} onChange={(e)=>setNewCust({ ...newCust, city: e.target.value })} /></div>
-                <div><label className="label">State</label><input className="input" value={newCust.state} onChange={(e)=>setNewCust({ ...newCust, state: e.target.value })} /></div>
-                <div><label className="label">PIN</label><input className="input" value={newCust.postal_code} onChange={(e)=>setNewCust({ ...newCust, postal_code: e.target.value })} /></div>
-              </div>
-              <div className="mt-3"><Button type="button" onClick={createCustomer}>Create Customer</Button></div>
-            </div>
-          )}
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontWeight: 600 }}>Bill To</div>
+            <div style={{ fontSize: 13 }}>{customerName || '—'}</div>
+            <div style={{ fontSize: 12, color: '#374151' }}>{customerAddress1Line || '—'}</div>
+            {notes ? <div style={{ fontSize: 12, color: '#374151', marginTop: 4 }}>Notes: {notes}</div> : null}
+          </div>
         </div>
 
         {/* Lines */}
-        <div className="overflow-auto">
-          <table className="table">
+        <div style={{ overflow: 'hidden' }}>
+          <table>
             <thead>
               <tr>
-                <th style={{ minWidth: 160 }}>Item (SKU)</th>
+                <th>SKU</th>
                 <th style={{ minWidth: 220 }}>Description</th>
-                <th style={{ minWidth: 80 }}>UoM</th>
-                <th style={{ minWidth: 80 }}>Qty</th>
-                <th style={{ minWidth: 140 }}>Item QR</th>
-                <th style={{ minWidth: 140 }} className="text-right">Line Total</th>
-                <th></th>
+                <th>UoM</th>
+                <th className="num">Qty</th>
+                <th className="num">Unit</th>
+                <th className="num">Line Total</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => {
-                const perUnit = computeUnit(r.base_cost, r.gst_pct, r.margin_pct);
-                const lineTotal = ceilRupee((r.qty || 0) * perUnit);
-                const qr = qrMap[r.id];
-
-                return (
-                  <tr key={r.id}>
-                    <td>
-                      <input
-                        className="input"
-                        placeholder={barcodeMode ? "Scan barcode…" : "Type/Scan SKU or press Enter"}
-                        value={r.sku_input}
-                        onChange={(e) => setSkuInput(r.id, e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            const sku = r.sku_input.trim();
-                            setRows(prev => prev.map(x => x.id === r.id ? { ...x, last_sku_tried: sku } : x));
-                            setItemBySku(r.id, sku);
-                          }
-                        }}
-                        onBlur={() => {
-                          const v = (r.sku_input || '').trim();
-                          if (!r.item_id && v && v.toLowerCase() !== (r.last_sku_tried || '').toLowerCase()) {
-                            setRows(prev => prev.map(x => x.id === r.id ? { ...x, last_sku_tried: v } : x));
-                            setItemBySku(r.id, v);
-                          }
-                        }}
-                        readOnly={barcodeMode}
-                        title={barcodeMode ? 'Barcode Mode ON: SKU is read-only. Scan to add/increase.' : undefined}
-                        ref={(el) => { skuInputRefs.current[r.id] = el; }}
-                      />
-                    </td>
-                    <td>
-                      <input
-                        className="input"
-                        placeholder="Description"
-                        value={r.description}
-                        onChange={(e) => setDescription(r.id, e.target.value)}
-                        disabled={!r.sku_input}
-                      />
-                    </td>
-                    <td>
-                      <input className="input" value={r.uom_code || ''} readOnly placeholder="-" />
-                    </td>
-                    <td>
-                      <input
-                        className="input"
-                        type="number"
-                        min={0}
-                        step="1"
-                        value={r.qty}
-                        onChange={(e) => setQty(r.id, parseFloat(e.target.value || '0'))}
-                        disabled={!r.sku_input}
-                      />
-                    </td>
-                    <td>
-                      {!r.sku_input ? (
-                        <div className="text-xs text-gray-500">—</div>
-                      ) : !qr ? (
-                        <div className="text-xs text-gray-500">Generating…</div>
-                      ) : (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={qr} alt={`QR ${r.sku_input}`} className="h-12 w-12 object-contain bg-white rounded" />
-                      )}
-                      {r.sku_input && (
-                        <div className="mt-1 text-[11px] text-gray-600">SKU: {r.sku_input}</div>
-                      )}
-                    </td>
-                    <td className="text-right">₹ {lineTotal.toFixed(0)}</td>
-                    <td>
-                      <button type="button" className="text-red-600 hover:underline" onClick={() => removeRow(r.id)}>
-                        Remove
-                      </button>
-                    </td>
+              {printableLines.length === 0 ? (
+                <tr><td colSpan={6} style={{ padding: '10px 8px', fontSize: 12, color: '#6b7280' }}>No items</td></tr>
+              ) : (
+                printableLines.map((ln, idx) => (
+                  <tr key={idx}>
+                    <td>{ln.sku}</td>
+                    <td>{ln.description}</td>
+                    <td>{ln.uom_code || '-'}</td>
+                    <td className="num">{ln.qty}</td>
+                    <td className="num">₹ {Number(ln.unit_price || 0).toFixed(0)}</td>
+                    <td className="num">₹ {Number(ln.line_total || 0).toFixed(0)}</td>
                   </tr>
-                );
-              })}
+                ))
+              )}
             </tbody>
             <tfoot>
-              <tr>
-                <td colSpan={7}>
-                  <Button type="button" onClick={addRow}>+ Add Line</Button>
-                </td>
+              <tr className="num" style={{ fontWeight: 600 }}>
+                <td colSpan={5} style={{ textAlign: 'right' }}>Total</td>
+                <td>₹ {totals.grand.toFixed(0)}</td>
               </tr>
             </tfoot>
           </table>
         </div>
 
-        {/* Totals + Save */}
-        <div className="mt-6 grid lg:grid-cols-3 gap-4">
-          <div className="lg:col-span-2" />
-          <div className="card">
-            <div className="flex justify-between font-semibold text-lg">
-              <div>Total</div>
-              <div>₹ {totals.grand.toFixed(0)}</div>
-            </div>
-            <div className="mt-4 flex gap-2 flex-wrap">
-              <Button type="button" onClick={saveEstimate} disabled={saving}>
-                {saving ? 'Saving…' : 'Save Estimate'}
-              </Button>
-              <Button type="button" onClick={() => window.print()} className="bg-gray-700 hover:bg-gray-800">
-                Print
-              </Button>
-              {estimateNo && <div className="text-sm text-gray-600 self-center">Saved #{estimateNo}</div>}
-            </div>
-          </div>
-        </div>
+        {/* Optional terms footer */}
+        {/* <div style={{ marginTop: 12, fontSize: 11, color: '#374151' }}>
+          Thank you for your business!
+        </div> */}
       </div>
     </Protected>
   );
