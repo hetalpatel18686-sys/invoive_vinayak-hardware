@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
+import Link from 'next/link';
 
 /* -------------------------------- Modal -------------------------------- */
 
@@ -1076,6 +1077,14 @@ export default function Stock() {
 
   return (
     <div className="grid md:grid-cols-3 gap-4">
+
+      {/* Back to Dashboard */}
+    <div className="mb-3 flex items-center justify-end">
+      /dashboard
+        ← Back to Dashboard
+      </Link>
+    </div>
+    
       {/* LEFT: SKU + Actions */}
       <div className="card">
         <div className="flex items-center justify-between mb-3">
