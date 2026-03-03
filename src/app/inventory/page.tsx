@@ -699,9 +699,19 @@ export default function InventoryPage() {
 
   /* ========= RENDER ========= */
   return (
-    <div className="space-y-4">
-      <div className="card">
-        {/* Filters / actions */}
+   return (
+  <div className="space-y-4">
+
+    {/* Back to Dashboard */}
+    <div className="flex items-center justify-end">
+      /dashboard
+        ← Back to Dashboard
+      </Link>
+    </div>
+
+    <div className="card">
+      {/* Filters / actions */}
+      ...
         <div className="flex flex-wrap items-end gap-3 mb-3">
           <div className="text-lg font-semibold mr-auto">Inventory</div>
 
