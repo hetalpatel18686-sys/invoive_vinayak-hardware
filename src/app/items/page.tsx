@@ -229,7 +229,11 @@ export default function Items() {
 
       {/* Back to Dashboard */}
       <div className="mb-3 flex items-center justify-end">
-        /dashboard
+        <Link
+          href="/dashboard"
+          className="inline-flex items-center rounded border border-orange-600 px-3 py-1.5 text-sm font-semibold text-orange-700 hover:bg-orange-50"
+          aria-label="Back to Dashboard"
+        >
           ← Back to Dashboard
         </Link>
       </div>
