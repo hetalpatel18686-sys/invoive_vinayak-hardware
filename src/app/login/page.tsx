@@ -20,7 +20,7 @@ export default function LoginPage() {
     if (error) {
       alert(error.message);
     } else {
-      window.location.href = '/customers'; // after login
+      window.location.href = '/dashboard'; // after login
     }
 
     setLoading(false);
