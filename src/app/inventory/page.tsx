@@ -702,11 +702,14 @@ return (
   <div className="space-y-4">
 
     {/* Back to Dashboard */}
-    <div className="flex items-center justify-end">
-      /dashboard
-        ← Back to Dashboard
-      </Link>
-    </div>
+  <div className="flex items-center justify-end">
+  <Link
+    href="/dashboard"
+    className="inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+  >
+    ← Back to Dashboard
+  </Link>
+</div>
 
     <div className="card">
       {/* Filters / actions */}
