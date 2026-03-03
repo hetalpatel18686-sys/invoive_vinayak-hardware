@@ -225,15 +225,16 @@ export default function Items() {
   };
 
   return (
-  <Protected>
+    <Protected>
 
-    {/* Back to Dashboard */}
-    <div className="mb-3 flex items-center justify-end">
-      /dashboard
-        ← Back to Dashboard
-      </Link>
-    </div>
-    <div className="grid md:grid-cols-3 gap-4">
+      {/* Back to Dashboard */}
+      <div className="mb-3 flex items-center justify-end">
+        /dashboard
+          ← Back to Dashboard
+        </Link>
+      </div>
+
+      <div className="grid md:grid-cols-3 gap-4">
         {/* LEFT: Items table */}
         <div className="card md:col-span-2">
           <div className="flex items-center justify-between mb-3">
