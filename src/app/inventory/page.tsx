@@ -697,8 +697,8 @@ export default function InventoryPage() {
     window.open(`/estimate/new?seed=1`, '_blank', 'noopener,noreferrer');
   };
 
-  /* ========= RENDER ========= */
-  return (
+ /* ========= RENDER ========= */
+return (
   <div className="space-y-4">
 
     {/* Back to Dashboard */}
