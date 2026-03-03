@@ -711,7 +711,6 @@ export default function InventoryPage() {
 
     <div className="card">
       {/* Filters / actions */}
-      ...
         <div className="flex flex-wrap items-end gap-3 mb-3">
           <div className="text-lg font-semibold mr-auto">Inventory</div>
 
