@@ -233,7 +233,6 @@ export default function Items() {
         ← Back to Dashboard
       </Link>
     </div>
-
     <div className="grid md:grid-cols-3 gap-4">
         {/* LEFT: Items table */}
         <div className="card md:col-span-2">
