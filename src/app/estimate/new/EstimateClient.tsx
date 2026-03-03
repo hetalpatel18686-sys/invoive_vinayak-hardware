@@ -7,7 +7,9 @@ import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 import Protected from '@/components/Protected';
 
-type DocType = 'sale' | 'return';
+/* =============================
+   Minimal types for Estimate UI
+   ============================= */
 
 interface Customer {
   id: string;
@@ -26,10 +28,8 @@ interface ItemDb {
   sku: string;
   name: string;
   unit_cost: number;
-  tax_rate: number;
-  // NEW: pull pricing fields so we can auto-fill Tax% and Margin%
-  purchase_price?: number | null;
-  gst_percent?: number | null;
+  tax_rate?: number | null;      // fallback for GST if gst_percent not present
+  gst_percent?: number | null;   // preferred GST% field if available
   margin_percent?: number | null;
   uom: { code?: string }[] | { code?: string } | null;
 }
@@ -40,24 +40,17 @@ interface Row {
   item_id: string;
   description: string;
   uom_code: string;
-  base_cost: number;
+  base_cost: number;     // current cost from item
   qty: number;
-  margin_pct: number;
-  tax_rate: number;
-  unit_price: number;
-  issued_margin_pct?: number;
-  return_qty?: number;
 
-  /** NEW: per-row location selection + balances */
-  location?: string; // selected location or typed "new" location
-  use_custom_location?: boolean; // for return: true when typing "Other/New"
-  loc_balances?: { name: string; qty: number }[]; // per-item balances
+  // Hidden in UI, used for computation only
+  gst_pct: number;       // GST% (from item.gst_percent || item.tax_rate || 0)
+  margin_pct: number;    // Margin% (from item.margin_percent || 0)
 
-  // FIX: Dedup repeated not-found alerts/attempts
+  // internal UI helpers
   last_sku_tried?: string;
 }
 
-// -------- Helpers (always round up to next rupee) --------
 function ceilRupee(n: number) {
   const x = Number(n || 0);
   return Number.isFinite(x) ? Math.ceil(x) : 0;
@@ -87,72 +80,62 @@ function oneLineAddress(c: Partial<Customer>) {
     .join(', ');
 }
 
-/** ---------- Live mirror via localStorage ---------- */
+/* =========================================
+   Lightweight bridge from Inventory → Here
+   - Inventory page can post localStorage:
+     localStorage.setItem('inventory-selected-item', JSON.stringify({ sku, id? }))
+   - Or navigate with ?add_sku=SKU
+   ========================================= */
 class StorageBus {
   key: string;
-  constructor(key = 'invoice-live-payload') { this.key = key; }
-  post(payload: any) {
-    try {
-      const envelope = { ts: Date.now(), payload };
-      const json = JSON.stringify(envelope);
-      localStorage.setItem(this.key, json);
-      try {
-        window.dispatchEvent(new StorageEvent('storage', { key: this.key, newValue: json }));
-      } catch {}
-    } catch (e) { console.error('StorageBus.post error', e); }
-  }
+  constructor(key = 'inventory-selected-item') { this.key = key; }
   on(fn: (payload: any) => void) {
     const handler = (ev: StorageEvent) => {
       try {
         if (ev.key !== this.key || !ev.newValue) return;
-        const env = JSON.parse(ev.newValue);
-        fn(env?.payload);
+        const payload = JSON.parse(ev.newValue);
+        fn(payload);
       } catch (e) { console.error('StorageBus.on parse error', e); }
     };
     window.addEventListener('storage', handler);
-    try {
-      const raw = localStorage.getItem(this.key);
-      if (raw) { const env = JSON.parse(raw); fn(env?.payload); }
-    } catch (e) { console.error('StorageBus initial load error', e); }
     return () => window.removeEventListener('storage', handler);
   }
 }
-const live = new StorageBus('invoice-live-payload');
-// ---------------------------------------------------
+const fromInventory = new StorageBus('inventory-selected-item');
 
-export default function NewInvoicePage() {
-  // Read view flags synchronously on first render (prevents crash)
-  const [isCustomerView] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    const sp = new URLSearchParams(window.location.search);
-    return sp.get('display') === 'customer';
-  });
+/* ============================
+   QR cache per-SKU (data URLs)
+   ============================ */
+const qrCache = new Map<string, string>();
+async function getQrDataUrl(value: string) {
+  const v = (value || '').trim();
+  if (!v) return '';
+  if (qrCache.has(v)) return qrCache.get(v)!;
+  try {
+    const QR: any = await import('qrcode');
+    const toDataURL = (QR?.toDataURL || QR?.default?.toDataURL);
+    const dataUrl = await toDataURL(v, { margin: 0, scale: 4 });
+    qrCache.set(v, dataUrl);
+    return dataUrl;
+  } catch (e) {
+    console.error('QR generate failed', e);
+    return '';
+  }
+}
 
-  // Customer view – listen for live payload
-  const [liveState, setLiveState] = useState<any>(null);
-  const [hasLiveData, setHasLiveData] = useState(false);
-  // 🆕 If payment is done from Customer View, show it immediately here:
-  const [custPayments, setCustPayments] = useState<any[] | null>(null);
-
-  useEffect(() => {
-    if (!isCustomerView) return;
-    const off = live.on((payload) => {
-      if (payload) { setLiveState(payload); setHasLiveData(true); }
-    });
-    return off;
-  }, [isCustomerView]);
-
-  // Brand (🆕 will be SHOWN on Customer View too)
+/* ============================
+   Estimate Page (No Stock/Pay)
+   ============================ */
+export default function EstimatePage() {
+  // Brand
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
   const brandLogo    = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png';
   const brandAddress = process.env.NEXT_PUBLIC_BRAND_ADDRESS  || 'Bilimora, Gandevi, Navsari, Gujarat, 396321';
   const brandPhone   = process.env.NEXT_PUBLIC_BRAND_PHONE    || '+91 7046826808';
-  const upiId        = process.env.NEXT_PUBLIC_UPI_ID         || 'patelkb308@okaxis';
 
-  // Header
+  // Header (Estimate)
   const [issuedAt, setIssuedAt] = useState<string>(() => new Date().toISOString().slice(0,10));
-  const [docType, setDocType] = useState<DocType>('sale');
-  const [originalInvoiceNo, setOriginalInvoiceNo] = useState<string>('');
+  const [estimateNo, setEstimateNo] = useState<string>(''); // can be auto on save
 
   // Customer
   const [customerPhone, setCustomerPhone] = useState('');
@@ -166,76 +149,295 @@ export default function NewInvoicePage() {
     street_name: '', village_town: '', city: '', state: '', postal_code: '',
   });
 
-  // Rows + state
+  // Rows
   const [rows, setRows] = useState<Row[]>([]);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
-  const [invoiceIdJustSaved, setInvoiceIdJustSaved] = useState<string | null>(null);
-  const [invoiceNoJustSaved, setInvoiceNoJustSaved] = useState<string | null>(null);
-  const [invoiceGrandTotalAtSave, setInvoiceGrandTotalAtSave] = useState<number | null>(null);
   const savingRef = useRef(false);
 
-  // Return helpers
-  const [customerInvoices, setCustomerInvoices] = useState<{ id: string; invoice_no: string; issued_at?: string | null; grand_total?: number | null }[]>([]);
-  const [originalGrandTotal, setOriginalGrandTotal] = useState<number>(0);
-
-  // Payments state (editor)
-  const [payments, setPayments] = useState<any[]>([]);
-  const [paymentsLoading, setPaymentsLoading] = useState(false);
-
-  // Pay modal + meta
-  const [showPayModal, setShowPayModal] = useState(false);
-  const [payMethod, setPayMethod] = useState<'cash'|'card'|'qr'|'other'>('cash');
-  const [payAmount, setPayAmount] = useState<number>(0);
-  const [payReference, setPayReference] = useState<string>('');
-  const [payDirection, setPayDirection] = useState<'in'|'out'>('in');
-  // Card/QR meta
-  const [cardHolder, setCardHolder] = useState('');
-  const [cardLast4, setCardLast4] = useState('');
-  const [cardAuth, setCardAuth] = useState('');
-  const [cardTxn, setCardTxn] = useState('');
-  const [qrImageUrl, setQrImageUrl] = useState(''); // dataURL (auto-generated)
-  const [qrTxn, setQrTxn] = useState('');
-  const [generatingQR, setGeneratingQR] = useState(false);
-
-  // 🆕 Barcode mode (scanner-only)
+  // Barcode Scan (optional)
   const [barcodeMode, setBarcodeMode] = useState(false);
   const barcodeInputRef = useRef<HTMLInputElement | null>(null);
   const [barcodeBuffer, setBarcodeBuffer] = useState('');
-
-  // 🆕 NEW: per-scan quantity multiplier (manual control)
   const [scanQty, setScanQty] = useState<number>(1);
 
+  // QR cache state for rendering (rowId -> dataUrl)
+  const [qrMap, setQrMap] = useState<Record<string, string>>({});
+
+  // focus map for SKU inputs
+  const skuInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
   useEffect(() => { setRows([makeEmptyRow()]); }, []);
+
   function makeEmptyRow(): Row {
     return {
-      id: makeId(), sku_input: '', item_id: '', description: '', uom_code: '',
-      base_cost: 0, qty: 1, margin_pct: 0, tax_rate: 0, unit_price: 0,
-      issued_margin_pct: 0, return_qty: 0,
-      // NEW
-      location: '', use_custom_location: false, loc_balances: [],
-      // FIX
+      id: makeId(),
+      sku_input: '',
+      item_id: '',
+      description: '',
+      uom_code: '',
+      base_cost: 0,
+      qty: 1,
+      gst_pct: 0,
+      margin_pct: 0,
       last_sku_tried: '',
     };
   }
 
-  // ----- payments load (editor)
-  const refreshPayments = async (invoiceId: string) => {
-    try {
-      setPaymentsLoading(true);
-      const { data, error } = await supabase
-        .from('payments')
-        .select('id, method, direction, amount, reference, meta, is_void, created_at')
-        .eq('invoice_id', invoiceId)
-        .eq('is_void', false)
-        .order('created_at', { ascending: false });
-      if (error) throw error;
-      setPayments(data || []);
-    } catch (err) { console.error(err); }
-    finally { setPaymentsLoading(false); }
+  // Derived totals (only Line Total shown; includes cost+gst+margin)
+  const totals = useMemo(() => {
+    let grand = 0;
+    for (const r of rows) {
+      if (!r.item_id || !r.qty) continue;
+      const perUnit = computeUnitEstimate(r.base_cost, r.gst_pct, r.margin_pct);
+      grand += ceilRupee(perUnit * r.qty);
+    }
+    return { grand: ceilRupee(grand) };
+  }, [rows]);
+
+  // --- Computation helpers ---
+  function computeUnitEstimate(base: number, gst: number, margin: number) {
+    const b = Number(base || 0);
+    const g = Number(gst || 0);
+    const m = Number(margin || 0);
+    // As requested: current cost + GST + margin (additive on base)
+    const unit = b + (b * g / 100) + (b * m / 100);
+    return ceilRupee(unit);
+  }
+
+  // ====== SKU lookup / set ======
+  const SKU_LOOKUP_DEBOUNCE_MS = 250;
+  const skuTimersRef = useRef<Record<string, any>>({});
+
+  useEffect(() => {
+    return () => {
+      const timers = skuTimersRef.current || {};
+      Object.keys(timers).forEach(k => {
+        try { clearTimeout(timers[k]); } catch {}
+      });
+    };
+  }, []);
+
+  const setSkuInput = (rowId: string, text: string) => {
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text, last_sku_tried: '' } : r));
+
+    if (!barcodeMode) {
+      const trimmed = (text || '').trim();
+
+      if (skuTimersRef.current[rowId]) {
+        try { clearTimeout(skuTimersRef.current[rowId]); } catch {}
+        delete skuTimersRef.current[rowId];
+      }
+
+      if (trimmed) {
+        skuTimersRef.current[rowId] = setTimeout(() => {
+          if (trimmed.length >= 3) {
+            setItemBySku(rowId, trimmed, { silentNotFound: true });
+          }
+        }, SKU_LOOKUP_DEBOUNCE_MS);
+      }
+    }
   };
 
-  // ----- customer lookup/create
+  const setItemBySku = async (rowId: string, skuRaw: string, opts?: { silentNotFound?: boolean }) => {
+    const sku = (skuRaw || '').trim();
+    if (!sku) return;
+
+    if (skuTimersRef.current[rowId]) {
+      try { clearTimeout(skuTimersRef.current[rowId]); } catch {}
+      delete skuTimersRef.current[rowId];
+    }
+
+    const rowSnapshot = rows.find(r => r.id === rowId);
+    const alreadyTriedSame = rowSnapshot && rowSnapshot.last_sku_tried && rowSnapshot.last_sku_tried.trim().toLowerCase() === sku.toLowerCase();
+
+    const { data, error } = await supabase
+      .from('items')
+      .select(
+        'id, sku, name, unit_cost, tax_rate, gst_percent, margin_percent, uom:units_of_measure ( code )'
+      )
+      .ilike('sku', sku)
+      .limit(1);
+
+    if (error) return alert(error.message);
+    const rec = (data ?? [])[0] as ItemDb | undefined;
+
+    if (!rec) {
+      if (!opts?.silentNotFound && !alreadyTriedSame) {
+        alert(`No item found for SKU "${sku}"`);
+        setTimeout(() => {
+          const el = skuInputRefs.current[rowId];
+          if (el) { el.focus(); try { el.select(); } catch {} }
+        }, 0);
+      }
+      setRows(prev => prev.map(r => r.id === rowId ? { ...r, last_sku_tried: sku } : r));
+      return;
+    }
+
+    const uom_code = safeUomCode(rec.uom);
+    const gst = Number(rec.gst_percent ?? rec.tax_rate ?? 0);
+    const margin = Number(rec.margin_percent ?? 0);
+
+    setRows(prev => prev.map(r => {
+      if (r.id !== rowId) return r;
+      return {
+        ...r,
+        sku_input: rec.sku,
+        item_id: rec.id,
+        description: rec.name || '',
+        uom_code,
+        base_cost: Number(rec.unit_cost || 0),
+        gst_pct: gst,
+        margin_pct: margin,
+        last_sku_tried: rec.sku,
+      };
+    }));
+
+    // Generate QR for this SKU (for display)
+    const qr = await getQrDataUrl(rec.sku);
+    setQrMap(prev => ({ ...prev, [rowId]: qr }));
+  };
+
+  const addRow = () => {
+    const newRow: Row = makeEmptyRow();
+    setRows(prev => [...prev, newRow]);
+    setTimeout(() => focusSku(newRow.id), 0);
+  };
+
+  const removeRow = (rowId: string) => setRows(prev => prev.filter(r => r.id !== rowId));
+
+  const setDescription = (rowId: string, desc: string) =>
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, description: desc } : r));
+
+  const setQty = (rowId: string, qty: number) =>
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, qty: qty || 0 } : r));
+
+  const focusSku = (rowId: string) => {
+    requestAnimationFrame(() => {
+      const el = skuInputRefs.current[rowId];
+      if (el) {
+        el.focus();
+        try { el.select(); } catch {}
+      } else {
+        setTimeout(() => {
+          const el2 = skuInputRefs.current[rowId];
+          if (el2) { el2.focus(); try { el2.select(); } catch {} }
+        }, 50);
+      }
+    });
+  };
+
+  // Add item via barcode scan
+  useEffect(() => {
+    if (!barcodeMode) return;
+    const t = setTimeout(() => barcodeInputRef.current?.focus(), 0);
+    return () => clearTimeout(t);
+  }, [barcodeMode]);
+
+  const processBarcode = async (codeRaw: string) => {
+    const code = (codeRaw || '').trim();
+    if (!code) return;
+
+    const addQty = Number.isFinite(Number(scanQty)) && Number(scanQty) > 0 ? Number(scanQty) : 1;
+
+    try {
+      const { data, error } = await supabase
+        .from('items')
+        .select(
+          'id, sku, name, unit_cost, tax_rate, gst_percent, margin_percent, uom:units_of_measure ( code )'
+        )
+        .ilike('sku', code)
+        .limit(1);
+      if (error) throw error;
+
+      const rec = (data ?? [])[0] as ItemDb | undefined;
+      if (!rec) {
+        alert(`No item found for SKU "${code}"`);
+        setTimeout(() => barcodeInputRef.current?.focus(), 0);
+        return;
+      }
+
+      // If existing row for item, bump qty
+      const existing = rows.find(r => r.item_id === rec.id);
+      if (existing) {
+        setRows(prev => prev.map(r => {
+          if (r.id !== existing.id) return r;
+          return {
+            ...r,
+            qty: Number(r.qty || 0) + addQty,
+            base_cost: Number(rec.unit_cost || r.base_cost || 0),
+            gst_pct: Number(rec.gst_percent ?? rec.tax_rate ?? r.gst_pct ?? 0),
+            margin_pct: Number(rec.margin_percent ?? r.margin_pct ?? 0),
+          };
+        }));
+        // ensure QR cached
+        const qr = await getQrDataUrl(rec.sku);
+        setQrMap(prev => ({ ...prev, [existing.id]: qr }));
+        setTimeout(() => barcodeInputRef.current?.focus(), 0);
+        return;
+      }
+
+      // else use first empty row or add a new one
+      let target = rows.find(r => !r.item_id);
+      if (!target) {
+        target = makeEmptyRow();
+        setRows(prev => [...prev, target!]);
+      }
+
+      await setItemBySku(target.id, code, { silentNotFound: true });
+      setQty(target.id, addQty);
+
+      setTimeout(() => barcodeInputRef.current?.focus(), 0);
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.message || 'Scan failed');
+    } finally {
+      setBarcodeBuffer('');
+      setTimeout(() => barcodeInputRef.current?.focus(), 0);
+    }
+  };
+
+  // Auto-add from Inventory page via localStorage event
+  useEffect(() => {
+    const off = fromInventory.on(async (payload) => {
+      try {
+        const sku = payload?.sku || payload?.SKU || payload?.code;
+        if (!sku) return;
+        // use first empty row or add
+        let target = rows.find(r => !r.item_id);
+        if (!target) {
+          target = makeEmptyRow();
+          setRows(prev => [...prev, target!]);
+        }
+        await setItemBySku(target.id, String(sku), { silentNotFound: false });
+        setQty(target.id, 1);
+      } catch (e) {
+        console.error('Inventory add failed', e);
+      }
+    });
+    return off;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows]);
+
+  // Auto-add via query param ?add_sku=SKU
+  useEffect(() => {
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      const sku = sp.get('add_sku');
+      if (!sku) return;
+      let target = rows.find(r => !r.item_id);
+      if (!target) {
+        target = makeEmptyRow();
+        setRows(prev => [...prev, target!]);
+      }
+      setItemBySku(target.id, sku, { silentNotFound: false }).then(() => {
+        setQty(target!.id, 1);
+      });
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ===== Customer lookup/create (unchanged semantics) =====
   const lookupCustomerByPhone = async () => {
     const phone = (customerPhone || '').trim();
     if (!phone) return alert('Please enter a mobile number');
@@ -249,23 +451,12 @@ export default function NewInvoicePage() {
       setNewCust({ first_name: '', last_name: '', phone, street_name: '', village_town: '', city: '', state: '', postal_code: '' });
       setShowCreateCustomer(true);
       setCustomerId(''); setCustomerName(''); setCustomerAddress1Line('');
-      setCustomerInvoices([]);
     } else {
       const c = data[0] as Customer;
       setCustomerId(c.id);
       setCustomerName(fullName(c));
       setCustomerAddress1Line(oneLineAddress(c));
       setShowCreateCustomer(false);
-
-      if (docType === 'return') {
-        const { data: invs } = await supabase
-          .from('invoices')
-          .select('id, invoice_no, issued_at, grand_total')
-          .eq('customer_id', c.id)
-          .order('issued_at', { ascending: false })
-          .limit(100);
-        setCustomerInvoices(invs ?? []);
-      }
     }
   };
 
@@ -285,444 +476,7 @@ export default function NewInvoicePage() {
     setShowCreateCustomer(false);
   };
 
-  /** NEW: per-item location balances loader (+cache for repeated items) */
-  const locCacheRef = useRef<Map<string, { name: string; qty: number }[]>>(new Map());
-  const loadLocBalances = async (itemId: string): Promise<{ name: string; qty: number }[]> => {
-    if (!itemId) return [];
-    if (locCacheRef.current.has(itemId)) return locCacheRef.current.get(itemId)!;
-
-    const { data, error } = await supabase
-      .from('stock_moves')
-      .select('move_type, qty, location, item_id')
-      .eq('item_id', itemId);
-
-    if (error) {
-      console.warn('loadLocBalances error', error);
-      return [];
-    }
-
-    const map = new Map<string, number>();
-    (data ?? []).forEach((r: any) => {
-      const mt = String(r.move_type || '').toLowerCase() as 'receive'|'issue'|'return'|'adjust';
-      const loc = (String(r.location ?? '').trim()) || '(unassigned)';
-      const qRaw = Number(r.qty ?? 0);
-      let delta = qRaw;
-      if (mt === 'issue') delta = -Math.abs(qRaw);
-      else if (mt === 'receive' || mt === 'return') delta = Math.abs(qRaw);
-      // adjust: use sign as-is
-      map.set(loc, (map.get(loc) ?? 0) + delta);
-    });
-
-    const balances = Array.from(map.entries())
-      .map(([name, qty]) => ({ name, qty }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-
-    locCacheRef.current.set(itemId, balances);
-    return balances;
-  };
-
-  // refs to SKU inputs (for restoring focus after alert)
-  const skuInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
-
-  // ---------- NEW helper: pick default location ----------
-  function pickDefaultLocation(balances: { name: string; qty: number }[]): string {
-    if (!balances || balances.length === 0) return '';
-    const withStock = balances.filter(b => Number(b.qty || 0) > 0);
-    return (withStock[0]?.name) ?? balances[0].name ?? '';
-  }
-
-  // ----- set item by SKU (sale/return) — unit_price always ceil
-  // FIX: added 'opts' to control alert behaviour + dedup + auto-location default
-  const setItemBySku = async (rowId: string, skuRaw: string, opts?: { silentNotFound?: boolean }) => {
-    const sku = (skuRaw || '').trim();
-    if (!sku) return;
-
-    // If a debounce timer exists for this row, clear it (prevent duplicate later)
-    if (skuTimersRef.current[rowId]) {
-      try { clearTimeout(skuTimersRef.current[rowId]); } catch {}
-      delete skuTimersRef.current[rowId];
-    }
-
-    const rowSnapshot = rows.find(r => r.id === rowId);
-    const alreadyTriedSame = rowSnapshot && rowSnapshot.last_sku_tried && rowSnapshot.last_sku_tried.trim().toLowerCase() === sku.toLowerCase();
-
-    const { data, error } = await supabase
-      .from('items')
-      .select(
-        'id, sku, name, unit_cost, tax_rate, purchase_price, gst_percent, margin_percent, uom:units_of_measure ( code )'
-      )
-      .ilike('sku', sku)
-      .limit(1);
-
-    if (error) return alert(error.message);
-    const rec = (data ?? [])[0] as ItemDb | undefined;
-
-    if (!rec) {
-      // FIX: Dedup alerts if the same SKU was just tried
-      if (!opts?.silentNotFound && !alreadyTriedSame) {
-        alert(`No item found for SKU "${sku}"`);
-        // Restore focus+select so user can correct immediately
-        setTimeout(() => {
-          const el = skuInputRefs.current[rowId];
-          if (el) { el.focus(); try { el.select(); } catch {} }
-        }, 0);
-      }
-      // Mark last tried to avoid repeat alert from blur/other triggers
-      setRows(prev => prev.map(r => r.id === rowId ? { ...r, last_sku_tried: sku } : r));
-      return;
-    }
-
-    const uom_code = safeUomCode(rec.uom);
-    const balances = await loadLocBalances(rec.id);
-
-    // Determine defaults (auto-fill) for GST and Margin
-    const autoGst = Number((rec.gst_percent ?? rec.tax_rate ?? 0));
-    const autoMargin = Number(rec.margin_percent ?? 0);
-
-    // FIX: auto-select default location (first with stock; else first)
-    const defaultLoc = pickDefaultLocation(balances);
-
-    setRows(prev => prev.map(r => {
-      if (r.id !== rowId) return r;
-      const base = Number(rec.unit_cost || 0);
-      const margin = Number.isFinite(autoMargin) ? autoMargin : 0;
-      const calc = base * (1 + (margin || 0) / 100);
-      const unit = ceilRupee(calc); // round up
-
-      // Decide auto location:
-      // - For sale: always set default location if blank
-      // - For return: prefill with default but user can switch to Other/New
-      const nextLocation = r.location && r.location.trim()
-        ? r.location
-        : defaultLoc;
-
-      return {
-        ...r,
-        sku_input: rec.sku,
-        item_id: rec.id,
-        description: rec.name || '',
-        uom_code,
-        base_cost: base,
-        tax_rate: Number.isFinite(autoGst) ? autoGst : Number(rec.tax_rate || 0),
-        margin_pct: margin,                // auto-filled, but still editable
-        unit_price: unit,
-        location: nextLocation,            // FIX: auto-populate
-        use_custom_location: false,
-        loc_balances: balances,
-        last_sku_tried: rec.sku,           // FIX: mark as tried, so blur doesn't refire
-      };
-    }));
-  };
-
-  // ===== Debounced SKU auto-lookup (per row)
-  const SKU_LOOKUP_DEBOUNCE_MS = 300;
-  const skuTimersRef = useRef<Record<string, any>>({});
-
-  useEffect(() => {
-    return () => {
-      const timers = skuTimersRef.current || {};
-      Object.keys(timers).forEach(k => {
-        try { clearTimeout(timers[k]); } catch {}
-      });
-    };
-  }, []);
-
-  const focusSku = (rowId: string) => {
-    requestAnimationFrame(() => {
-      const el = skuInputRefs.current[rowId];
-      if (el) {
-        el.focus();
-        try { el.select(); } catch {}
-      } else {
-        setTimeout(() => {
-          const el2 = skuInputRefs.current[rowId];
-          if (el2) { el2.focus(); try { el2.select(); } catch {} }
-        }, 50);
-      }
-    });
-  };
-
-  // ----- row setters (respect rounding rule)
-  const setSkuInput = (rowId: string, text: string) => {
-    setRows(prev => prev.map(r => r.id === rowId ? { ...r, sku_input: text, /* FIX: new typing resets tried */ last_sku_tried: '' } : r));
-
-    // Debounced lookup only in SALE + normal typing mode
-    if (docType !== 'return' && !barcodeMode) {
-      const trimmed = (text || '').trim();
-
-      if (skuTimersRef.current[rowId]) {
-        try { clearTimeout(skuTimersRef.current[rowId]); } catch {}
-        delete skuTimersRef.current[rowId];
-      }
-
-      if (trimmed) {
-        skuTimersRef.current[rowId] = setTimeout(() => {
-          // silent auto-lookup while typing; no alert if not found
-          if (trimmed.length >= 3) {
-            setItemBySku(rowId, trimmed, { silentNotFound: true });
-          }
-        }, SKU_LOOKUP_DEBOUNCE_MS);
-      }
-    }
-  };
-
-  const setDescription = (rowId: string, desc: string) =>
-    setRows(prev => prev.map(r => r.id === rowId ? { ...r, description: desc } : r));
-
-  const setMargin = (rowId: string, m: number) =>
-    setRows(prev => prev.map(r => {
-      if (r.id !== rowId) return r;
-      const calc = (r.base_cost || 0) * (1 + (m || 0) / 100);
-      const unit = ceilRupee(calc);
-      return { ...r, margin_pct: m || 0, unit_price: unit };
-    }));
-
-  const setTaxRate = (rowId: string, rate: number) =>
-    setRows(prev => prev.map(r => r.id === rowId ? { ...r, tax_rate: rate || 0 } : r));
-
-  const setQty = (rowId: string, qty: number) =>
-    setRows(prev => prev.map(r => r.id === rowId ? { ...r, qty: qty || 0 } : r));
-
-  const setUnitPrice = (rowId: string, price: number) =>
-    setRows(prev => prev.map(r => r.id === rowId ? { ...r, unit_price: ceilRupee(price) } : r));
-
-  const setReturnQty = (rowId: string, ret: number) =>
-    setRows(prev => prev.map(r => {
-      if (r.id !== rowId) return r;
-      const clamped = Math.max(0, Math.min(Number(r.qty || 0), ret || 0));
-      return { ...r, return_qty: clamped };
-    }));
-
-  // NEW: set row location selection / typing
-  const setRowLocation = (rowId: string, loc: string, isCustom: boolean) => {
-    setRows(prev => prev.map(r => r.id === rowId ? { ...r, location: loc, use_custom_location: isCustom } : r));
-  };
-
-  // ---- Add row + auto-focus its SKU
-  const addRow = () => {
-    const newRow: Row = {
-      id: makeId(), sku_input: '', item_id: '', description: '', uom_code: '',
-      base_cost: 0, qty: 1, margin_pct: 0, tax_rate: 0, unit_price: 0,
-      issued_margin_pct: 0, return_qty: 0,
-      // NEW:
-      location: '', use_custom_location: false, loc_balances: [],
-      last_sku_tried: '',
-    };
-    setRows(prev => [...prev, newRow]);
-    setTimeout(() => focusSku(newRow.id), 0);
-  };
-
-  const removeRow = (rowId: string) => setRows(prev => prev.filter(r => r.id !== rowId));
-
-  // ----- Return: load items by invoice no
-  const loadItemsFromInvoiceNo = async () => {
-    const invNo = (originalInvoiceNo || '').trim();
-    if (!invNo) return alert('Please enter the original invoice no');
-
-    const { data: invs, error: e1 } = await supabase
-      .from('invoices')
-      .select('id, invoice_no, issued_at, subtotal, tax_total, grand_total')
-      .eq('invoice_no', invNo)
-      .limit(1);
-    if (e1) return alert(e1.message);
-    const inv = (invs ?? [])[0];
-    if (!inv) return alert('Invoice not found');
-
-    setOriginalGrandTotal(Number(inv.grand_total || 0));
-
-    const { data: lines, error: e2 } = await supabase
-      .from('invoice_items')
-      .select('item_id, description, qty, unit_price, tax_rate, base_cost_at_sale, margin_pct_at_sale')
-      .eq('invoice_id', inv.id);
-    if (e2) return alert(e2.message);
-
-    if (!lines || lines.length === 0) {
-      setRows([makeEmptyRow()]);
-      return;
-    }
-
-    const itemIds = Array.from(new Set(lines.map((ln: any) => ln.item_id).filter(Boolean)));
-    const { data: items, error: e3 } = await supabase
-      .from('items')
-      .select('id, sku, name, unit_cost, tax_rate, uom_id')
-      .in('id', itemIds);
-    if (e3) return alert(e3.message);
-
-    const byId = new Map<string, any>();
-    (items ?? []).forEach((it: any) => byId.set(it.id, it));
-
-    let uomMap = new Map<any, string>();
-    try {
-      const uomIds = Array.from(new Set((items ?? []).map(it => it?.uom_id).filter(Boolean)));
-      if (uomIds.length > 0) {
-        const { data: uoms } = await supabase
-          .from('units_of_measure')
-          .select('id, code')
-          .in('id', uomIds);
-        (uoms ?? []).forEach((u: any) => uomMap.set(u.id, u.code));
-      }
-    } catch {}
-
-    // NEW: preload location balances per unique item (using cache)
-    const balByItem: Record<string, { name: string; qty: number }[]> = {};
-    await Promise.all(itemIds.map(async (id) => {
-      balByItem[id] = await loadLocBalances(id);
-    }));
-
-    const prefilled: Row[] = (lines ?? []).map((ln: any) => {
-      const it = byId.get(ln.item_id) || {};
-      const uom_code = (it?.uom_id && uomMap.get(it.uom_id)) || '';
-
-      let issued_margin_pct = 0;
-      if (typeof ln.margin_pct_at_sale === 'number') {
-        issued_margin_pct = Number(ln.margin_pct_at_sale) || 0;
-      } else {
-        const baseNow = Number(it.unit_cost || 0);
-        issued_margin_pct = baseNow > 0 ? Math.ceil(((Number(ln.unit_price || 0) - baseNow) / baseNow) * 100) : 0;
-      }
-
-      // FIX: set default location for return rows too (user can change or type new)
-      const balances = balByItem[ln.item_id] || [];
-      const defaultLoc = pickDefaultLocation(balances);
-
-      return {
-        id: makeId(),
-        sku_input: it?.sku || '',
-        item_id: ln.item_id,
-        description: ln.description || it?.name || '',
-        uom_code,
-        base_cost: Number(ln.base_cost_at_sale ?? it?.unit_cost ?? 0),
-        qty: Number(ln.qty || 0),
-        margin_pct: 0,
-        tax_rate: Number(ln.tax_rate || it?.tax_rate || 0),
-        unit_price: Number(ln.unit_price || 0),
-        issued_margin_pct,
-        return_qty: 0,
-        location: defaultLoc || '',
-        use_custom_location: false,
-        loc_balances: balances,
-        last_sku_tried: '',
-      };
-    });
-
-    setRows(prefilled.length > 0 ? prefilled : [makeEmptyRow()]);
-  };
-
-  // ----- totals
-  const totals = useMemo(() => {
-    let subtotal = 0, tax = 0;
-    for (const r of rows) {
-      const qty = (docType === 'return' ? Number(r.return_qty || 0) : Number(r.qty || 0));
-      const lineAmount = ceilRupee(qty * Number(r.unit_price || 0));
-      subtotal += lineAmount;
-      const lineTaxRaw = lineAmount * (Number(r.tax_rate || 0) / 100);
-      const lineTax = ceilRupee(lineTaxRaw);
-      tax += lineTax;
-    }
-    return { subtotal: ceilRupee(subtotal), tax: ceilRupee(tax), grand: ceilRupee(subtotal + tax) };
-  }, [rows, docType]);
-
-  // ----- payments summary (for editor + live payload)
-  const computePaymentSummary = () => {
-    const paidIn  = (payments || []).filter(p => p.direction === 'in').reduce((s, p) => s + Number(p.amount || 0), 0);
-    const paidOut = (payments || []).filter(p => p.direction === 'out').reduce((s, p) => s + Number(p.amount || 0), 0);
-    const paidInCeil  = ceilRupee(paidIn);
-    const paidOutCeil = ceilRupee(paidOut);
-    const grandAtSave = invoiceGrandTotalAtSave ?? totals.grand;
-    const balance = docType === 'return'
-      ? ceilRupee(grandAtSave - paidOutCeil + paidInCeil)
-      : ceilRupee(grandAtSave - paidInCeil + paidOutCeil);
-    return {
-      paidIn: paidInCeil,
-      paidOut: paidOutCeil,
-      netPaid: ceilRupee(paidInCeil - paidOutCeil),
-      balance,
-    };
-  };
-
-  // ----- live payload
-  const buildLivePayload = () => {
-    const pay = computePaymentSummary();
-    return {
-      brand: { name: brandName, logo: brandLogo, address: brandAddress, phone: brandPhone },
-      header: { docType, issuedAt, customerName, customerAddress1Line, invoiceNo: invoiceNoJustSaved ?? null, notes },
-      invoiceId: invoiceIdJustSaved ?? null, // 🆕
-      lines: rows.map(r => {
-        const qty = docType === 'return' ? Number(r.return_qty || 0) : Number(r.qty || 0);
-        const line_total = ceilRupee(qty * Number(r.unit_price || 0));
-        return {
-          sku: r.sku_input,
-          description: r.description,
-          uom_code: r.uom_code,
-          qty,
-          unit_price: ceilRupee(r.unit_price),
-          tax_rate: r.tax_rate,
-          line_total,
-        };
-      }),
-      totals,
-      payments: (payments || []).map(p => ({
-        id: p.id,
-        created_at: p.created_at,
-        method: p.method,
-        direction: p.direction,
-        amount: ceilRupee(p.amount),
-        reference: p.reference,
-      })),
-      paySummary: pay,
-    };
-  };
-
-  // ----- mirror to customer screen
-  useEffect(() => {
-    if (isCustomerView) return;
-    live.post(buildLivePayload());
-  }, [
-    isCustomerView, rows, totals, docType, issuedAt, customerName, customerAddress1Line,
-    payments, invoiceGrandTotalAtSave, invoiceNoJustSaved, notes
-  ]);
-
-  // ---------- NEW: validation helpers for locations ----------
-  const getSelectedLocQty = (r: Row) => {
-    if (!r.location || !r.loc_balances?.length) return 0;
-    const found = r.loc_balances.find(l => l.name === r.location);
-    return found?.qty ?? 0;
-  };
-
-  const validateLocationsBeforeSave = (): string | null => {
-    if (docType === 'sale') {
-      for (const r of rows) {
-        const qtyToIssue = Number(r.qty || 0);
-        if (!r.item_id || qtyToIssue <= 0) continue;
-
-        if (!r.location) {
-          return `Please select a Location for item ${r.sku_input || r.description || r.item_id}.`;
-        }
-        const exists = (r.loc_balances || []).some(l => l.name === r.location);
-        if (!exists) {
-          return `Selected Location "${r.location}" does not exist for item ${r.sku_input || r.description}.`;
-        }
-        const available = getSelectedLocQty(r);
-        if (available < qtyToIssue) {
-          return `Insufficient qty at "${r.location}" for item ${r.sku_input || r.description}. Available: ${available}, Required: ${qtyToIssue}.`;
-        }
-      }
-    } else {
-      // return
-      for (const r of rows) {
-        const qtyToReturn = Number(r.return_qty || 0);
-        if (!r.item_id || qtyToReturn <= 0) continue;
-
-        if (!r.location) {
-          return `Please select/enter a Location for returned item ${r.sku_input || r.description || r.item_id}.`;
-        }
-        // For return, allow new custom locations, so no existence check required.
-      }
-    }
-    return null;
-  };
-
-  // ----- save invoice/return
+  // ===== Save (Estimate only; no stock ops, no payments) =====
   const savingLatch = () => {
     if (savingRef.current || saving) return true;
     savingRef.current = true; setSaving(true);
@@ -730,753 +484,143 @@ export default function NewInvoicePage() {
   };
   const saveDone = () => { setSaving(false); savingRef.current = false; };
 
-  const save = async () => {
+  const saveEstimate = async () => {
     if (savingLatch()) return;
-    if (!customerId) { saveDone(); return alert('Please lookup or create the customer (by phone) first'); }
 
-    const hasLine = docType === 'return'
-      ? rows.some(r => r.item_id && Number(r.return_qty || 0) > 0)
-      : rows.some(r => r.item_id && Number(r.qty || 0) > 0);
-
+    const hasLine = rows.some(r => r.item_id && Number(r.qty || 0) > 0);
     if (!hasLine) { saveDone(); return alert('Add at least one line item'); }
 
-    // NEW: validate per-line location
-    const locErr = validateLocationsBeforeSave();
-    if (locErr) { saveDone(); return alert(locErr); }
+    if (!customerId) {
+      // Not hard error, but warn
+      const cont = confirm('No customer selected. Save estimate without customer?');
+      if (!cont) { saveDone(); return; }
+    }
 
     try {
-      let invoiceNo = '';
-      const { data: nextNo, error: eNo } = await supabase.rpc('next_invoice_no');
-      invoiceNo = !eNo && nextNo ? String(nextNo) : 'INV-' + Date.now();
-
-      const { data: inv, error: e1 } = await supabase
-        .from('invoices')
-        .insert([{
-          invoice_no: invoiceNo,
-          customer_id: customerId,
-          notes,
-          subtotal: totals.subtotal,
-          tax_total: totals.tax,
-          grand_total: totals.grand,
-          status: 'sent',
-          doc_type: docType,
-          issued_at: issuedAt,
-        }])
-        .select()
-        .single();
-      if (e1) throw e1;
-      const invId = (inv as any).id as string;
-
-      const lineRows =
-        (docType === 'return'
-          ? rows.filter(r => r.item_id && Number(r.return_qty || 0) > 0)
-              .map(r => ({
-                invoice_id: invId,
-                item_id: r.item_id,
-                description: r.description,
-                qty: Number(r.return_qty || 0),
-                unit_price: ceilRupee(r.unit_price),
-                tax_rate: r.tax_rate,
-                line_total: ceilRupee(Number(r.return_qty || 0) * ceilRupee(r.unit_price)),
-              }))
-          : rows.filter(r => r.item_id && Number(r.qty || 0) > 0)
-              .map(r => ({
-                invoice_id: invId,
-                item_id: r.item_id,
-                description: r.description,
-                qty: Number(r.qty || 0),
-                unit_price: ceilRupee(r.unit_price),
-                tax_rate: r.tax_rate,
-                line_total: ceilRupee(Number(r.qty || 0) * ceilRupee(r.unit_price)),
-                base_cost_at_sale: r.base_cost,
-                margin_pct_at_sale: r.margin_pct,
-              }))
-        );
-
-      const { error: e2 } = await supabase.from('invoice_items').insert(lineRows);
-      if (e2) throw e2;
-
-      const moveRpc = docType === 'sale' ? 'issue_stock' : 'return_stock';
-      for (const r of rows) {
-        const qtyToMove = docType === 'return' ? Number(r.return_qty || 0) : Number(r.qty || 0);
-        if (!r.item_id || !qtyToMove) continue;
-        let client_tx_id = '';
-        try { client_tx_id = crypto.randomUUID(); } catch { client_tx_id = makeId(); }
-        const { error } = await supabase.rpc(moveRpc, {
-          p_item_id: r.item_id, p_qty: qtyToMove, p_ref: invoiceNo, p_reason: docType, p_client_tx_id: client_tx_id,
-        });
-        if (error) throw error;
-
-        // NEW: attach per-line location to stock_moves via client_tx_id
-        if (r.location && r.location.trim()) {
+      // Number generation: prefer next_estimate_no; fallback to EST-{ts}
+      let estNo = (estimateNo || '').trim();
+      if (!estNo) {
+        try {
+          const { data: nextNo, error: eNo } = await supabase.rpc('next_estimate_no');
+          if (!eNo && nextNo) estNo = String(nextNo);
+        } catch {}
+        if (!estNo) {
+          // fallback: try next_invoice_no and convert
           try {
-            await supabase
-              .from('stock_moves')
-              .update({ location: r.location.trim() })
-              .eq('client_tx_id', client_tx_id);
-          } catch (e) {
-            console.warn('location post-update skipped:', e);
-          }
+            const { data: nextInv, error: eInv } = await supabase.rpc('next_invoice_no');
+            if (!eInv && nextInv) estNo = String(nextInv).replace(/^INV/i, 'EST');
+          } catch {}
         }
+        if (!estNo) estNo = 'EST-' + Date.now();
+        setEstimateNo(estNo);
       }
 
-      setInvoiceIdJustSaved(invId);
-      setInvoiceNoJustSaved(invoiceNo);
-      setInvoiceGrandTotalAtSave(totals.grand);
-      await refreshPayments(invId);
+      // compute per-line, build payload
+      const grand = totals.grand;
+      const lineRows = rows
+        .filter(r => r.item_id && Number(r.qty || 0) > 0)
+        .map(r => {
+          const unit = computeUnitEstimate(r.base_cost, r.gst_pct, r.margin_pct); // includes gst + margin
+          return {
+            item_id: r.item_id,
+            description: r.description,
+            qty: Number(r.qty || 0),
+            unit_price: ceilRupee(unit),
+            tax_rate: 0, // tax already included in unit price for estimate (UI does not show tax)
+            line_total: ceilRupee(Number(r.qty || 0) * ceilRupee(unit)),
+            base_cost_at_sale: r.base_cost,       // store for reference
+            margin_pct_at_sale: r.margin_pct,     // store for reference
+            gst_percent_at_estimate: r.gst_pct,   // custom field (if your table has JSONB/meta)
+          };
+        });
 
-      try { live.post(buildLivePayload()); } catch {}
+      // Try saving to `estimates` table first (if it exists)
+      let savedId: string | null = null;
+      let usedTable: 'estimates' | 'invoices' = 'estimates';
 
-      alert(`${docType === 'return' ? 'Saved return #' : 'Saved invoice #'}${invoiceNo}`);
+      try {
+        const { data: est, error: e1 } = await supabase
+          .from('estimates')
+          .insert([{
+            estimate_no: estNo,
+            customer_id: customerId || null,
+            notes,
+            total: grand,
+            status: 'draft',
+            issued_at: issuedAt,
+            meta: null, // optional JSONB if present
+          }])
+          .select()
+          .single();
+
+        if (e1) throw e1;
+        savedId = (est as any).id as string;
+
+        // If you have a separate `estimate_items` table, use it here.
+        // Otherwise, put lineRows into `estimate_items`. If not present,
+        // we’ll fall back to invoices below.
+        const { error: e2 } = await supabase.from('estimate_items').insert(
+          lineRows.map(lr => ({ ...lr, estimate_id: savedId }))
+        );
+        if (e2) {
+          console.warn('estimate_items insert failed (maybe table not present)', e2);
+        }
+      } catch (e) {
+        // fallback to invoices with doc_type='estimate'
+        console.warn('Saving to estimates failed; falling back to invoices:', e);
+        usedTable = 'invoices';
+
+        const { data: inv, error: e1 } = await supabase
+          .from('invoices')
+          .insert([{
+            invoice_no: estNo,
+            customer_id: customerId || null,
+            notes,
+            subtotal: grand, // store all as subtotal since tax already embedded
+            tax_total: 0,
+            grand_total: grand,
+            status: 'estimate',
+            doc_type: 'estimate',
+            issued_at: issuedAt,
+          }])
+          .select()
+          .single();
+        if (e1) throw e1;
+        const invId = (inv as any).id as string;
+        savedId = invId;
+
+        const { error: e2 } = await supabase.from('invoice_items').insert(
+          lineRows.map(lr => ({
+            invoice_id: invId,
+            item_id: lr.item_id,
+            description: lr.description,
+            qty: lr.qty,
+            unit_price: lr.unit_price,
+            tax_rate: 0,
+            line_total: lr.line_total,
+            base_cost_at_sale: lr.base_cost_at_sale,
+            margin_pct_at_sale: lr.margin_pct_at_sale,
+          }))
+        );
+        if (e2) throw e2;
+      }
+
+      alert(`Estimate saved #${estNo} (${usedTable})`);
     } catch (err: any) {
       console.error(err);
       alert(err?.message || String(err));
     } finally { saveDone(); }
   };
 
-  // ----- reset
-  const handleNewInvoice = () => {
-    setIssuedAt(new Date().toISOString().slice(0, 10));
-    setDocType('sale');
-    setOriginalInvoiceNo('');
+  const handleNewEstimate = () => {
+    setIssuedAt(new Date().toISOString().slice(0,10));
+    setEstimateNo('');
     setCustomerPhone(''); setCustomerId(''); setCustomerName(''); setCustomerAddress1Line('');
     setShowCreateCustomer(false);
     setNewCust({ first_name: '', last_name: '', phone: '', street_name: '', village_town: '', city: '', state: '', postal_code: '' });
     setRows([makeEmptyRow()]);
     setNotes('');
     setSaving(false);
-    setInvoiceIdJustSaved(null);
-    setInvoiceNoJustSaved(null);
-    setInvoiceGrandTotalAtSave(null);
-    setCustomerInvoices([]);
-    setOriginalGrandTotal(0);
-    setPayments([]);
-    locCacheRef.current.clear();
-  };
-
-  // ----- open customer views
-  const makeCustomerViewUrl = () => {
-    const qs = new URLSearchParams();
-    qs.set('display', 'customer');
-    return `${window.location.origin}${window.location.pathname}?${qs.toString()}`;
-  };
-
-  const openCustomerScreen = () => {
-    try { live.post(buildLivePayload()); } catch {}
-    const final = makeCustomerViewUrl();
-    const w = window.open(final, '_blank');
-    if (!w) alert('Please allow pop-ups for this site to open the Customer Screen.');
-  };
-  const openCustomerPrint = () => {
-    try { live.post(buildLivePayload()); } catch {}
-    const final = makeCustomerViewUrl();
-    const w = window.open(final, '_blank');
-    if (!w) alert('Please allow pop-ups for this site to open the Print view.');
-  };
-
-  // ----- WhatsApp share (Editor + Customer View)
-  // FIX: single helper usable in both views
-  const shareWhatsApp = (fromCustomerView?: boolean) => {
-    try { live.post(buildLivePayload()); } catch {}
-    // Compute values depending on current view/state
-    const invNo =
-      (fromCustomerView ? (liveState?.header?.invoiceNo ?? null) : null)
-      ?? (invoiceNoJustSaved ?? null);
-
-    const grand =
-      (fromCustomerView ? (liveState?.totals?.grand ?? 0) : 0)
-      || (invoiceGrandTotalAtSave ?? totals.grand);
-
-    const url = makeCustomerViewUrl();
-    const text = `${brandName} • ${docType === 'return' ? 'Return' : 'Invoice'}${invNo ? ' #' + invNo : ''}\nTotal: ₹ ${Number(grand || 0).toFixed(2)}\n${url}`;
-
-    // Try native share first (best on mobile)
-    if ((navigator as any).share) {
-      try {
-        (navigator as any).share({ text, url });
-        return;
-      } catch (e) {
-        // fall back to WhatsApp web link
-      }
-    }
-
-    const wa = `https://wa.me/?text=${encodeURIComponent(text)}`;
-    window.open(wa, '_blank', 'noopener,noreferrer');
-  };
-
-  // ===== Auto-generate QR (UPI read-only) =====
-  const buildUpiUri = (upi: string, amount: number, note: string, payeeName: string) => {
-    if (!upi) return '';
-    const params = new URLSearchParams();
-    params.set('pa', upi);
-    if (payeeName) params.set('pn', payeeName);
-    if (amount > 0) params.set('am', ceilRupee(amount).toString());
-    params.set('cu', 'INR');
-    if (note) params.set('tn', note);
-    return `upi://pay?${params.toString()}`;
-  };
-
-  useEffect(() => {
-    if (payMethod !== 'qr') return;
-    if (!upiId) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        setGeneratingQR(true);
-        const QR: any = await import('qrcode');
-        const upi = buildUpiUri(
-          upiId.trim(),
-          payAmount || 0,
-          payReference || (invoiceNoJustSaved ?? 'Payment'),
-          brandName
-        );
-        const toDataURL = (QR?.toDataURL || QR?.default?.toDataURL);
-        const dataUrl = await toDataURL(upi, { margin: 1, scale: 8 });
-        if (!cancelled) setQrImageUrl(dataUrl);
-      } catch (e: any) {
-        if (!cancelled) { console.error(e); alert(e?.message || 'Failed to generate QR'); }
-      } finally {
-        if (!cancelled) setGeneratingQR(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [payMethod, upiId, payAmount, payReference, invoiceNoJustSaved, brandName]);
-
-  // ----- confirm payment (works from both Editor & Customer View)
-  const confirmPayment = async () => {
-    try {
-      // Prefer editor id; else use live payload (customer view)
-      const liveInvoiceId = liveState?.invoiceId ?? liveState?.header?.invoiceNo ? liveState?.invoiceId : null;
-      const effectiveInvoiceId = invoiceIdJustSaved || liveInvoiceId || null;
-
-      if (!effectiveInvoiceId) return alert('No saved invoice to attach payment.');
-      if (!payAmount || payAmount <= 0) return alert('Enter a positive amount.');
-
-      const meta: any = {};
-      if (payMethod === 'card') {
-        meta.card_holder = cardHolder || null;
-        meta.card_last4 = cardLast4 || null;
-        meta.card_auth  = cardAuth  || null;
-        meta.card_txn   = cardTxn   || null;
-      } else if (payMethod === 'qr') {
-        meta.qr_image_url = qrImageUrl || null;
-        meta.qr_txn       = qrTxn || null;
-        meta.upi_id       = upiId || null;
-      }
-
-      const payload = {
-        invoice_id: effectiveInvoiceId,
-        method: payMethod,
-        direction: payDirection,
-        amount: ceilRupee(payAmount),
-        reference: payReference || null,
-        meta,
-      };
-
-      const { data, error } = await supabase.from('payments').insert([payload]).select().single();
-      if (error) throw error;
-
-      setShowPayModal(false);
-
-      if (invoiceIdJustSaved) {
-        await refreshPayments(effectiveInvoiceId);
-        try { live.post(buildLivePayload()); } catch {}
-      }
-
-      if (isCustomerView) {
-        setCustPayments([...(custPayments ?? liveState?.payments ?? []), data]);
-      }
-
-      if (data?.id) {
-        const url = `${window.location.origin}/receipts/${data.id}`;
-        window.open(url, '_blank', 'noopener,noreferrer');
-      }
-
-    } catch (err: any) {
-      console.error(err);
-      alert(err?.message || String(err));
-    }
-  };
-
-  // 🆕 BARCODE: focus hidden input whenever barcode mode ON
-  useEffect(() => {
-    if (!barcodeMode) return;
-    const t = setTimeout(() => barcodeInputRef.current?.focus(), 0);
-    return () => clearTimeout(t);
-  }, [barcodeMode]);
-
-  // 🆕 BARCODE: process scanned code + auto-select Location (can still change in UI)
-  const processBarcode = async (codeRaw: string) => {
-    const code = (codeRaw || '').trim();
-    if (!code) return;
-
-    // Sanitize scanQty (fallback to 1)
-    const addQty = Number.isFinite(Number(scanQty)) && Number(scanQty) > 0 ? Number(scanQty) : 1;
-
-    try {
-      const { data, error } = await supabase
-        .from('items')
-        .select(
-          'id, sku, name, unit_cost, tax_rate, purchase_price, gst_percent, margin_percent, uom:units_of_measure ( code )'
-        )
-        .ilike('sku', code)
-        .limit(1);
-
-      if (error) throw error;
-      const rec = (data ?? [])[0] as ItemDb | undefined;
-
-      if (!rec) {
-        alert(`No item found for SKU "${code}"`);
-        // Keep barcode input focused for the next scan
-        setTimeout(() => barcodeInputRef.current?.focus(), 0);
-        return;
-      }
-
-      // Load balances for this item to pick a default location
-      const balances = await loadLocBalances(rec.id);
-      const defaultLoc = pickDefaultLocation(balances); // '' if none available
-
-      // If item row already exists, just increment qty by scanQty
-      const existing = rows.find(r => r.item_id === rec.id);
-      if (existing) {
-        setRows(prev => prev.map(r => {
-          if (r.id !== existing.id) return r;
-          const base = Number(rec.unit_cost || r.base_cost || 0);
-          // If current margin/tax are not set, take from item
-          const autoGst = Number(rec.gst_percent ?? rec.tax_rate ?? r.tax_rate ?? 0);
-          const autoMargin = Number(rec.margin_percent ?? r.margin_pct ?? 0);
-          const calc = base * (1 + (autoMargin || 0) / 100);
-          const unit = ceilRupee(calc);
-          return {
-            ...r,
-            qty: Number(r.qty || 0) + addQty,
-            base_cost: base,
-            tax_rate: r.tax_rate ? r.tax_rate : autoGst,
-            margin_pct: r.margin_pct ? r.margin_pct : autoMargin,
-            unit_price: r.margin_pct ? r.unit_price : unit,
-            loc_balances: (r.loc_balances && r.loc_balances.length > 0) ? r.loc_balances : balances,
-            location: r.location && r.location.trim() ? r.location : defaultLoc,
-          };
-        }));
-        setTimeout(() => barcodeInputRef.current?.focus(), 0);
-        return;
-      }
-
-      // Otherwise, use first empty row or add a new one
-      let target = rows.find(r => !r.item_id);
-      if (!target) {
-        target = {
-          id: makeId(),
-          sku_input: '',
-          item_id: '',
-          description: '',
-          uom_code: '',
-          base_cost: 0,
-          qty: 1,
-          margin_pct: 0,
-          tax_rate: 0,
-          unit_price: 0,
-          issued_margin_pct: 0,
-          return_qty: 0,
-          location: '',
-          use_custom_location: false,
-          loc_balances: [],
-          last_sku_tried: '',
-        };
-        setRows(prev => [...prev, target!]);
-      }
-
-      // Fill via the common setter (it sets GST/Margin + pricing + default location)
-      await setItemBySku(target.id, code, { silentNotFound: true });
-
-      // Set qty = scanQty and ensure location is auto-selected (if still blank)
-      setQty(target.id, addQty);
-      setRows(prev =>
-        prev.map(r => {
-          if (r.id !== target!.id) return r;
-          const locs = (r.loc_balances && r.loc_balances.length > 0) ? r.loc_balances : balances;
-          const autoLoc = r.location && r.location.trim() ? r.location : (defaultLoc || '');
-          return { ...r, loc_balances: locs, location: autoLoc };
-        })
-      );
-
-      setTimeout(() => barcodeInputRef.current?.focus(), 0);
-    } catch (e: any) {
-      console.error(e);
-      alert(e?.message || 'Scan failed');
-    } finally {
-      setBarcodeBuffer('');
-      setTimeout(() => barcodeInputRef.current?.focus(), 0);
-    }
-  };
-
-  // =======================
-  // Customer Screen only
-  // =======================
-  if (isCustomerView) {
-    const header = liveState?.header ?? { docType, issuedAt, customerName, customerAddress1Line, invoiceNo: invoiceNoJustSaved, notes };
-    const liveLines: any[] = liveState?.lines ?? [];
-    const liveTotals = liveState?.totals ?? { subtotal: 0, tax: 0, grand: 0 };
-    const paymentsList: any[] = (custPayments ?? liveState?.payments) ?? [];
-    const paySummary = liveState?.paySummary ?? { paidIn: 0, paidOut: 0, netPaid: 0, balance: liveTotals.grand || 0 };
-
-    const docTitle = header.docType === 'return' ? 'Return' : 'Invoice';
-
-    return (
-      <div className="fixed inset-0 bg-white p-4 print:p-0 overflow-auto">
-        <style>{`
-          /* Shared numeric alignment for screen & print */
-          .num { text-align: right; font-variant-numeric: tabular-nums; }
-
-          /* Fix alignment of Qty, Unit, Tax%, Line Total */
-          table.table th,
-          table.table td {
-            padding: 4px 8px !important;
-            vertical-align: middle !important;
-          }
-
-          table.table .num {
-            text-align: right !important;
-            white-space: nowrap;
-          }
-
-          @media print {
-            @page { margin: 8mm; }
-            body * { visibility: hidden !important; }
-            .print-area, .print-area * { visibility: visible !important; }
-            .print-area { position: absolute; left: 0; top: 0; width: 100%; }
-            .no-print { display: none !important; }
-          }
-        `}</style>
-
-        {/* Controls (not printed) */}
-        <div className="no-print mb-3 flex gap-2">
-          <Button
-            type="button"
-            onClick={() => {
-              const direction = header.docType === 'return' ? 'out' : 'in';
-              setPayDirection(direction);
-              setPayMethod('cash');
-              const baseAmount = Number(paySummary.balance || liveTotals.grand || 0);
-              setPayAmount(baseAmount);
-              setPayReference(header.invoiceNo ? `Invoice ${header.invoiceNo}` : '');
-              setCardHolder(''); setCardLast4(''); setCardAuth(''); setCardTxn('');
-              setQrImageUrl(''); setQrTxn('');
-              setShowPayModal(true);
-            }}
-            className="bg-green-600 hover:bg-green-700"
-            title="Record a payment"
-          >
-            Pay
-          </Button>
-
-          <Button type="button" onClick={() => window.print()}>Print</Button>
-
-          {/* NEW: WhatsApp share from customer view */}
-          <Button type="button" onClick={() => shareWhatsApp(true)} className="bg-[#25D366] hover:bg-[#1ebe57]">
-            WhatsApp
-          </Button>
-
-          <Button type="button" onClick={() => window.close()} className="bg-gray-700 hover:bg-gray-800">Close</Button>
-        </div>
-
-        {/* Pure Invoice Area */}
-        <div className="print-area">
-          {/* Brand header */}
-          <div className="mb-3 flex items-start gap-3">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            {brandLogo ? <img src={brandLogo} alt="logo" className="h-12 w-12 rounded bg-white object-contain" /> : null}
-            <div>
-              <div className="text-2xl font-bold text-orange-600">{brandName}</div>
-              <div className="text-sm text-gray-700">{brandAddress}</div>
-              <div className="text-sm text-gray-700">Phone: {brandPhone}</div>
-            </div>
-          </div>
-
-          {/* Minimal doc heading */}
-          <div className="mb-3 flex items-start justify-between">
-            <div>
-              <div className="text-xl font-semibold">{docTitle}</div>
-              {header.invoiceNo ? (
-                <div className="text-sm text-gray-700">No: {header.invoiceNo}</div>
-              ) : null}
-              <div className="text-sm text-gray-700">Date: {header.issuedAt || '—'}</div>
-            </div>
-          </div>
-
-          {/* Bill To */}
-          <div className="mb-4">
-            <div className="font-semibold">Bill To</div>
-            <div>{header.customerName || '—'}</div>
-            <div className="text-sm text-gray-700">{header.customerAddress1Line || '—'}</div>
-            {header.notes ? (
-              <div className="text-sm text-gray-700 mt-1">Notes: {header.notes}</div>
-            ) : null}
-          </div>
-
-          {/* Lines */}
-          <div className="overflow-auto">
-            <table className="table w-full">
-              <thead>
-                <tr>
-                  <th>SKU</th>
-                  <th style={{ minWidth: 220 }}>Description</th>
-                  <th>UoM</th>
-                  <th className="num">Qty</th>
-                  <th className="num">Unit</th>
-                  <th className="num">Tax %</th>
-                  <th className="num">Line Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                {liveLines.map((ln, idx) => (
-                  <tr key={idx}>
-                    <td>{ln.sku}</td>
-                    <td>{ln.description}</td>
-                    <td>{ln.uom_code || '-'}</td>
-                    <td className="num">{ln.qty}</td>
-                    <td className="num">₹ {Number(ln.unit_price || 0).toFixed(2)}</td>
-                    <td className="num">{Number(ln.tax_rate || 0).toFixed(2)}</td>
-                    <td className="num">₹ {Number(ln.line_total || 0).toFixed(2)}</td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr>
-                  <td colSpan={5}></td>
-                  <td className="num font-medium">Subtotal</td>
-                  <td className="num">₹ {Number(liveTotals.subtotal || 0).toFixed(2)}</td>
-                </tr>
-                <tr>
-                  <td colSpan={5}></td>
-                  <td className="num font-medium">Tax</td>
-                  <td className="num">₹ {Number(liveTotals.tax || 0).toFixed(2)}</td>
-                </tr>
-                <tr className="font-semibold">
-                  <td colSpan={5}></td>
-                  <td className="num">Total</td>
-                  <td className="num">₹ {Number(liveTotals.grand || 0).toFixed(2)}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-
-          {/* Payments (Customer View) */}
-          <div className="mt-4">
-            <div className="font-semibold mb-1">Payments</div>
-            {(paymentsList.length === 0) ? (
-              <div className="text-sm text-gray-600">No payments yet.</div>
-            ) : (
-              <div className="overflow-auto">
-                <table className="table w-full">
-                  <thead>
-                    <tr>
-                      <th>When</th>
-                      <th>Method</th>
-                      <th>Direction</th>
-                      <th>Reference</th>
-                      <th className="num">Amount</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {paymentsList.map(p => (
-                      <tr key={p.id}>
-                        <td>{p.created_at ? new Date(p.created_at).toLocaleString() : '—'}</td>
-                        <td className="capitalize">{p.method}</td>
-                        <td className="uppercase">{p.direction}</td>
-                        <td>{p.reference || '—'}</td>
-                        <td className="num">₹ {Number(p.amount || 0).toFixed(2)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            <div className="mt-2 grid sm:grid-cols-2 gap-3">
-              <div className="border rounded p-2">
-                <div className="flex justify-between"><div>Paid In</div><div>₹ {Number(paySummary.paidIn || 0).toFixed(2)}</div></div>
-                <div className="flex justify-between"><div>Refunded (Out)</div><div>₹ {Number(paySummary.paidOut || 0).toFixed(2)}</div></div>
-                <div className="flex justify-between font-semibold"><div>Net Paid</div><div>₹ {Number(paySummary.netPaid || 0).toFixed(2)}</div></div>
-              </div>
-              <div className="border rounded p-2">
-                <div className="flex justify-between font-semibold">
-                  <div>{header.docType === 'return' ? 'Refund Remaining' : 'Balance Due'}</div>
-                  <div>₹ {Number(paySummary.balance || 0).toFixed(2)}</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* ---- Pay Modal (Customer View) ---- */}
-        {showPayModal && (
-          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-            <div className="bg-white rounded shadow-lg p-4 w-full max-w-md">
-              <div className="text-lg font-semibold mb-2">{header.docType === 'return' ? 'Refund' : 'Receive Payment'}</div>
-
-              <div className="mb-3">
-                <label className="label">Method</label>
-                <div className="grid grid-cols-4 gap-2">
-                  {(['cash','card','qr','other'] as const).map(m => (
-                    <button
-                      key={m}
-                      type="button"
-                      className={`px-3 py-2 rounded border ${payMethod===m ? 'bg-orange-600 text-white' : 'bg-white hover:bg-gray-50'}`}
-                      onClick={() => setPayMethod(m)}
-                    >
-                      {m.toUpperCase()}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Card meta */}
-              {payMethod === 'card' && (
-                <div className="mb-3 grid grid-cols-2 gap-3">
-                  <div><label className="label">Card Holder</label><input className="input" value={cardHolder} onChange={(e)=>setCardHolder(e.target.value)} /></div>
-                  <div><label className="label">Last 4</label><input className="input" value={cardLast4} maxLength={4} onChange={(e)=>setCardLast4(e.target.value.replace(/\D/g,''))} /></div>
-                  <div><label className="label">Auth Code</label><input className="input" value={cardAuth} onChange={(e)=>setCardAuth(e.target.value)} /></div>
-                  <div><label className="label">Txn ID</label><input className="input" value={cardTxn} onChange={(e)=>setCardTxn(e.target.value)} /></div>
-                </div>
-              )}
-
-              {/* QR meta — auto QR (UPI read-only) */}
-              {payMethod === 'qr' && (
-                <div className="mb-3 grid grid-cols-1 gap-3">
-                  <div className="text-sm font-semibold text-gray-800">Scan‑to‑Pay</div>
-
-                  <div>
-                    <label className="label">UPI ID (read‑only)</label>
-                    <input className="input" value={upiId} readOnly />
-                  </div>
-
-                  <div className="mt-2 border rounded p-2 flex flex-col items-center">
-                    {!qrImageUrl ? (
-                      <div className="text-sm text-gray-600">
-                        {generatingQR ? 'Generating QR…' : 'QR will appear here'}
-                      </div>
-                    ) : (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={qrImageUrl} alt="QR" className="max-h-40 object-contain" />
-                    )}
-                    {upiId && <div className="mt-2 text-xs text-gray-700">UPI ID: <b>{upiId}</b></div>}
-                  </div>
-
-                  <div><label className="label">Txn ID (optional)</label><input className="input" value={qrTxn} onChange={(e)=>setQrTxn(e.target.value)} /></div>
-                </div>
-              )}
-
-              <div className="mb-3 grid grid-cols-2 gap-3">
-                <div>
-                  <label className="label">{header.docType === 'return' ? 'Refund Amount' : 'Amount Received'}</label>
-                  <input className="input" type="number" step="0.01" min={0} value={payAmount} onChange={(e) => setPayAmount(parseFloat(e.target.value || '0'))} />
-                </div>
-                <div>
-                  <label className="label">Direction</label>
-                  <select className="input" value={payDirection} onChange={(e) => setPayDirection(e.target.value as 'in'|'out')}>
-                    <option value="in">IN (receive)</option>
-                    <option value="out">OUT (refund)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="mb-3">
-                <label className="label">Reference (txn no / note)</label>
-                <input className="input" value={payReference} onChange={(e) => setPayReference(e.target.value)} placeholder="Optional" />
-              </div>
-
-              <div className="flex justify-end gap-2">
-                <button type="button" className="px-3 py-2 rounded bg-gray-200 hover:bg-gray-300" onClick={() => setShowPayModal(false)}>Cancel</button>
-                <button type="button" className="px-3 py-2 rounded bg-green-600 hover:bg-green-700 text-white" onClick={confirmPayment}>Confirm</button>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // =======================
-  // User Screen (editor)
-  // =======================
-  const isReturn = docType === 'return';
-
-  const paidIn  = useMemo(() => computePaymentSummary().paidIn,  [payments, totals.grand, invoiceGrandTotalAtSave, docType]);
-  const paidOut = useMemo(() => computePaymentSummary().paidOut, [payments, totals.grand, invoiceGrandTotalAtSave, docType]);
-  const netPaid = useMemo(() => computePaymentSummary().netPaid, [payments, totals.grand, invoiceGrandTotalAtSave, docType]);
-  const balance = useMemo(() => computePaymentSummary().balance,[payments, totals.grand, invoiceGrandTotalAtSave, docType]);
-
-  // --------- UI helper to render Location cell per row ----------
-  const LocationCell = ({ row }: { row: Row }) => {
-    const hasOptions = (row.loc_balances?.length || 0) > 0;
-    if (!isReturn) {
-      // SALE (Issue): must pick existing location
-      return (
-        <div>
-          <select
-            className="input"
-            value={row.location || ''}
-            onChange={(e) => setRowLocation(row.id, e.target.value, false)}
-            disabled={!row.item_id}
-            title="Select Location to issue from"
-          >
-            <option value="">Select location…</option>
-            {(row.loc_balances || []).map(l => (
-              <option key={l.name} value={l.name}>
-                {l.name} — {l.qty}
-              </option>
-            ))}
-          </select>
-          {row.location && (
-            <div className="text-xs text-gray-600 mt-1">
-              Available: <b>{getSelectedLocQty(row)}</b> {row.uom_code || ''}
-            </div>
-          )}
-          {!hasOptions && row.item_id && (
-            <div className="text-xs text-amber-600 mt-1">
-              No locations found for this item.
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    // RETURN: choose existing or "Other/New"
-    const value = row.use_custom_location ? '__NEW__' : (row.location || '');
-    return (
-      <div className="grid grid-cols-2 gap-2">
-        <select
-          className="input"
-          value={value}
-          onChange={(e) => {
-            const v = e.target.value;
-            if (v === '__NEW__') {
-              setRowLocation(row.id, '', true);
-            } else {
-              setRowLocation(row.id, v, false);
-            }
-          }}
-          disabled={!row.item_id}
-          title="Select Location to return to"
-        >
-          <option value="">{hasOptions ? 'Select existing…' : 'No locations yet'}</option>
-          {(row.loc_balances || []).map(l => (
-            <option key={l.name} value={l.name}>
-              {l.name} — {l.qty}
-            </option>
-          ))}
-          <option value="__NEW__">Other / New…</option>
-        </select>
-        <input
-          className="input"
-          placeholder="Type new location"
-          value={row.use_custom_location ? (row.location || '') : ''}
-          onChange={(e) => setRowLocation(row.id, e.target.value, true)}
-          disabled={!row.item_id || !row.use_custom_location}
-        />
-      </div>
-    );
   };
 
   return (
@@ -1499,7 +643,7 @@ export default function NewInvoicePage() {
         tabIndex={barcodeMode ? 0 : -1}
       />
 
-      {/* Editor Header */}
+      {/* Header */}
       <div className="card mb-4">
         <div className="flex items-center gap-4">
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -1509,8 +653,9 @@ export default function NewInvoicePage() {
             <div className="text-sm text-gray-700">{brandAddress}</div>
             <div className="text-sm text-gray-700">Phone: {brandPhone}</div>
           </div>
+
           <div className="ml-auto flex gap-2 items-center flex-wrap">
-            {/* 🆕 Barcode Mode Toggle */}
+            {/* Barcode Mode Toggle (optional) */}
             <label className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
               <input
                 type="checkbox"
@@ -1525,7 +670,6 @@ export default function NewInvoicePage() {
               <span className="text-sm font-medium">Barcode Mode</span>
             </label>
 
-            {/* 🆕 Scan Qty control */}
             <label className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
               <span className="text-sm font-medium">Scan Qty</span>
               <input
@@ -1543,49 +687,30 @@ export default function NewInvoicePage() {
               />
             </label>
 
-            <Button type="button" onClick={openCustomerScreen}>Open Customer Screen</Button>
-            <Button type="button" onClick={openCustomerPrint} className="bg-gray-700 hover:bg-gray-800">Print</Button>
-
-            {/* NEW: WhatsApp share (Editor) */}
-            <Button type="button" onClick={() => shareWhatsApp(false)} className="bg-[#25D366] hover:bg-[#1ebe57]">
-              WhatsApp
-            </Button>
-
-            <Button type="button" onClick={handleNewInvoice} className="bg-gray-700 hover:bg-gray-800">
-              New {isReturn ? 'Return' : 'Invoice'}
+            <Button type="button" onClick={handleNewEstimate} className="bg-gray-700 hover:bg-gray-800">
+              New Estimate
             </Button>
           </div>
         </div>
       </div>
 
       <div className="card">
-        <h1 className="text-xl font-semibold mb-4">New {isReturn ? 'Return' : 'Invoice'}</h1>
+        <h1 className="text-xl font-semibold mb-4">New Estimate</h1>
 
-        {/* Top */}
+        {/* Top fields */}
         <div className="grid md-grid-cols-3 md:grid-cols-3 gap-3 mb-4">
           <div>
-            <label className="label">Type</label>
-            <select
+            <label className="label">Estimate No</label>
+            <input
               className="input"
-              value={docType}
-              onChange={(e) => {
-                const v = e.target.value as DocType;
-                setDocType(v);
-                if (v === 'sale') {
-                  setOriginalInvoiceNo('');
-                  setCustomerInvoices([]);
-                  setOriginalGrandTotal(0);
-                  setRows([makeEmptyRow()]);
-                }
-              }}
-            >
-              <option value="sale">Sale</option>
-              <option value="return">Return</option>
-            </select>
+              placeholder="Auto on save or enter manually"
+              value={estimateNo}
+              onChange={(e) => setEstimateNo(e.target.value)}
+            />
           </div>
 
           <div>
-            <label className="label">Invoice Date</label>
+            <label className="label">Estimate Date</label>
             <input className="input" type="date" value={issuedAt} onChange={(e) => setIssuedAt(e.target.value)} />
           </div>
 
@@ -1594,42 +719,6 @@ export default function NewInvoicePage() {
             <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional notes" />
           </div>
         </div>
-
-        {/* Return helpers */}
-        {isReturn && (
-          <div className="card mb-4">
-            <div className="grid md:grid-cols-3 gap-3 items-end">
-              <div>
-                <label className="label">Original Invoice No</label>
-                <input
-                  className="input"
-                  placeholder="Enter original invoice no (e.g., INV-123)"
-                  value={originalInvoiceNo}
-                  onChange={(e) => setOriginalInvoiceNo(e.target.value)}
-                />
-              </div>
-              <div><Button type="button" onClick={loadItemsFromInvoiceNo}>Load Items</Button></div>
-              <div className="text-sm text-gray-600">Loads items from original invoice. Enter <b>Return Qty</b> only.</div>
-            </div>
-
-            {customerInvoices.length > 0 && (
-              <div className="mt-4 grid md:grid-cols-3 gap-3 items-end">
-                <div className="md:col-span-2">
-                  <label className="label">Select Customer Invoice</label>
-                  <select className="input" value={originalInvoiceNo} onChange={(e) => setOriginalInvoiceNo(e.target.value)}>
-                    <option value="">-- Choose invoice --</option>
-                    {customerInvoices.map(inv => (
-                      <option key={inv.id} value={inv.invoice_no}>
-                        {inv.invoice_no} {inv.issued_at ? `• ${inv.issued_at}` : ''} {typeof inv.grand_total === 'number' ? `• ₹ ${inv.grand_total?.toFixed(2)}` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div><Button type="button" onClick={loadItemsFromInvoiceNo}>Load Selected</Button></div>
-              </div>
-            )}
-          </div>
-        )}
 
         {/* Customer */}
         <div className="card mb-4">
@@ -1667,314 +756,129 @@ export default function NewInvoicePage() {
         <div className="overflow-auto">
           <table className="table">
             <thead>
-              {!isReturn ? (
-                <tr>
-                  <th style={{ minWidth: 160 }}>Item (SKU)</th>
-                  <th style={{ minWidth: 220 }}>Description</th>
-                  <th style={{ minWidth: 80 }}>UoM</th>
-                  <th style={{ minWidth: 110 }}>Current Cost</th>
-                  <th style={{ minWidth: 140 }}>Location</th>{/* NEW */}
-                  <th style={{ minWidth: 80 }}>Qty</th>
-                  <th style={{ minWidth: 110 }}>Margin %</th>
-                  <th style={{ minWidth: 80 }}>Tax %</th>
-                  <th style={{ minWidth: 120 }}>Unit Price</th>
-                  <th style={{ minWidth: 120 }}>Line Total</th>
-                  <th></th>
-                </tr>
-              ) : (
-                <tr>
-                  <th style={{ minWidth: 120 }}>SKU</th>
-                  <th style={{ minWidth: 220 }}>Description</th>
-                  <th style={{ minWidth: 80 }}>UoM</th>
-                  <th className="text-right" style={{ minWidth: 90 }}>Qty (Sold)</th>
-                  <th className="text-right" style={{ minWidth: 80 }}>Tax %</th>
-                  <th className="text-right" style={{ minWidth: 120 }}>Line Total</th>
-                  <th style={{ minWidth: 180 }}>Location</th>{/* NEW */}
-                  <th className="text-right" style={{ minWidth: 110 }}>Return Qty</th>
-                  <th className="text-right" style={{ minWidth: 130 }}>Return Amount</th>
-                  <th className="text-right" style={{ minWidth: 130 }}>Remaining</th>
-                </tr>
-              )}
+              <tr>
+                <th style={{ minWidth: 160 }}>Item (SKU)</th>
+                <th style={{ minWidth: 220 }}>Description</th>
+                <th style={{ minWidth: 80 }}>UoM</th>
+                <th style={{ minWidth: 80 }}>Qty</th>
+                <th style={{ minWidth: 140 }}>Item QR</th>
+                <th style={{ minWidth: 140 }} className="text-right">Line Total</th>
+                <th></th>
+              </tr>
             </thead>
 
             <tbody>
               {rows.map((r) => {
-                if (!isReturn) {
-                  const lineTotal = ceilRupee((r.qty || 0) * (r.unit_price || 0));
-                  return (
-                    <tr key={r.id}>
-                      <td>
-                        <input
-                          className="input"
-                          placeholder={barcodeMode ? "Scan barcode…" : "Type/Scan SKU (auto-lookup) or press Enter"}
-                          value={r.sku_input}
-                          onChange={(e) => setSkuInput(r.id, e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              const sku = r.sku_input.trim();
-                              // FIX: mark as tried to avoid blur-dupe
-                              setRows(prev => prev.map(x => x.id === r.id ? { ...x, last_sku_tried: sku } : x));
-                              setItemBySku(r.id, sku);
-                            }
-                          }}
-                          onBlur={() => {
-                            // FIX: only lookup on blur if this SKU wasn't tried yet
-                            const v = (r.sku_input || '').trim();
-                            if (!r.item_id && v && v.toLowerCase() !== (r.last_sku_tried || '').toLowerCase()) {
-                              setRows(prev => prev.map(x => x.id === r.id ? { ...x, last_sku_tried: v } : x));
-                              setItemBySku(r.id, v);
-                            }
-                          }}
-                          readOnly={barcodeMode}
-                          title={barcodeMode ? 'Barcode Mode ON: SKU is read-only. Scan to add/increase.' : undefined}
-                          ref={(el) => { skuInputRefs.current[r.id] = el; }}
-                        />
-                      </td>
-                      <td><input className="input" placeholder="Description" value={r.description} onChange={(e) => setDescription(r.id, e.target.value)} /></td>
-                      <td><input className="input" value={r.uom_code || ''} readOnly placeholder="-" /></td>
-                      <td><input className="input" value={ceilRupee(r.base_cost).toFixed(2)} readOnly /></td>
-
-                      {/* NEW: SALE Location cell */}
-                      <td><LocationCell row={r} /></td>
-
-                      <td><input className="input" type="number" min={0} step="1" value={r.qty} onChange={(e) => setQty(r.id, parseFloat(e.target.value || '0'))} /></td>
-                      <td><input className="input" type="number" step="0.01" value={r.margin_pct} onChange={(e) => setMargin(r.id, parseFloat(e.target.value || '0'))} /></td>
-                      <td><input className="input" type="number" step="0.01" value={r.tax_rate} onChange={(e) => setTaxRate(r.id, parseFloat(e.target.value || '0'))} /></td>
-                      <td><input className="input" type="number" step="0.01" value={r.unit_price} onChange={(e) => setUnitPrice(r.id, parseFloat(e.target.value || '0'))} /></td>
-                      <td>₹ {lineTotal.toFixed(2)}</td>
-                      <td><button type="button" className="text-red-600 hover:underline" onClick={() => removeRow(r.id)}>Remove</button></td>
-                    </tr>
-                  );
-                }
-
-                // Return row
-                const soldLineTotal = ceilRupee(Number(r.qty || 0) * Number(r.unit_price || 0));
-                const retQty = Number(r.return_qty || 0);
-                const returnAmount = ceilRupee(retQty * Number(r.unit_price || 0));
-                const remaining = ceilRupee(soldLineTotal - returnAmount);
+                const perUnit = computeUnitEstimate(r.base_cost, r.gst_pct, r.margin_pct);
+                const lineTotal = ceilRupee((r.qty || 0) * perUnit);
+                const qr = qrMap[r.id];
 
                 return (
                   <tr key={r.id}>
-                    <td><input className="input" value={r.sku_input} readOnly /></td>
                     <td>
-                      <input className="input" value={r.description} readOnly />
-                      <div className="text-xs text-gray-600 mt-1">Issued Margin: {Number(r.issued_margin_pct ?? 0).toFixed(2)}%</div>
+                      <input
+                        className="input"
+                        placeholder={barcodeMode ? "Scan barcode…" : "Type/Scan SKU or press Enter"}
+                        value={r.sku_input}
+                        onChange={(e) => setSkuInput(r.id, e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            const sku = r.sku_input.trim();
+                            setRows(prev => prev.map(x => x.id === r.id ? { ...x, last_sku_tried: sku } : x));
+                            setItemBySku(r.id, sku);
+                          }
+                        }}
+                        onBlur={() => {
+                          const v = (r.sku_input || '').trim();
+                          if (!r.item_id && v && v.toLowerCase() !== (r.last_sku_tried || '').toLowerCase()) {
+                            setRows(prev => prev.map(x => x.id === r.id ? { ...x, last_sku_tried: v } : x));
+                            setItemBySku(r.id, v);
+                          }
+                        }}
+                        readOnly={barcodeMode}
+                        title={barcodeMode ? 'Barcode Mode ON: SKU is read-only. Scan to add/increase.' : undefined}
+                        ref={(el) => { skuInputRefs.current[r.id] = el; }}
+                      />
                     </td>
-                    <td><input className="input" value={r.uom_code || ''} readOnly placeholder="-" /></td>
-                    <td className="text-right"><input className="input text-right" value={r.qty} readOnly /></td>
-                    <td className="text-right"><input className="input text-right" value={Number(r.tax_rate).toFixed(2)} readOnly /></td>
-                    <td className="text-right">₹ {soldLineTotal.toFixed(2)}</td>
-
-                    {/* NEW: RETURN Location cell */}
-                    <td><LocationCell row={r} /></td>
-
-                    <td className="text-right">
-                      <input className="input text-right" type="number" min={0} max={r.qty} step="1" value={retQty} onChange={(e) => setReturnQty(r.id, parseFloat(e.target.value || '0'))} />
+                    <td>
+                      <input
+                        className="input"
+                        placeholder="Description"
+                        value={r.description}
+                        onChange={(e) => setDescription(r.id, e.target.value)}
+                        disabled={!r.item_id}
+                      />
+                      {/* Hidden technicals: cost + gst + margin (not shown, but retained in state) */}
                     </td>
-                    <td className="text-right">₹ {returnAmount.toFixed(2)}</td>
-                    <td className="text-right">₹ {remaining.toFixed(2)}</td>
+                    <td>
+                      <input className="input" value={r.uom_code || ''} readOnly placeholder="-" />
+                    </td>
+                    <td>
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        step="1"
+                        value={r.qty}
+                        onChange={(e) => setQty(r.id, parseFloat(e.target.value || '0'))}
+                        disabled={!r.item_id}
+                      />
+                    </td>
+                    <td>
+                      {!r.item_id ? (
+                        <div className="text-xs text-gray-500">—</div>
+                      ) : !qr ? (
+                        <div className="text-xs text-gray-500">Generating…</div>
+                      ) : (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={qr} alt={`QR ${r.sku_input}`} className="h-12 w-12 object-contain bg-white rounded" />
+                      )}
+                      {r.item_id && (
+                        <div className="mt-1 text-[11px] text-gray-600">SKU: {r.sku_input}</div>
+                      )}
+                    </td>
+                    <td className="text-right">₹ {lineTotal.toFixed(2)}</td>
+                    <td>
+                      <button type="button" className="text-red-600 hover:underline" onClick={() => removeRow(r.id)}>
+                        Remove
+                      </button>
+                    </td>
                   </tr>
                 );
               })}
             </tbody>
 
             <tfoot>
-              {!isReturn ? (
-                <tr><td colSpan={11}><Button type="button" onClick={addRow}>+ Add Line</Button></td></tr>
-              ) : (
-                <tr><td colSpan={11} className="text-sm text-gray-600">All item details are read-only in Return mode. Enter <b>Return Qty</b> and select <b>Location</b>.</td></tr>
-              )}
+              <tr>
+                <td colSpan={7}>
+                  <Button type="button" onClick={addRow}>+ Add Line</Button>
+                </td>
+              </tr>
             </tfoot>
           </table>
         </div>
 
-        {/* Totals + Save + Pay */}
+        {/* Totals + Save */}
         <div className="mt-6 grid lg:grid-cols-3 gap-4">
-          <div className="lg:col-span-2 space-y-4">
-            {isReturn && (
-              <div className="card">
-                <div className="flex justify-between"><div>Original Invoice Total</div><div>₹ {Number(originalGrandTotal || 0).toFixed(2)}</div></div>
-                <div className="flex justify-between"><div>Return Total (this document)</div><div>₹ {totals.grand.toFixed(2)}</div></div>
-                <div className="flex justify-between font-semibold"><div>Remaining After Return</div><div>₹ {(Number(originalGrandTotal || 0) - totals.grand).toFixed(2)}</div></div>
-              </div>
-            )}
-
-            {invoiceIdJustSaved && (
-              <div className="card">
-                <div className="mb-2 font-semibold">Payments</div>
-                {paymentsLoading ? (
-                  <div className="text-sm text-gray-600">Loading payments…</div>
-                ) : payments.length === 0 ? (
-                  <div className="text-sm text-gray-600">No payments yet.</div>
-                ) : (
-                  <div className="overflow-auto">
-                    <table className="table">
-                      <thead>
-                        <tr>
-                          <th>When</th>
-                          <th>Method</th>
-                          <th>Direction</th>
-                          <th>Reference</th>
-                          <th className="text-right">Amount</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {payments.map(p => (
-                          <tr key={p.id}>
-                            <td>{new Date(p.created_at).toLocaleString()}</td>
-                            <td className="capitalize">{p.method}</td>
-                            <td className="uppercase">{p.direction}</td>
-                            <td>{p.reference || '—'}</td>
-                            <td className="text-right">₹ {Number(p.amount || 0).toFixed(2)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-
-                <div className="mt-3 grid sm:grid-cols-2 gap-2">
-                  <div className="card">
-                    <div className="flex justify-between"><div>Paid In</div><div>₹ {paidIn.toFixed(2)}</div></div>
-                    <div className="flex justify-between"><div>Refunded (Out)</div><div>₹ {paidOut.toFixed(2)}</div></div>
-                    <div className="flex justify-between font-semibold"><div>Net Paid</div><div>₹ {netPaid.toFixed(2)}</div></div>
-                  </div>
-                  <div className="card">
-                    <div className="flex justify-between font-semibold">
-                      <div>{isReturn ? 'Refund Remaining' : 'Balance Due'}</div>
-                      <div>₹ {balance.toFixed(2)}</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
+          <div className="lg:col-span-2" />
 
           <div className="card">
-            <div className="flex justify-between"><div>Subtotal</div><div>₹ {totals.subtotal.toFixed(2)}</div></div>
-            <div className="flex justify-between"><div>Tax</div><div>₹ {totals.tax.toFixed(2)}</div></div>
-            <div className="flex justify-between font-semibold text-lg"><div>Total</div><div>₹ {totals.grand.toFixed(2)}</div></div>
+            <div className="flex justify-between font-semibold text-lg">
+              <div>Total</div>
+              <div>₹ {totals.grand.toFixed(2)}</div>
+            </div>
 
             <div className="mt-4 flex gap-2 flex-wrap">
-              <Button type="button" onClick={save} disabled={saving}>
-                {saving ? 'Saving…' : isReturn ? 'Save Return' : 'Save Invoice'}
+              <Button type="button" onClick={saveEstimate} disabled={saving}>
+                {saving ? 'Saving…' : 'Save Estimate'}
               </Button>
-              <Button type="button" onClick={openCustomerPrint} className="bg-gray-700 hover:bg-gray-800">Print</Button>
-
-              {/* NEW: WhatsApp share button in editor totals area (same as header) */}
-              <Button type="button" onClick={() => shareWhatsApp(false)} className="bg-[#25D366] hover:bg-[#1ebe57]">WhatsApp</Button>
-
-              <Button
-                type="button"
-                onClick={() => {
-                  if (!invoiceIdJustSaved) { alert('Please save the invoice/return first, then record payment.'); return; }
-                  const direction = docType === 'return' ? 'out' : 'in';
-                  setPayDirection(direction);
-                  setPayMethod('cash');
-                  const baseAmount = invoiceGrandTotalAtSave ?? totals.grand;
-                  setPayAmount(Number(baseAmount || 0));
-                  setPayReference('');
-                  setCardHolder(''); setCardLast4(''); setCardAuth(''); setCardTxn('');
-                  setQrImageUrl(''); setQrTxn('');
-                  setShowPayModal(true);
-                }}
-                className="bg-green-600 hover:bg-green-700"
-                disabled={!invoiceIdJustSaved}
-                title={!invoiceIdJustSaved ? 'Save first to record payments' : ''}
-              >
-                Pay
-              </Button>
-              {invoiceNoJustSaved && <div className="text-sm text-gray-600 self-center">Saved #{invoiceNoJustSaved}</div>}
+              <Button type="button" onClick={() => window.print()} className="bg-gray-700 hover:bg-gray-800">Print</Button>
+              {estimateNo && <div className="text-sm text-gray-600 self-center">Saved #{estimateNo}</div>}
             </div>
           </div>
         </div>
       </div>
-
-      {/* ---- Pay Modal (Editor) ---- */}
-      {showPayModal && !isCustomerView && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white rounded shadow-lg p-4 w-full max-w-md">
-            <div className="text-lg font-semibold mb-2">{isReturn ? 'Refund' : 'Receive Payment'}</div>
-
-            <div className="mb-3">
-              <label className="label">Method</label>
-              <div className="grid grid-cols-4 gap-2">
-                {(['cash','card','qr','other'] as const).map(m => (
-                  <button
-                    key={m}
-                    type="button"
-                    className={`px-3 py-2 rounded border ${payMethod===m ? 'bg-orange-600 text-white' : 'bg-white hover:bg-gray-50'}`}
-                    onClick={() => setPayMethod(m)}
-                  >
-                    {m.toUpperCase()}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Card meta */}
-            {payMethod === 'card' && (
-              <div className="mb-3 grid grid-cols-2 gap-3">
-                <div><label className="label">Card Holder</label><input className="input" value={cardHolder} onChange={(e)=>setCardHolder(e.target.value)} /></div>
-                <div><label className="label">Last 4</label><input className="input" value={cardLast4} maxLength={4} onChange={(e)=>setCardLast4(e.target.value.replace(/\D/g,''))} /></div>
-                <div><label className="label">Auth Code</label><input className="input" value={cardAuth} onChange={(e)=>setCardAuth(e.target.value)} /></div>
-                <div><label className="label">Txn ID</label><input className="input" value={cardTxn} onChange={(e)=>setCardTxn(e.target.value)} /></div>
-              </div>
-            )}
-
-            {/* QR meta — auto QR (UPI read-only) */}
-            {payMethod === 'qr' && (
-              <div className="mb-3 grid grid-cols-1 gap-3">
-                <div className="text-sm font-semibold text-gray-800">Scan‑to‑Pay</div>
-
-                <div>
-                  <label className="label">UPI ID (read‑only)</label>
-                  <input className="input" value={upiId} readOnly />
-                </div>
-
-                <div className="mt-2 border rounded p-2 flex flex-col items-center">
-                  {!qrImageUrl ? (
-                    <div className="text-sm text-gray-600">
-                      {generatingQR ? 'Generating QR…' : 'QR will appear here'}
-                    </div>
-                  ) : (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={qrImageUrl} alt="QR" className="max-h-40 object-contain" />
-                  )}
-                  {upiId && <div className="mt-2 text-xs text-gray-700">UPI ID: <b>{upiId}</b></div>}
-                </div>
-
-                <div><label className="label">Txn ID (optional)</label><input className="input" value={qrTxn} onChange={(e)=>setQrTxn(e.target.value)} /></div>
-              </div>
-            )}
-
-            <div className="mb-3 grid grid-cols-2 gap-3">
-              <div>
-                <label className="label">{isReturn ? 'Refund Amount' : 'Amount Received'}</label>
-                <input className="input" type="number" step="0.01" min={0} value={payAmount} onChange={(e) => setPayAmount(parseFloat(e.target.value || '0'))} />
-              </div>
-              <div>
-                <label className="label">Direction</label>
-                <select className="input" value={payDirection} onChange={(e) => setPayDirection(e.target.value as 'in'|'out')}>
-                  <option value="in">IN (receive)</option>
-                  <option value="out">OUT (refund)</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="mb-3">
-              <label className="label">Reference (txn no / note)</label>
-              <input className="input" value={payReference} onChange={(e) => setPayReference(e.target.value)} placeholder="Optional" />
-            </div>
-
-            <div className="flex justify-end gap-2">
-              <button type="button" className="px-3 py-2 rounded bg-gray-200 hover:bg-gray-300" onClick={() => setShowPayModal(false)}>Cancel</button>
-              <button type="button" className="px-3 py-2 rounded bg-green-600 hover:bg-green-700 text-white" onClick={confirmPayment}>Confirm</button>
-            </div>
-          </div>
-        </div>
-      )}
     </Protected>
   );
 }
