@@ -699,7 +699,6 @@ export default function InventoryPage() {
 
   /* ========= RENDER ========= */
   return (
-   return (
   <div className="space-y-4">
 
     {/* Back to Dashboard */}
