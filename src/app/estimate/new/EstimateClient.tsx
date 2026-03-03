@@ -40,9 +40,9 @@ interface Row {
   item_id: string;
   description: string;
   uom_code: string;
-  base_cost: number;   // current cost as base
-  gst_pct: number;     // hidden in UI
-  margin_pct: number;  // hidden in UI
+  base_cost: number;   // base/current cost
+  gst_pct: number;     // hidden in UI (only for computation)
+  margin_pct: number;  // hidden in UI (only for computation)
   qty: number;
   last_sku_tried?: string;
 }
@@ -119,8 +119,14 @@ export default function EstimatePage() {
   const [customerAddress1Line, setCustomerAddress1Line] = useState<string>('');
   const [showCreateCustomer, setShowCreateCustomer] = useState(false);
   const [newCust, setNewCust] = useState({
-    first_name: '', last_name: '', phone: '',
-    street_name: '', village_town: '', city: '', state: '', postal_code: '',
+    first_name: '',
+    last_name: '',
+    phone: '',
+    street_name: '',
+    village_town: '',
+    city: '',
+    state: '',
+    postal_code: '',
   });
 
   // Lines
@@ -165,7 +171,7 @@ export default function EstimatePage() {
     const m = Number(margin || 0);
     return ceilRupee(b + b * g / 100 + b * m / 100);
     // NOTE: When seeded from Inventory, we set base_cost = selling and gst/margin = 0,
-    // so per-unit becomes exactly the Inventory computed selling.
+    // so unit becomes exactly the Inventory computed selling.
   }
   const totals = useMemo(() => {
     let grand = 0;
@@ -394,16 +400,29 @@ export default function EstimatePage() {
   const lookupCustomerByPhone = async () => {
     const phone = (customerPhone || '').trim();
     if (!phone) return alert('Please enter a mobile number');
+
     const { data, error } = await supabase
       .from('customers')
       .select('id, first_name, last_name, phone, street_name, village_town, city, state, postal_code')
       .ilike('phone', phone);
+
     if (error) return alert(error.message);
 
     if (!data || data.length === 0) {
-      setNewCust({ first_name: '', last_name: '', phone, street_name: '', village_town: '', city, state: '', postal_code: '' });
+      setNewCust({
+        first_name: '',
+        last_name: '',
+        phone,
+        street_name: '',
+        village_town: '',
+        city: '',
+        state: '',
+        postal_code: '',
+      });
       setShowCreateCustomer(true);
-      setCustomerId(''); setCustomerName(''); setCustomerAddress1Line('');
+      setCustomerId('');
+      setCustomerName('');
+      setCustomerAddress1Line('');
     } else {
       const c = data[0] as Customer;
       setCustomerId(c.id);
@@ -468,7 +487,7 @@ export default function EstimatePage() {
         setEstimateNo(estNo);
       }
 
-      // Lines
+      // Lines (unit already includes gst+margin through computeUnit)
       const lines = rows
         .filter(r => (r.item_id || r.sku_input) && Number(r.qty || 0) > 0)
         .map(r => {
@@ -562,22 +581,27 @@ export default function EstimatePage() {
     setNotes('');
     setCustomerPhone(''); setCustomerId(''); setCustomerName(''); setCustomerAddress1Line('');
     setShowCreateCustomer(false);
-    setNewCust({ first_name: '', last_name: '', phone: '', street_name: '', village_town: '', city: '', state: '', postal_code: '' });
+    setNewCust({
+      first_name: '',
+      last_name: '',
+      phone: '',
+      street_name: '',
+      village_town: '',
+      city: '',
+      state: '',
+      postal_code: '',
+    });
     setRows([makeEmptyRow()]);
     setSaving(false);
   };
 
   /* ================================
      PRINT-ONLY STYLES + PRINT LAYOUT
-     - .no-print is hidden in print
-     - .print-area is the only thing shown
-     - Tables have compact spacing + numeric alignment
      ================================ */
   const PrintStyles = () => (
     <style>{`
       .num { text-align: right; font-variant-numeric: tabular-nums; }
 
-      /* Screen tweaks for print block preview (optional) */
       .print-area table { width: 100%; border-collapse: collapse; }
       .print-area th, .print-area td {
         padding: 6px 8px;
@@ -595,20 +619,19 @@ export default function EstimatePage() {
       @media print {
         @page { margin: 10mm; }
         body { background: #fff !important; }
-        /* Hide everything by default */
         body * { visibility: hidden; }
-        /* Show print area only */
         .print-area, .print-area * { visibility: visible; }
         .print-area { position: absolute; left: 0; top: 0; right: 0; }
-        /* Ensure tables render cleanly on paper */
+        .no-print { display: none !important; }
+
+        /* Avoid page-break inside rows */
         .print-area table { page-break-inside: auto; }
         .print-area tr { page-break-inside: avoid; page-break-after: auto; }
-        .no-print { display: none !important; }
       }
     `}</style>
   );
 
-  // Build the same lines structure for print
+  // Build the lines for print
   const printableLines = rows
     .filter(r => (r.item_id || r.sku_input) && Number(r.qty || 0) > 0)
     .map(r => {
@@ -659,7 +682,9 @@ export default function EstimatePage() {
             </div>
 
             <div className="ml-auto flex gap-2 items-center flex-wrap">
-              <Link href="/inventory" className="rounded border px-3 py-2 hover:bg-neutral-50">Back to Inventory</Link>
+              <Link href="/inventory" className="rounded border px-3 py-2 hover:bg-neutral-50">
+                Back to Inventory
+              </Link>
 
               <label className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
                 <input
@@ -946,11 +971,6 @@ export default function EstimatePage() {
             </tfoot>
           </table>
         </div>
-
-        {/* Optional terms footer */}
-        {/* <div style={{ marginTop: 12, fontSize: 11, color: '#374151' }}>
-          Thank you for your business!
-        </div> */}
       </div>
     </Protected>
   );
