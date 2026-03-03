@@ -44,7 +44,7 @@ export default function DashboardPage() {
   };
 
   const tilesAll = [
-    { key: 'invoice',   href: '/invoice',   label: 'Invoice',   icon: '₹'  },
+    { key: 'invoice',   href: '/invoices/new',   label: 'Invoice',   icon: '₹'  },
     { key: 'customers', href: '/customers', label: 'Customers', icon: '👥' },
     { key: 'items',     href: '/items',     label: 'Items',     icon: '🧰' },
     { key: 'stock',     href: '/stock',     label: 'Stock',     icon: '📦' },
