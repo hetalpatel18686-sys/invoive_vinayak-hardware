@@ -1,7 +1,7 @@
-
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 import Protected from '@/components/Protected';
@@ -19,15 +19,15 @@ interface Customer {
 }
 
 export default function Customers() {
-  // --- role guard state ---
+  // --- Role guard state ---
   const [checkingRole, setCheckingRole] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false);
 
-  // --- page data state ---
+  // --- Page data state ---
   const [list, setList] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Form state
+  // --- Form state ---
   const [form, setForm] = useState({
     first_name: '',
     last_name: '',
@@ -49,7 +49,7 @@ export default function Customers() {
         return;
       }
 
-      // Get role from user_metadata first, fallback to profiles table
+      // Role from user_metadata first; fallback to profiles table
       let role: string | undefined = (session.user.user_metadata as any)?.role;
       if (!role) {
         const { data: profile } = await supabase
@@ -61,7 +61,7 @@ export default function Customers() {
       }
 
       if (role !== 'admin') {
-        // Normal users are sent to Invoice
+        // Normal users go to Invoice
         window.location.href = '/invoice';
         return;
       }
@@ -93,9 +93,7 @@ export default function Customers() {
   };
 
   useEffect(() => {
-    if (isAdmin) {
-      load();
-    }
+    if (isAdmin) load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin]);
 
@@ -107,7 +105,7 @@ export default function Customers() {
       const { error } = await supabase.from('customers').insert([payload]);
       if (error) throw error;
 
-      // reset form
+      // Reset form
       setForm({
         first_name: '',
         last_name: '',
@@ -119,14 +117,14 @@ export default function Customers() {
         postal_code: '',
       });
 
-      // reload list
+      // Reload list
       load();
     } catch (err: any) {
       alert(err.message ?? 'Failed to save customer');
     }
   };
 
-  // While checking role, show a tiny placeholder (prevents flicker)
+  // While checking role, show a minimal placeholder
   if (checkingRole) {
     return (
       <Protected>
@@ -137,13 +135,21 @@ export default function Customers() {
     );
   }
 
-  // Render the page for admin
+  // ===== Render page for admin =====
   return (
     <Protected>
+      {/* Top toolbar with Back to Dashboard */}
+      <div className="mb-3 flex items-center justify-between">
+        <h1 className="text-xl font-semibold">Customers</h1>
+
+        /dashboard
+          ← Back to Dashboard
+        </Link>
+      </div>
+
       <div className="grid md:grid-cols-3 gap-4">
         {/* LEFT: List */}
         <div className="card md:col-span-2">
-          <h1 className="text-xl font-semibold mb-3">Customers</h1>
           {loading ? (
             <p>Loading...</p>
           ) : (
