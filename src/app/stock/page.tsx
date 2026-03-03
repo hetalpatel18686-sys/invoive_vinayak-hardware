@@ -1079,11 +1079,15 @@ export default function Stock() {
     <div className="grid md:grid-cols-3 gap-4">
 
       {/* Back to Dashboard */}
-  <div className="mb-3 flex items-center justify-end">
-  /dashboard
-    ← Back to Dashboard
-  </Link>
-</div>
+      <div className="mb-3 flex items-center justify-end">
+        <Link
+          href="/dashboard"
+          className="inline-flex items-center rounded border border-orange-600 px-3 py-1.5 text-sm font-semibold text-orange-700 hover:bg-orange-50"
+          aria-label="Back to Dashboard"
+        >
+          ← Back to Dashboard
+        </Link>
+      </div>
     
       {/* LEFT: SKU + Actions */}
       <div className="card">
