@@ -19,23 +19,14 @@ export default function LoginPage() {
     try {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
 
-      // Log for diagnostics (open browser console on /login in Vercel)
-      console.log('signIn result:', { data, error });
-
       if (error) {
         setMsg(error.message || 'Login failed');
         setLoading(false);
         return;
       }
 
-      // Double‑check we have a session
-      const { data: sessionData } = await supabase.auth.getSession();
-      console.log('getSession after login:', sessionData);
-
-      // Go to dashboard
       router.push('/dashboard');
     } catch (err: any) {
-      console.error(err);
       setMsg(err?.message || 'Unexpected error');
     } finally {
       setLoading(false);
@@ -45,24 +36,32 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen bg-gray-100 flex items-center justify-center p-6">
       <div className="bg-white shadow-lg rounded-xl p-10 max-w-md w-full text-center">
+
         {/* LOGO */}
         <img
           src={process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png'}
           alt="Logo"
-          className="mx-auto mb-6 h-24 w-24 object-contain"
+          className="mx-auto mb-4 h-24 w-24 object-contain"
         />
+
+        {/* --- SANSKRIT SHLOKA (added here) --- */}
+        <div className="text-gray-800 text-lg leading-relaxed font-[Noto Sans Devanagari] mb-4">
+          वक्रतुण्ड महाकाय सूर्यकोटि समप्रभ । <br />
+          निर्विघ्नं कुरु मे देव सर्वकार्येषु सर्वदा ॥
+        </div>
 
         {/* SHOP NAME */}
         <h1 className="text-3xl font-bold text-orange-600 mb-2">
           {process.env.NEXT_PUBLIC_BRAND_NAME || 'Vinayak Hardware'}
         </h1>
 
-        {/* WELCOME */}
-        <p className="text-gray-600 mb-4 text-lg">Welcome to Vinayak Hardware</p>
+        {/* REMOVED: “Welcome to Vinayak Hardware” */}
+        {/* (line completely removed as per your request) */}
 
-        {/* Error message (if any) */}
+        {/* Error message */}
         {msg && <p className="mb-3 text-red-600 text-sm">{msg}</p>}
 
+        {/* FORM */}
         <form onSubmit={signIn} className="space-y-4 text-left">
           <div>
             <label className="text-sm font-medium">Email</label>
@@ -96,6 +95,7 @@ export default function LoginPage() {
             {loading ? 'Signing in…' : 'Sign In'}
           </button>
         </form>
+
       </div>
     </div>
   );
