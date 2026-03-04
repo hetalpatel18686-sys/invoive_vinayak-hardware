@@ -986,28 +986,32 @@ export default function Stock() {
 
   /* ------------------------------ UI ------------------------------------ */
 
-  /** Helper: renders a SKU row cell with Find button */
-  function SkuCell({
-    kind, idx, line, placeholder='SKU…'
-  }: { kind: MoveType; idx: number; line: BulkLine; placeholder?: string }) {
-    return (
-      <div className="flex gap-1">
-        <input
-          className="input"
-          placeholder={placeholder}
-          value={line.sku}
-          onChange={(e) => updateLineField(kind, idx, 'sku', e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              bulkFindSku(kind, idx);
-            }
-          }}
-        />
-        <Button type="button" onClick={() => bulkFindSku(kind, idx)}>Find</Button>
-      </div>
-    );
-  }
+/** Helper: renders a SKU row cell with Find button (wider + typeable) */
+function SkuCell({
+  kind, idx, line, placeholder = 'SKU…'
+}: { kind: MoveType; idx: number; line: BulkLine; placeholder?: string }) {
+  return (
+    <div className="flex items-center gap-1 w-full min-w-[220px]">
+      <input
+        className="input flex-1 min-w-0 h-9"
+        type="text"
+        inputMode="text"
+        autoComplete="off"
+        spellCheck={false}
+        placeholder={placeholder}
+        value={line.sku}
+        onChange={(e) => updateLineField(kind, idx, 'sku', e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            bulkFindSku(kind, idx);
+          }
+        }}
+      />
+      <Button type="button" onClick={() => bulkFindSku(kind, idx)}>Find</Button>
+    </div>
+  );
+}
 
   /** Helper: Location picker for Receive (with custom) and for others (select only) */
   function LocationCell({
