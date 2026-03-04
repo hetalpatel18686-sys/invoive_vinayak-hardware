@@ -4,6 +4,7 @@ export const dynamic = 'force-dynamic';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import Button from '@/components/Button';
 import Protected from '@/components/Protected';
@@ -101,6 +102,8 @@ async function getQrDataUrl(value: string) {
    Main: Estimate Page
    ============================= */
 export default function EstimatePage() {
+  const router = useRouter();
+
   // Brand (optional)
   const brandName    = process.env.NEXT_PUBLIC_BRAND_NAME     || 'Vinayak Hardware';
   const brandLogo    = process.env.NEXT_PUBLIC_BRAND_LOGO_URL || '/logo.png';
@@ -170,8 +173,6 @@ export default function EstimatePage() {
     const g = Number(gst || 0);
     const m = Number(margin || 0);
     return ceilRupee(b + b * g / 100 + b * m / 100);
-    // NOTE: When seeded from Inventory, we set base_cost = selling and gst/margin = 0,
-    // so unit becomes exactly the Inventory computed selling.
   }
   const totals = useMemo(() => {
     let grand = 0;
@@ -595,6 +596,48 @@ export default function EstimatePage() {
     setSaving(false);
   };
 
+  /* =================================
+     Back to Inventory — smart behavior
+     ================================= */
+  const goBackToInventory = () => {
+    // 1) If this tab/window was opened by script and opener is available:
+    try {
+      const openerWin = window.opener as Window | null;
+      if (openerWin && !openerWin.closed) {
+        try {
+          // If same-origin, ensure opener is on Inventory
+          if (openerWin.location.origin === window.location.origin) {
+            if (!openerWin.location.pathname.startsWith('/inventory')) {
+              openerWin.location.href = '/inventory';
+            }
+          }
+        } catch {
+          // Cross-origin: can't inspect, just focus and close
+        }
+        openerWin.focus?.();
+        // Attempt to close this tab (allowed only if it was opened by script)
+        window.close();
+        return;
+      }
+    } catch {
+      // ignore
+    }
+
+    // 2) If we have navigation history (came from inventory), go back
+    if (document.referrer) {
+      try {
+        const ref = new URL(document.referrer);
+        if (ref.origin === window.location.origin) {
+          router.back();
+          return;
+        }
+      } catch {}
+    }
+
+    // 3) Fallback: replace current tab with Inventory
+    router.replace('/inventory');
+  };
+
   /* ================================
      PRINT-ONLY STYLES + PRINT LAYOUT
      ================================ */
@@ -682,9 +725,15 @@ export default function EstimatePage() {
             </div>
 
             <div className="ml-auto flex gap-2 items-center flex-wrap">
-              <Link href="/inventory" className="rounded border px-3 py-2 hover:bg-neutral-50">
+              {/* REPLACED Link with a button that knows how to close/focus/replace */}
+              <button
+                type="button"
+                onClick={goBackToInventory}
+                className="rounded border px-3 py-2 hover:bg-neutral-50"
+                title="Go back to the Inventory page (close this window if possible)"
+              >
                 Back to Inventory
-              </Link>
+              </button>
 
               <label className="flex items-center gap-2 border rounded px-2 py-1 bg-white">
                 <input
