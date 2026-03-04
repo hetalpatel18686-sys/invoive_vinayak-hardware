@@ -992,13 +992,16 @@ const anyModalOpen = showReceive || showAdjust || showIssue || showReturn;
 
   /* ------------------------------ UI ------------------------------------ */
 
-/** Helper: renders a SKU row cell with Find button (wider + keeps focus) */
+/** Helper: renders a SKU row cell with Find button (keeps focus + wider) */
 function SkuCell({
   kind, idx, line, placeholder = 'SKU…'
 }: { kind: MoveType; idx: number; line: BulkLine; placeholder?: string }) {
+  const skuInputRef = React.useRef<HTMLInputElement>(null);
+
   return (
-    <div className="flex items-center gap-1 w-full min-w-[260px]">
+    <div className="flex items-center gap-1 w-full min-w-[300px]">
       <input
+        ref={skuInputRef}
         className="input flex-1 min-w-0 h-9"
         type="text"
         inputMode="text"
@@ -1006,20 +1009,36 @@ function SkuCell({
         spellCheck={false}
         placeholder={placeholder}
         value={line.sku}
-        onChange={(e) => updateLineField(kind, idx, 'sku', e.target.value)}
+        onChange={(e) => {
+          // Update state
+          updateLineField(kind, idx, 'sku', e.target.value);
+          // Force caret to stay in this box
+          requestAnimationFrame(() => skuInputRef.current?.focus());
+        }}
+        onBlur={() => {
+          // While modal is open, keep focus inside the SKU box
+          if (anyModalOpen) {
+            requestAnimationFrame(() => skuInputRef.current?.focus());
+          }
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
             e.preventDefault();
             bulkFindSku(kind, idx);
+            requestAnimationFrame(() => skuInputRef.current?.focus());
           }
         }}
       />
-      {/* Use a plain <button> so it never auto-focuses; keep focus in input on click */}
+
+      {/* Use plain <button> and don't let it take focus */}
       <button
         type="button"
         className="inline-flex items-center rounded bg-orange-500 hover:bg-orange-600 text-white px-3 py-2 text-sm"
-        onMouseDown={(e) => e.preventDefault()}   // <-- do not move focus away
-        onClick={() => bulkFindSku(kind, idx)}
+        onMouseDown={(e) => e.preventDefault()}          // <-- keep focus in input
+        onClick={() => {
+          bulkFindSku(kind, idx);
+          requestAnimationFrame(() => skuInputRef.current?.focus());
+        }}
       >
         Find
       </button>
