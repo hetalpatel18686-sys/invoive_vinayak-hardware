@@ -1420,7 +1420,7 @@ function SkuCell({
                 ) : receiveLines.map((ln, idx) => (
                   <tr key={idx}>
                     <td>{idx + 1}</td>
-                    <td>
+                    <td style={{ minWidth: 260 }}>
                       <SkuCell kind="receive" idx={idx} line={ln} />
                       <RowError line={ln} />
                     </td>
@@ -1578,7 +1578,7 @@ function SkuCell({
                 ) : issueLines.map((ln, idx) => (
                   <tr key={idx}>
                     <td>{idx + 1}</td>
-                    <td>
+                    <td style={{ minWidth: 260 }}>
                       <SkuCell kind="issue" idx={idx} line={ln} />
                       <RowError line={ln} />
                     </td>
