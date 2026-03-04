@@ -999,7 +999,7 @@ function SkuCell({
   const skuInputRef = React.useRef<HTMLInputElement>(null);
 
   return (
-    <div className="flex items-center gap-1 w-full min-w-[300px]">
+    <div className="flex items-center gap-1 w-full min-w-[150px]">
       <input
         ref={skuInputRef}
         className="input flex-1 min-w-0 h-9"
