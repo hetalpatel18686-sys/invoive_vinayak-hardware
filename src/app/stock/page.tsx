@@ -1459,7 +1459,7 @@ function SkuCell({
                   <th>Selling</th>
                   <th>Ref</th>
                   <th>Reason</th>
-                  <th style={{minWidth: 240}}>Location</th>
+                  <th style={{minWidth: 150}}>Location</th>
                   <th></th>
                 </tr>
               </thead>
@@ -1478,7 +1478,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input w-60"
+                        className="input w-100"
                         type="number"
                         min={1}
                         step="1"
@@ -1488,7 +1488,7 @@ function SkuCell({
                     </td>
                     <td>
                       <select
-                        className="input"
+                        className="input w-100"
                         value={ln.uom_code || ''}
                         onChange={(e) => updateLineField('receive', idx, 'uom_code', e.target.value)}
                       >
@@ -1500,7 +1500,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input w-60"
+                        className="input w-100"
                         type="number"
                         step="0.01"
                         min={0}
@@ -1516,7 +1516,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input w-60"
+                        className="input w-100"
                         type="number"
                         step="0.01"
                         min={0}
@@ -1531,7 +1531,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input w-60"
+                        className="input w-100"
                         type="number"
                         step="0.01"
                         value={ln.margin_percent ?? 0}
@@ -1545,7 +1545,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input w-60"
+                        className="input w-100"
                         type="number"
                         step="0.01"
                         min={0}
@@ -1555,14 +1555,14 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input w-60"
+                        className="input w-100"
                         value={ln.ref || ''}
                         onChange={(e) => updateLineField('receive', idx, 'ref', e.target.value)}
                       />
                     </td>
                     <td>
                       <input
-                        className="input w-60"
+                        className="input w-100"
                         value={ln.reason || ''}
                         onChange={(e) => updateLineField('receive', idx, 'reason', e.target.value)}
                       />
@@ -1636,7 +1636,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-100"
                         type="number"
                         min={1}
                         step="1"
@@ -1649,14 +1649,14 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-100"
                         value={ln.ref || ''}
                         onChange={(e) => updateLineField('issue', idx, 'ref', e.target.value)}
                       />
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-100"
                         value={ln.reason || ''}
                         onChange={(e) => updateLineField('issue', idx, 'reason', e.target.value)}
                       />
@@ -1727,7 +1727,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-100"
                         type="number"
                         min={1}
                         step="1"
@@ -1740,14 +1740,14 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-100"
                         value={ln.ref || ''}
                         onChange={(e) => updateLineField('return', idx, 'ref', e.target.value)}
                       />
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-100"
                         value={ln.reason || ''}
                         onChange={(e) => updateLineField('return', idx, 'reason', e.target.value)}
                       />
@@ -1818,7 +1818,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-100"
                         type="number"
                         step="1"
                         value={ln.qty || 0}
@@ -1831,14 +1831,14 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-100"
                         value={ln.ref || ''}
                         onChange={(e) => updateLineField('adjust', idx, 'ref', e.target.value)}
                       />
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-100"
                         value={ln.reason || ''}
                         onChange={(e) => updateLineField('adjust', idx, 'reason', e.target.value)}
                       />
