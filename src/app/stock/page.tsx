@@ -1012,7 +1012,7 @@ function SkuCell({
             e.preventDefault();
             bulkFindSku(kind, idx);
           }
-        })}
+        }}
       />
       <Button type="button" onClick={() => bulkFindSku(kind, idx)}>Find</Button>
     </div>
