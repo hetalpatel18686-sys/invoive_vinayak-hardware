@@ -999,7 +999,7 @@ function SkuCell({
   const skuInputRef = React.useRef<HTMLInputElement>(null);
 
   return (
-    <div className="flex items-center gap-1 w-full min-w-[150px]">
+    <div className="flex items-center gap-1 w-full min-w-[300px]">
       <input
         ref={skuInputRef}
         className="input flex-1 min-w-0 h-9"
@@ -1010,13 +1010,12 @@ function SkuCell({
         placeholder={placeholder}
         value={line.sku}
         onChange={(e) => {
-          // Update state
           updateLineField(kind, idx, 'sku', e.target.value);
-          // Force caret to stay in this box
+          // keep caret in this input even if row re-renders
           requestAnimationFrame(() => skuInputRef.current?.focus());
         }}
         onBlur={() => {
-          // While modal is open, keep focus inside the SKU box
+          // while a modal is open, never let focus escape this box
           if (anyModalOpen) {
             requestAnimationFrame(() => skuInputRef.current?.focus());
           }
@@ -1030,11 +1029,11 @@ function SkuCell({
         }}
       />
 
-      {/* Use plain <button> and don't let it take focus */}
+      {/* IMPORTANT: plain <button>, and do not let it take focus */}
       <button
         type="button"
         className="inline-flex items-center rounded bg-orange-500 hover:bg-orange-600 text-white px-3 py-2 text-sm"
-        onMouseDown={(e) => e.preventDefault()}          // <-- keep focus in input
+        onMouseDown={(e) => e.preventDefault()}  // ← prevents focus steal
         onClick={() => {
           bulkFindSku(kind, idx);
           requestAnimationFrame(() => skuInputRef.current?.focus());
@@ -1150,6 +1149,7 @@ function SkuCell({
                 findBySku();
               }
             }}
+            disabled={anyModalOpen}        // ← add this line
           />
           <Button type="button" onClick={findBySku}>Find</Button>
         </div>
