@@ -1469,11 +1469,11 @@ function SkuCell({
                 ) : receiveLines.map((ln, idx) => (
                   <tr key={idx}>
                     <td>{idx + 1}</td>
-                    <td style={{ minWidth: 260 }}>
+                    <td style={{ minWidth: 150 }}>
                       <SkuCell kind="receive" idx={idx} line={ln} />
                       <RowError line={ln} />
                     </td>
-                    <td style={{maxWidth: 220}}>
+                    <td style={{maxWidth: 150}}>
                       <div className="text-sm truncate" title={ln.name || ''}>{ln.name || '—'}</div>
                     </td>
                     <td>
