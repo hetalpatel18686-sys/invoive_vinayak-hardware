@@ -116,14 +116,7 @@ export default function DashboardPage() {
             }
           `}</style>
 
-          <h1 style={{ margin: '6px 0 0', fontSize: 42, color: '#e96510', letterSpacing: .2 }}>
-            Vinayak Hardware
-          </h1>
-          <div style={{ marginTop: 6, color: '#6b7280', fontSize: 18 }}>
-            Welcome to Vinayak Hardware
-          </div>
-
-          {/* Sanskrit */}
+          {/* ➜ Sanskrit right after the logo (moved up) */}
           <div style={{
             marginTop: 8,
             fontFamily: '"Noto Sans Devanagari", Poppins, sans-serif',
@@ -132,6 +125,13 @@ export default function DashboardPage() {
             वक्रतुण्ड महाकाय सूर्यकोटि समप्रभ ।<br/>
             निर्विघ्नं कुरु मे देव सर्वकार्येषु सर्वदा ॥
           </div>
+
+          {/* Title */}
+          <h1 style={{ margin: '6px 0 0', fontSize: 42, color: '#e96510', letterSpacing: .2 }}>
+            Vinayak Hardware
+          </h1>
+
+          {/* ⛔️ Removed the "Welcome to Vinayak Hardware" line */}
 
           <div style={{ marginTop: 6, color: '#6b7280', fontSize: 14 }}>
             {loading ? 'Checking session…' : <>Signed in as <strong>{email}</strong> • Role: <strong>{role}</strong></>}
