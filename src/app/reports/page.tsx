@@ -2,6 +2,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import { supabase } from '@/lib/supabaseClient';
 import Protected from '@/components/Protected';
 
@@ -438,9 +439,21 @@ export default function Reports() {
 
   /** ---------- UI ---------- */
   return (
-    <Protected>
-      <div className="card">
-        <h1 className="text-xl font-semibold mb-3">Reports</h1>
+  <Protected>
+
+    {/* Back to Dashboard (top-left, full width) */}
+    <div className="mb-3">
+      <Link
+        href="/dashboard"
+        className="inline-flex items-center rounded border border-orange-600 px-3 py-1.5 text-sm font-semibold text-orange-700 hover:bg-orange-50"
+        aria-label="Back to Dashboard"
+      >
+        ← Back to Dashboard
+      </Link>
+    </div>
+
+    <div className="card">
+      <h1 className="text-xl font-semibold mb-3">Reports</h1>
 
         {/* Filters */}
         <div className="card mb-4">
