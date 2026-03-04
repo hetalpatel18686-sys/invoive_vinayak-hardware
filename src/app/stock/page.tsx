@@ -182,6 +182,9 @@ export default function Stock() {
   const [showIssue, setShowIssue] = useState(false);
   const [showReturn, setShowReturn] = useState(false);
 
+  /** NEW: true if any modal is open */
+const anyModalOpen = showReceive || showAdjust || showIssue || showReturn;
+  
   /* -------- BULK state per modal -------- */
   const [receiveLines, setReceiveLines] = useState<BulkLine[]>([]);
   const [issueLines, setIssueLines] = useState<BulkLine[]>([]);
@@ -200,6 +203,9 @@ export default function Stock() {
   }, []);
 
   const tryFocusSku = (selectAll = false) => {
+    // Do not steal focus while modal is open
+    if (anyModalOpen) return;
+    
     requestAnimationFrame(() => {
       const el = skuRef.current;
       if (el) {
@@ -1006,7 +1012,7 @@ function SkuCell({
             e.preventDefault();
             bulkFindSku(kind, idx);
           }
-        }}
+        })}
       />
       <Button type="button" onClick={() => bulkFindSku(kind, idx)}>Find</Button>
     </div>
@@ -1429,7 +1435,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-24"
                         type="number"
                         min={1}
                         step="1"
@@ -1451,7 +1457,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-24"
                         type="number"
                         step="0.01"
                         min={0}
@@ -1467,7 +1473,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-24"
                         type="number"
                         step="0.01"
                         min={0}
@@ -1482,7 +1488,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-24"
                         type="number"
                         step="0.01"
                         value={ln.margin_percent ?? 0}
@@ -1496,7 +1502,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-24"
                         type="number"
                         step="0.01"
                         min={0}
@@ -1506,14 +1512,14 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-24"
                         value={ln.ref || ''}
                         onChange={(e) => updateLineField('receive', idx, 'ref', e.target.value)}
                       />
                     </td>
                     <td>
                       <input
-                        className="input"
+                        className="input w-24"
                         value={ln.reason || ''}
                         onChange={(e) => updateLineField('receive', idx, 'reason', e.target.value)}
                       />
