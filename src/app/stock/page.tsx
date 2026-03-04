@@ -992,11 +992,26 @@ const anyModalOpen = showReceive || showAdjust || showIssue || showReturn;
 
   /* ------------------------------ UI ------------------------------------ */
 
-/** Helper: renders a SKU row cell with Find button (keeps focus + wider) */
+/** Helper: renders a SKU row cell with Find button (local state + keeps focus) */
 function SkuCell({
   kind, idx, line, placeholder = 'SKU…'
 }: { kind: MoveType; idx: number; line: BulkLine; placeholder?: string }) {
   const skuInputRef = React.useRef<HTMLInputElement>(null);
+
+  // Keep what the user is typing locally (prevents re-mounts on every key)
+  const [localSku, setLocalSku] = React.useState<string>(line.sku ?? '');
+
+  // If parent updates the SKU (e.g., after Find fills actual SKU), sync it into local
+  React.useEffect(() => {
+    setLocalSku(line.sku ?? '');
+  }, [line.sku]);
+
+  // Push the local value to parent state
+  const commitSkuToParent = React.useCallback(() => {
+    if (localSku !== (line.sku ?? '')) {
+      updateLineField(kind, idx, 'sku', localSku);
+    }
+  }, [kind, idx, localSku, line.sku]);
 
   return (
     <div className="flex items-center gap-1 w-full min-w-[300px]">
@@ -1008,33 +1023,34 @@ function SkuCell({
         autoComplete="off"
         spellCheck={false}
         placeholder={placeholder}
-        value={line.sku}
+        value={localSku}
         onChange={(e) => {
-          updateLineField(kind, idx, 'sku', e.target.value);
-          // keep caret in this input even if row re-renders
+          setLocalSku(e.target.value);
+          // keep caret in the same box
           requestAnimationFrame(() => skuInputRef.current?.focus());
         }}
         onBlur={() => {
-          // while a modal is open, never let focus escape this box
-          if (anyModalOpen) {
-            requestAnimationFrame(() => skuInputRef.current?.focus());
-          }
+          commitSkuToParent();
+          // while modal open, keep focus inside the field if you want
+          if (anyModalOpen) requestAnimationFrame(() => skuInputRef.current?.focus());
         }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
             e.preventDefault();
+            commitSkuToParent();
             bulkFindSku(kind, idx);
             requestAnimationFrame(() => skuInputRef.current?.focus());
           }
         }}
       />
 
-      {/* IMPORTANT: plain <button>, and do not let it take focus */}
+      {/* Use plain <button> and do NOT let it take focus */}
       <button
         type="button"
         className="inline-flex items-center rounded bg-orange-500 hover:bg-orange-600 text-white px-3 py-2 text-sm"
-        onMouseDown={(e) => e.preventDefault()}  // ← prevents focus steal
+        onMouseDown={(e) => e.preventDefault()}   // <- critical so focus stays in input
         onClick={() => {
+          commitSkuToParent();
           bulkFindSku(kind, idx);
           requestAnimationFrame(() => skuInputRef.current?.focus());
         }}
@@ -1462,7 +1478,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input w-48"
+                        className="input w-60"
                         type="number"
                         min={1}
                         step="1"
@@ -1484,7 +1500,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input w-48"
+                        className="input w-60"
                         type="number"
                         step="0.01"
                         min={0}
@@ -1500,7 +1516,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input w-48"
+                        className="input w-60"
                         type="number"
                         step="0.01"
                         min={0}
@@ -1515,7 +1531,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input w-48"
+                        className="input w-60"
                         type="number"
                         step="0.01"
                         value={ln.margin_percent ?? 0}
@@ -1529,7 +1545,7 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input w-48"
+                        className="input w-60"
                         type="number"
                         step="0.01"
                         min={0}
@@ -1539,14 +1555,14 @@ function SkuCell({
                     </td>
                     <td>
                       <input
-                        className="input w-48"
+                        className="input w-60"
                         value={ln.ref || ''}
                         onChange={(e) => updateLineField('receive', idx, 'ref', e.target.value)}
                       />
                     </td>
                     <td>
                       <input
-                        className="input w-48"
+                        className="input w-60"
                         value={ln.reason || ''}
                         onChange={(e) => updateLineField('receive', idx, 'reason', e.target.value)}
                       />
