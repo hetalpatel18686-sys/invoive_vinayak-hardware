@@ -3,36 +3,60 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 
-type Role = 'admin' | 'user';
+type Role = 'admin' | 'staff' | 'viewer' | 'user';
 
 export default function DashboardPage() {
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<Role>('user');
   const [loading, setLoading] = useState(true);
 
+  // Single place that resolves the role robustly
+  async function resolveRole(): Promise<Role> {
+    // 1) Get current session
+    const { data: { session }, error: sErr } = await supabase.auth.getSession();
+    if (sErr || !session) return 'user';
+
+    const uid = session.user.id;
+    setEmail(session.user.email ?? '');
+
+    // 2) Refresh session (avoid stale claims after role change)
+    try { await supabase.auth.refreshSession(); } catch {}
+
+    // 3) Try reading role from public.profiles by id
+    const { data: prof, error: pErr } = await supabase
+      .from('profiles')           // <-- plural table
+      .select('role')
+      .eq('id', uid)
+      .maybeSingle();
+
+    if (!pErr && prof?.role) {
+      const r = String(prof.role).toLowerCase();
+      if (r === 'admin' || r === 'staff' || r === 'viewer') return r as Role;
+    }
+
+    // 4) Fallback: ask DB via RPC (uses auth.uid() inside DB)
+    try {
+      const { data: rpcData, error: rpcErr } = await supabase.rpc('app_role'); // returns text
+      if (!rpcErr && rpcData) {
+        const r = String(rpcData).toLowerCase();
+        if (r === 'admin' || r === 'staff' || r === 'viewer') return r as Role;
+      }
+    } catch {}
+
+    // 5) Final fallback
+    return 'user';
+  }
+
   useEffect(() => {
     (async () => {
-      // 1) Must be logged in
+      // If not logged in, go to /login
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
         window.location.href = '/login';
         return;
       }
 
-      setEmail(session.user.email ?? '');
-
-      // 2) Role from user_metadata first, then from profiles
-      let r = (session.user.user_metadata as any)?.role as Role | undefined;
-
-      if (!r) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('role')
-          .eq('id', session.user.id)
-          .single();
-        r = (profile?.role as Role) ?? 'user';
-      }
-
+      const r = await resolveRole();
       setRole(r);
       setLoading(false);
     })();
@@ -45,16 +69,20 @@ export default function DashboardPage() {
 
   const tilesAll = [
     { key: 'invoice',   href: '/invoices/new',   label: 'Invoice',   icon: '₹'  },
-    { key: 'customers', href: '/customers', label: 'Customers', icon: '👥' },
-    { key: 'items',     href: '/items',     label: 'Items',     icon: '🧰' },
-    { key: 'stock',     href: '/stock',     label: 'Stock',     icon: '📦' },
-    { key: 'inventory', href: '/inventory', label: 'Inventory', icon: '🏷️' },
-    { key: 'reports',   href: '/reports',   label: 'Reports',   icon: '📊' },
+    { key: 'customers', href: '/customers',      label: 'Customers', icon: '👥' },
+    { key: 'items',     href: '/items',          label: 'Items',     icon: '🧰' },
+    { key: 'stock',     href: '/stock',          label: 'Stock',     icon: '📦' },
+    { key: 'inventory', href: '/inventory',      label: 'Inventory', icon: '🏷️' },
+    { key: 'reports',   href: '/reports',        label: 'Reports',   icon: '📊' },
   ];
 
-  const allowed = role === 'admin'
-    ? new Set(tilesAll.map(t => t.key))
-    : new Set(['invoice']); // user only sees Invoice
+  // Allow matrix (change as you like)
+  const allowed = new Set<string>(
+    role === 'admin' ? tilesAll.map(t => t.key)
+    : role === 'staff' ? ['invoice', 'items', 'stock', 'inventory']
+    : role === 'viewer' ? ['inventory']
+    : ['invoice'] // user
+  );
 
   return (
     <div style={{
@@ -116,7 +144,6 @@ export default function DashboardPage() {
             }
           `}</style>
 
-          {/* ➜ Sanskrit right after the logo (moved up) */}
           <div style={{
             marginTop: 8,
             fontFamily: '"Noto Sans Devanagari", Poppins, sans-serif',
@@ -126,15 +153,14 @@ export default function DashboardPage() {
             निर्विघ्नं कुरु मे देव सर्वकार्येषु सर्वदा ॥
           </div>
 
-          {/* Title */}
           <h1 style={{ margin: '6px 0 0', fontSize: 42, color: '#e96510', letterSpacing: .2 }}>
             Vinayak Hardware
           </h1>
 
-          {/* ⛔️ Removed the "Welcome to Vinayak Hardware" line */}
-
           <div style={{ marginTop: 6, color: '#6b7280', fontSize: 14 }}>
-            {loading ? 'Checking session…' : <>Signed in as <strong>{email}</strong> • Role: <strong>{role}</strong></>}
+            {loading
+              ? 'Checking session…'
+              : <>Signed in as <strong>{email}</strong> • Role: <strong>{role}</strong></>}
           </div>
         </div>
 
