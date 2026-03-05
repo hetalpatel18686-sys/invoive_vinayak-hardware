@@ -13,6 +13,7 @@ const INR0 = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR'
 
 const withGst = (base: number, gstPct: number) =>
   rupeeCeil((base ?? 0) * (1 + (gstPct ?? 0) / 100));
+
 const withGstAndMargin = (base: number, gstPct: number, marginPct: number) =>
   rupeeCeil(withGst(base ?? 0, gstPct ?? 0) * (1 + (marginPct ?? 0) / 100));
 
@@ -39,17 +40,6 @@ interface InvRow {
   // Optional selling price column (from DB if present)
   selling_price_per_unit?: number | null;
 }
-
-type PurchaseRequest = {
-  id: string;
-  item_id: string;
-  sku: string | null;
-  name: string | null;
-  current_stock: number | null;
-  min_stock: number | null;
-  status: 'pending' | 'ordered' | 'received';
-  created_at: string;
-};
 
 type SortKey =
   | 'sku'
@@ -103,101 +93,239 @@ function SortHeader({
 }
 
 /* ======================================================
-   Simple Toast (popup notification)
+   Barcode + QR loaders (for Thermal Labels)
    ====================================================== */
-function Toast({ text, onClose }: { text: string; onClose: () => void }) {
-  useEffect(() => {
-    const t = setTimeout(onClose, 4000);
-    return () => clearTimeout(t);
-  }, [onClose]);
+const JSBARCODE_STATIC_URL =
+  process.env.NEXT_PUBLIC_JSBARCODE_URL
+  || '/vendor/jsbarcode.min.js'
+  || 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js';
+
+async function ensureJsBarcode(): Promise<any> {
+  if (typeof window !== 'undefined' && (window as any).JsBarcode) return (window as any).JsBarcode;
+
+  await new Promise<void>((resolve, reject) => {
+    const id = 'injected-jsbarcode';
+    if (document.getElementById(id)) return resolve();
+    const s = document.createElement('script');
+    s.id = id;
+    s.src = JSBARCODE_STATIC_URL;
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => {
+      const fid = 'injected-jsbarcode-cdn';
+      if (document.getElementById(fid)) return resolve();
+      const f = document.createElement('script');
+      f.id = fid;
+      f.src = 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js';
+      f.async = true;
+      f.onload = () => resolve();
+      f.onerror = () => reject(new Error('Failed to load JsBarcode'));
+      document.head.appendChild(f);
+    };
+    document.head.appendChild(s);
+  });
+  return (window as any).JsBarcode;
+}
+
+const QRCODE_STATIC_URL =
+  process.env.NEXT_PUBLIC_QRCODE_URL
+  || '/vendor/qrcode.min.js'
+  || 'https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js';
+
+async function ensureQRCodeFromStatic(): Promise<any> {
+  const g: any = typeof window !== 'undefined' ? window : {};
+  if (g.QRCode || g.qrcode) return g.QRCode || g.qrcode;
+
+  await new Promise<void>((resolve, reject) => {
+    const id = 'injected-qrcode';
+    if (document.getElementById(id)) return resolve();
+    const s = document.createElement('script');
+    s.id = id;
+    s.src = QRCODE_STATIC_URL;
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => {
+      const fid = 'injected-qrcode-cdn';
+      if (document.getElementById(fid)) return resolve();
+      const f = document.createElement('script');
+      f.id = fid;
+      f.src = 'https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js';
+      f.async = true;
+      f.onload = () => resolve();
+      f.onerror = () => reject(new Error('Failed to load QRCode'));
+      document.head.appendChild(f);
+    };
+    document.head.appendChild(s);
+  });
+  return (window as any).QRCode || (window as any).qrcode;
+}
+
+function BarcodeSvg({
+  value,
+  options,
+}: {
+  value: string;
+  options?: Partial<{
+    format: string; width: number; height: number; displayValue: boolean;
+    fontSize: number; textMargin: number; margin: number; lineColor: string;
+  }>;
+}) {
+  const svgRef = React.useRef<SVGSVGElement | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!svgRef.current || !value) return;
+      try {
+        const JsBarcode = await ensureJsBarcode();
+        if (cancelled || !svgRef.current) return;
+        while (svgRef.current.firstChild) svgRef.current.removeChild(svgRef.current.firstChild);
+        JsBarcode(svgRef.current, value, {
+          format: 'CODE128',
+          width: 1.4,
+          height: 12,
+          displayValue: true,
+          fontSize: 8,
+          textMargin: 0,
+          margin: 0,
+          lineColor: '#000',
+          ...(options || {}),
+        });
+      } catch {
+        if (!svgRef.current) return;
+        const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        txt.setAttribute('x', '0'); txt.setAttribute('y', '10');
+        txt.setAttribute('fill', '#000'); txt.setAttribute('font-size', '8');
+        txt.textContent = value;
+        svgRef.current.appendChild(txt);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [value, options]);
+
+  return <svg ref={svgRef} className="w-full h-auto" />;
+}
+
+function QrSvg({ value, sizeMm = 11 }: { value: string; sizeMm?: number }) {
+  const wrapRef = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!wrapRef.current || !value) return;
+      try {
+        const QR: any = await ensureQRCodeFromStatic();
+        if (cancelled || !wrapRef.current) return;
+
+        const px = Math.max(40, Math.round((sizeMm / 25.4) * 96));
+        const toString = QR.toString || QR.default?.toString || QR?.toString;
+        if (!toString) throw new Error('QR lib missing toString()');
+
+        const svg = await toString(String(value), { type: 'svg', margin: 0, width: px });
+        wrapRef.current.innerHTML = svg;
+        const svgEl = wrapRef.current.querySelector('svg') as SVGSVGElement | null;
+        if (svgEl) {
+          svgEl.setAttribute('width', '100%');
+          svgEl.setAttribute('height', '100%');
+        }
+      } catch {
+        if (!wrapRef.current) return;
+        wrapRef.current.textContent = value;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [value, sizeMm]);
 
   return (
-    <div className="fixed bottom-4 right-4 z-[60] rounded bg-black text-white/90 px-3 py-2 shadow-lg">
-      {text}
-    </div>
+    <div ref={wrapRef} style={{ width: `${sizeMm}mm`, height: `${sizeMm}mm`, display: 'block' }} />
   );
 }
 
-/* ======================================================
-   Printable PO helpers (no external libs)
-   ====================================================== */
-function openPrintWindow(html: string, title = 'Purchase Order') {
-  const w = window.open('', '_blank', 'noopener,noreferrer,width=900,height=700');
-  if (!w) return alert('Popup blocked. Allow popups to print.');
-  w.document.open();
-  w.document.write(`
-    <!doctype html><html><head>
-      <meta charset="utf-8" />
-      <title>${title}</title>
-      <style>
-        * { box-sizing: border-box; }
-        body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; color:#111827; }
-        h1 { margin: 0 0 4px; font-size: 18px; }
-        h2 { margin: 16px 0 8px; font-size: 16px; }
-        .muted { color:#6b7280; font-size:12px; }
-        table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        th, td { border:1px solid #e5e7eb; padding: 8px; text-align: left; }
-        tfoot td { font-weight: 600; }
-        .row { display:flex; gap:24px; }
-        .col { flex:1; }
-        .right { text-align:right; }
-      </style>
-    </head><body>
-      ${html}
-      <script>
-        setTimeout(()=>{ window.print(); }, 200);
-      </script>
-    </body></html>
-  `);
-  w.document.close();
-}
-
-function buildPoHtml(opts: {
-  brand: string;
-  supplier: { name: string; email?: string; phone?: string; address?: string };
-  request: PurchaseRequest;
+/* ----------------------------------------------
+   Thermal 2×1 label with QR + Barcode (layout-safe)
+   ---------------------------------------------- */
+function ThermalLabel2x1({
+  brand,
+  name,
+  sku,
+  uom,
+  priceRupees, // NEW: print selling price on label
+}: {
+  brand?: string;
+  name: string;
+  sku: string;
+  uom?: string;
+  priceRupees?: number;
 }) {
-  const { brand, supplier, request } = opts;
-  const today = new Date().toLocaleString();
-  return `
-    <h1>Purchase Order (Auto)</h1>
-    <div class="muted">Generated: ${today} • ${brand}</div>
-    <div class="row" style="margin-top:12px;">
-      <div class="col">
-        <h2>Supplier</h2>
-        <div><strong>${supplier.name || '-'}</strong></div>
-        <div class="muted">${supplier.email || ''} ${supplier.phone ? ' • '+supplier.phone : ''}</div>
-        <div class="muted">${supplier.address || ''}</div>
+  return (
+    <div
+      className="thermal-label-2x1"
+      style={{
+        width: '50.8mm',
+        height: '25.4mm',
+        padding: '1.5mm',
+        boxSizing: 'border-box',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '0.6mm',
+        justifyContent: 'space-between',
+        border: '1px solid #e5e7eb', // preview only
+        borderRadius: '1mm',
+        background: '#fff',
+      }}
+    >
+      {/* Top line */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '1mm' }}>
+        <div style={{ fontSize: '8px', fontWeight: 700, lineHeight: '10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '60%' }}>
+          {brand || ''}
+        </div>
+        <div style={{ display: 'flex', gap: '4px', alignItems: 'baseline' }}>
+          {uom ? <div style={{ fontSize: '8px', lineHeight: '10px' }}>UoM: {uom}</div> : null}
+          {typeof priceRupees === 'number' && priceRupees > 0 ? (
+            <div style={{ fontSize: '9px', fontWeight: 700, lineHeight: '10px' }}>₹{priceRupees}</div>
+          ) : null}
+        </div>
       </div>
-      <div class="col">
-        <h2>Request</h2>
-        <div><strong>SKU</strong>: ${request.sku ?? '-'}</div>
-        <div><strong>Item</strong>: ${request.name ?? '-'}</div>
-        <div><strong>Current</strong>: ${request.current_stock ?? '-'} • <strong>Min</strong>: ${request.min_stock ?? '-'}</div>
-        <div><strong>PR ID</strong>: ${request.id}</div>
+
+      {/* Name */}
+      <div style={{ fontSize: '9px', lineHeight: '10px', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {name}
+      </div>
+
+      {/* Barcode + QR row (layout-safe) */}
+      <div
+        className="label-row"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '1mm',
+          width: '100%',
+          flex: 1,
+          minHeight: 0,
+        }}
+      >
+        {/* Barcode stretches to remaining width */}
+        <div className="barcode-wrap" style={{ flex: 1, minWidth: 0 }}>
+          <BarcodeSvg
+            value={sku}
+            options={{
+              height: 12,
+              width: 1.4,
+              displayValue: true,
+              fontSize: 8,
+              textMargin: 0,
+              margin: 0,
+            }}
+          />
+        </div>
+
+        {/* QR has fixed physical size */}
+        <div className="qr-wrap" style={{ width: '11mm', height: '11mm', flex: '0 0 11mm' }}>
+          <QrSvg value={sku} sizeMm={11} />
+        </div>
       </div>
     </div>
-
-    <h2 style="margin-top:18px;">Lines</h2>
-    <table>
-      <thead><tr>
-        <th>#</th><th>SKU</th><th>Item</th><th class="right">Qty</th><th>UoM</th><th class="right">Remarks</th>
-      </tr></thead>
-      <tbody>
-        <tr>
-          <td>1</td>
-          <td>${request.sku ?? '-'}</td>
-          <td>${request.name ?? '-'}</td>
-          <td class="right">${Math.max(1, Number(request.min_stock ?? 1))}</td>
-          <td>EA</td>
-          <td class="right">Auto low-stock PO</td>
-        </tr>
-      </tbody>
-      <tfoot>
-        <tr><td colspan="6" class="right">Thank you</td></tr>
-      </tfoot>
-    </table>
-  `;
+  );
 }
 
 /* ======================================================
@@ -225,12 +353,6 @@ export default function InventoryPage() {
   const brandName = process.env.NEXT_PUBLIC_BRAND_NAME || 'Vinayak Hardware';
   const previewRef = useRef<HTMLDivElement | null>(null);
 
-  const [purchaseRequests, setPurchaseRequests] = useState<PurchaseRequest[]>([]);
-  const [loadingPRs, setLoadingPRs] = useState(false);
-
-  // Toast notification
-  const [toast, setToast] = useState<string | null>(null);
-
   const toggleSort = (k: SortKey) => {
     setSortKey(prev => {
       if (prev !== k) { setSortDir('asc'); return k; }
@@ -239,7 +361,7 @@ export default function InventoryPage() {
     });
   };
 
-  // === Safe items fetch (includes selling_price_per_unit when present) ===
+  // === Safe items fetch: tries WITH selling_price_per_unit, falls back WITHOUT if not available ===
   const fetchItemsSafe = async () => {
     const q1 = await supabase
       .from('items')
@@ -248,6 +370,7 @@ export default function InventoryPage() {
 
     if (!q1.error) return q1;
 
+    // Fallback if that column doesn't exist in your env
     return await supabase
       .from('items')
       .select('id, sku, name, stock_qty, unit_cost, low_stock_threshold, uom_id, purchase_price, gst_percent, margin_percent')
@@ -322,37 +445,7 @@ export default function InventoryPage() {
     }
   };
 
-  async function loadPurchaseRequests() {
-    setLoadingPRs(true);
-    const { data, error } = await supabase
-      .from('purchase_requests')
-      .select('*')
-      .eq('status', 'pending')
-      .order('created_at', { ascending: false });
-    if (!error) setPurchaseRequests((data || []) as PurchaseRequest[]);
-    setLoadingPRs(false);
-  }
-
-  // Realtime popup when PR auto-creates
-  useEffect(() => {
-    loadInventory();
-    loadPurchaseRequests();
-
-    const ch = supabase
-      .channel('pr-realtime')
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'purchase_requests' },
-        (payload) => {
-          const pr = payload.new as PurchaseRequest;
-          setToast(`Low stock: ${pr.sku ?? ''} — ${pr.name ?? ''}`);
-          loadPurchaseRequests();
-        }
-      )
-      .subscribe();
-
-    return () => { supabase.removeChannel(ch); };
-  }, []);
+  useEffect(() => { loadInventory(); }, []);
 
   const rowsWithDisplayLocations = useMemo(() => {
     return rows.map(row => {
@@ -368,29 +461,18 @@ export default function InventoryPage() {
   const prefiltered = useMemo(() => {
     const t = search.trim().toLowerCase();
     return rowsWithDisplayLocations.filter(r => {
-      const textHit =
+      const match =
         !t ||
         r.sku.toLowerCase().includes(t) ||
         (r.name ?? '').toLowerCase().includes(t) ||
         (r.locations_text ?? '').toLowerCase().includes(t);
-
-      // Optional location filter (your earlier select controls)
-      const inLocation = (() => {
-        if (!selectedLocation) return true;
-        const qAtLoc = r.locations_all.find(x => x.name === selectedLocation)?.qty ?? 0;
-        if (locationScope === 'has_stock') return qAtLoc > 0;
-        if (locationScope === 'appears_any') return r.locations_all.some(x => x.name === selectedLocation);
-        return true; // all_items
-      })();
-
       const isLow =
         r.low_stock_threshold != null &&
         r.low_stock_threshold > 0 &&
         r.stock_qty <= r.low_stock_threshold;
-
-      return textHit && inLocation && (!lowOnly || isLow);
+      return match && (!lowOnly || isLow);
     });
-  }, [rowsWithDisplayLocations, search, lowOnly, selectedLocation, locationScope]);
+  }, [rowsWithDisplayLocations, search, lowOnly]);
 
   // Compute rounded prices for display and totals
   const sorted = useMemo(() => {
@@ -401,6 +483,7 @@ export default function InventoryPage() {
 
       const unitCostGst = withGst(base, gst); // rounded ₹
 
+      // Prefer DB selling price when present; else compute Purchase+GST+Margin
       const sellingDb = r.selling_price_per_unit;
       const sellingPrice = Number.isFinite(Number(sellingDb)) && Number(sellingDb) > 0
         ? rupeeCeil(Number(sellingDb))
@@ -444,85 +527,30 @@ export default function InventoryPage() {
   }, [sorted]);
 
   /* =========================
-     PR: Manual creation (Option A — in addition to trigger)
+     DELETE row (safe)
      ========================= */
-  async function createRequestForItem(row: InvRow) {
-    const { data, error } = await supabase.from('purchase_requests').insert({
-      item_id: row.id,
-      sku: row.sku,
-      name: row.name,
-      current_stock: row.stock_qty,
-      min_stock: row.low_stock_threshold ?? 0,
-      status: 'pending',
-    }).select('*').single();
-
-    if (error) return alert('Create request failed: ' + error.message);
-    setToast(`Request created: ${row.sku}`);
-    await loadPurchaseRequests();
-
-    // Optional: notify email/WhatsApp automatically
-    if (process.env.NEXT_PUBLIC_NOTIFY_ON_CREATE === '1') {
-      try { await notifyEmail(data as PurchaseRequest); } catch {}
-      try { await notifyWhatsapp(data as PurchaseRequest); } catch {}
+  const deleteRow = async (row: InvRow) => {
+    // Safety: block if stock exists
+    if ((row.stock_qty ?? 0) > 0) {
+      alert('Cannot delete an item that has stock. Please move/issue stock to 0 first.');
+      return;
     }
-  }
+    const ok = window.confirm(`Delete item:\n${row.sku} — ${row.name}\n\nThis cannot be undone.`);
+    if (!ok) return;
 
-  /* =========================
-     PR: Status changes (ordered / received)
-     ========================= */
-  async function setPrStatus(id: string, status: PurchaseRequest['status']) {
-    const { error } = await supabase.from('purchase_requests').update({ status }).eq('id', id);
-    if (error) return alert('Update failed: ' + error.message);
-    await loadPurchaseRequests();
-  }
-
-  /* =========================
-     Notifications (B & C)
-     ========================= */
-  async function callEdge(fnName: string, payload: any) {
-    // Uses Supabase Edge Functions (deployed in step 3)
-    const url = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/${fnName}`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}` },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
-  }
-
-  async function notifyEmail(pr: PurchaseRequest) {
-    // Requires RESEND_API_KEY set in edge function secrets
-    const to = process.env.NEXT_PUBLIC_ALERT_EMAIL_TO; // set in .env.local
-    if (!to) return;
-    await callEdge('notify-email', {
-      to,
-      subject: `Low Stock: ${pr.sku ?? ''} — ${pr.name ?? ''}`,
-      html: `
-        <h2>Low Stock Alert</h2>
-        <p>SKU: <b>${pr.sku ?? ''}</b><br/>
-        Item: <b>${pr.name ?? ''}</b><br/>
-        Current: <b>${pr.current_stock ?? '-'}</b> • Min: <b>${pr.min_stock ?? '-'}</b><br/>
-        PR ID: <b>${pr.id}</b></p>
-      `,
-    });
-    setToast('Email sent');
-  }
-
-  async function notifyWhatsapp(pr: PurchaseRequest) {
-    const to = process.env.NEXT_PUBLIC_ALERT_WA_TO; // like "whatsapp:+91XXXXXXXXXX"
-    if (!to) return;
-    await callEdge('notify-whatsapp', {
-      to,
-      body: `LOW STOCK\nSKU: ${pr.sku ?? ''}\nItem: ${pr.name ?? ''}\nStock: ${pr.current_stock ?? '-'} / Min: ${pr.min_stock ?? '-'}\nPR: ${pr.id}`,
-    });
-    setToast('WhatsApp sent');
-  }
+    const { error } = await supabase.from('items').delete().eq('id', row.id);
+    if (error) {
+      alert('Delete failed: ' + error.message);
+      return;
+    }
+    setRows(prev => prev.filter(r => r.id !== row.id));
+  };
 
   /* --------------------------------
-     PRINT thermal labels (unchanged)
+     PRINT thermal labels
      -------------------------------- */
   const handlePrintThermal = () => {
+    // Build selected items
     const selectedItems = (() => {
       const arr: { row: InvRow & { unitCostGst: number; sellingPrice: number; total_value: number }; qty: number }[] = [];
       for (const r of sorted) {
@@ -544,24 +572,44 @@ export default function InventoryPage() {
     }
 
     const docHtml = `<!doctype html>
-<html><head><meta charset="utf-8"><title>Thermal 2x1 Labels</title>
-<style>
-@page { size: 50.8mm 25.4mm; margin: 0; }
-html, body { margin: 0; padding: 0; background: #fff; }
-.sheet { width: 50.8mm; height: 25.4mm; page-break-after: always; }
-.thermal-label-2x1 { width: 50.8mm; height: 25.4mm; padding: 1.5mm; box-sizing: border-box; border: none !important; background: #fff; display: flex; flex-direction: column; gap: 0.6mm; justify-content: space-between; }
-.thermal-label-2x1 .label-row { display: flex; align-items: center; gap: 1mm; width: 100%; flex: 1; min-height: 0; }
-.thermal-label-2x1 .label-row .barcode-wrap { flex: 1 1 auto; min-width: 0; }
-.thermal-label-2x1 .label-row .qr-wrap { flex: 0 0 11mm; width: 11mm; height: 11mm; }
-.thermal-label-2x1 .label-row .barcode-wrap svg { display: block; width: 100% !important; height: auto !important; }
-.thermal-label-2x1 .label-row .qr-wrap svg { display: block; width: 100% !important; height: 100% !important; }
-svg text { font-size: 8px; }
-</style></head><body>
-${(() => {
-  const c = document.createElement('div'); c.innerHTML = html;
-  return Array.from(c.children).map(el => `<div class="sheet">${(el as HTMLElement).outerHTML}</div>`).join('');
-})()}
-</body></html>`;
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Thermal 2x1 Labels</title>
+  <style>
+    @page { size: 50.8mm 25.4mm; margin: 0; }
+    html, body { margin: 0; padding: 0; background: #fff; }
+    .sheet { width: 50.8mm; height: 25.4mm; page-break-after: always; }
+
+    .thermal-label-2x1 {
+      width: 50.8mm; height: 25.4mm; padding: 1.5mm;
+      box-sizing: border-box; border: none !important; background: #fff;
+      display: flex; flex-direction: column; gap: 0.6mm; justify-content: space-between;
+    }
+
+    .thermal-label-2x1 .label-row { display: flex; align-items: center; gap: 1mm; width: 100%; flex: 1; min-height: 0; }
+    .thermal-label-2x1 .label-row .barcode-wrap { flex: 1 1 auto; min-width: 0; }
+    .thermal-label-2x1 .label-row .qr-wrap { flex: 0 0 11mm; width: 11mm; height: 11mm; }
+
+    .thermal-label-2x1 .label-row .barcode-wrap svg {
+      display: block; width: 100% !important; height: auto !important;
+    }
+    .thermal-label-2x1 .label-row .qr-wrap svg {
+      display: block; width: 100% !important; height: 100% !important;
+    }
+
+    svg text { font-size: 8px; }
+  </style>
+</head>
+<body>
+  ${(() => {
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    const items = Array.from(container.children);
+    return items.map(el => `<div class="sheet">${(el as HTMLElement).outerHTML}</div>`).join('');
+  })()}
+</body>
+</html>`;
 
     const iframe = document.createElement('iframe');
     iframe.setAttribute('style', 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;');
@@ -589,20 +637,50 @@ ${(() => {
   };
 
   /* --------------------------------
-     Estimate (Selected)
+     CSV export uses rounded values (includes Selling)
+     -------------------------------- */
+  const exportCsv = () => {
+    const header = ['SKU','Item','UoM','Qty','Minimum','Purchase Price','GST %','Margin %','Unit Cost (GST)','Selling Price','Total Value (₹)','Locations'];
+    const lines = sorted.map((r) => {
+      return [
+        r.sku,
+        (r.name ?? '').replaceAll('"','""'),
+        r.uom_code || '',
+        String(r.stock_qty),
+        r.low_stock_threshold != null ? String(r.low_stock_threshold) : '',
+        String(r.purchase_price ?? r.unit_cost ?? 0),
+        String(r.gst_percent ?? 0),
+        String(r.margin_percent ?? 0),
+        String(r.unitCostGst),
+        String(r.sellingPrice),
+        String(r.total_value),
+        (r.locations_text ?? '').replaceAll('"','""'),
+      ].map(v => `"${v}"`).join(',');
+    });
+    const date = new Date().toISOString().slice(0,10);
+    downloadCsv(`inventory_${date}.csv`, [header.join(','), ...lines]);
+  };
+
+  /* --------------------------------
+     Estimate (Selected) — OPTION A: send FULL details in seed
      -------------------------------- */
   const estimateSelected = () => {
+    // Build selected items with ALL details needed by Estimate page (no DB reads)
     const items = Object.entries(sel).flatMap(([id, s]) => {
       if (!s?.checked) return [];
       const row = sorted.find(r => r.id === id);
       if (!row || !row.sku) return [];
       const qty = Math.max(1, Math.min(500, Math.floor(s.qty || 1)));
+
+      // Use the already-computed whole-rupee selling price
       const selling = Math.max(0, Math.floor(Number((row as any).sellingPrice ?? 0)));
+
       return [{
-        sku: row.sku, qty,
+        sku: row.sku,
+        qty,
         name: row.name || row.sku,
         uom_code: row.uom_code || '',
-        selling,
+        selling, // whole-rupee price to show on Estimate
       }];
     });
 
@@ -610,124 +688,31 @@ ${(() => {
       alert('Select items (checkbox) and set quantities to create Estimate.');
       return;
     }
-    try { localStorage.setItem('estimate-seed', JSON.stringify(items)); } catch {}
+
+    try {
+      localStorage.setItem('estimate-seed', JSON.stringify(items));
+    } catch {}
+
+    // Always open with seed flag — Estimate reads seed and SKIPS DB
     window.open(`/estimate/new?seed=1`, '_blank', 'noopener,noreferrer');
   };
 
-  /* ========= RENDER ========= */
-  return (
-    <div className="space-y-4">
+ /* ========= RENDER ========= */
+return (
+  <div className="space-y-4">
 
-      {/* Back to Dashboard */}
-      <div className="flex items-center justify-end">
-        <Link
-          href="/dashboard"
-          className="inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
-        >
-          ← Back to Dashboard
-        </Link>
-      </div>
+    {/* Back to Dashboard */}
+  <div className="flex items-center justify-end">
+  <Link
+    href="/dashboard"
+    className="inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+  >
+    ← Back to Dashboard
+  </Link>
+</div>
 
-      {/* ==================== Low Stock – Purchase Requests (Panel) ==================== */}
-      <div className="card border border-amber-300 bg-amber-50">
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="font-semibold text-amber-800">
-            Low Stock – Purchase Requests {loadingPRs ? '(loading...)' : `(${purchaseRequests.length})`}
-          </h3>
-          <div className="flex gap-2">
-            <Button type="button" onClick={loadPurchaseRequests}>Refresh</Button>
-          </div>
-        </div>
-
-        {purchaseRequests.length === 0 ? (
-          <div className="text-sm text-amber-700">No pending purchase requests.</div>
-        ) : (
-          <div className="overflow-auto">
-            <table className="table w-full">
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>SKU</th>
-                  <th>Item</th>
-                  <th className="text-right">Stock</th>
-                  <th className="text-right">Min</th>
-                  <th>Status</th>
-                  <th>Notify / PO</th>
-                  <th>Mark</th>
-                </tr>
-              </thead>
-              <tbody>
-                {purchaseRequests.map((r) => (
-                  <tr key={r.id}>
-                    <td>{new Date(r.created_at).toLocaleString()}</td>
-                    <td>{r.sku}</td>
-                    <td>{r.name}</td>
-                    <td className="text-right">{r.current_stock}</td>
-                    <td className="text-right">{r.min_stock}</td>
-                    <td className="capitalize">{r.status}</td>
-                    <td className="space-x-2">
-                      {/* B — Email */}
-                      <button
-                        type="button"
-                        className="rounded bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 text-sm"
-                        onClick={() => notifyEmail(r)}
-                        title="Send Email Alert"
-                      >
-                        Email
-                      </button>
-                      {/* C — WhatsApp */}
-                      <button
-                        type="button"
-                        className="rounded bg-green-600 hover:bg-green-700 text-white px-2 py-1 text-sm"
-                        onClick={() => notifyWhatsapp(r)}
-                        title="Send WhatsApp Alert"
-                      >
-                        WhatsApp
-                      </button>
-                      {/* E — PDF PO */}
-                      <button
-                        type="button"
-                        className="rounded bg-gray-800 hover:bg-black text-white px-2 py-1 text-sm"
-                        onClick={() => {
-                          const supplier = {
-                            name: (process.env.NEXT_PUBLIC_DEFAULT_SUPPLIER_NAME || '').trim() || 'Preferred Supplier',
-                            email: process.env.NEXT_PUBLIC_DEFAULT_SUPPLIER_EMAIL || '',
-                            phone: process.env.NEXT_PUBLIC_DEFAULT_SUPPLIER_PHONE || '',
-                            address: process.env.NEXT_PUBLIC_DEFAULT_SUPPLIER_ADDR || '',
-                          };
-                          openPrintWindow(buildPoHtml({ brand: brandName, supplier, request: r }), 'Purchase Order');
-                        }}
-                        title="Create and Print Purchase Order PDF"
-                      >
-                        PO PDF
-                      </button>
-                    </td>
-                    <td className="space-x-2">
-                      <button
-                        type="button"
-                        className="rounded bg-indigo-600 hover:bg-indigo-700 text-white px-2 py-1 text-sm"
-                        onClick={() => setPrStatus(r.id, 'ordered')}
-                      >
-                        Ordered
-                      </button>
-                      <button
-                        type="button"
-                        className="rounded bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-1 text-sm"
-                        onClick={() => setPrStatus(r.id, 'received')}
-                      >
-                        Received
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* ==================== Inventory ==================== */}
-      <div className="card">
+    <div className="card">
+      {/* Filters / actions */}
         <div className="flex flex-wrap items-end gap-3 mb-3">
           <div className="text-lg font-semibold mr-auto">Inventory</div>
 
@@ -759,6 +744,7 @@ ${(() => {
           <Button type="button" onClick={exportCsv}>Export CSV</Button>
           <Button type="button" onClick={loadInventory}>Refresh</Button>
 
+          {/* NEW: Multi-line estimate from selected rows */}
           <Button
             type="button"
             className="bg-emerald-600 hover:bg-emerald-700"
@@ -768,6 +754,7 @@ ${(() => {
             Estimate (Selected)
           </Button>
 
+          {/* Your original single-row Estimate link is untouched */}
           <Link href="/estimate/new" className="rounded border px-3 py-2 hover:bg-neutral-50">Estimate</Link>
         </div>
 
@@ -819,44 +806,45 @@ ${(() => {
                 const row = sorted.find(r => r.id === id);
                 if (!row) return [];
                 return Array.from({ length: Math.max(1, Math.min(500, Math.floor(s.qty || 1))) }).map((_, i) => (
-                  <div key={`${row.id}-${i}`} style={{
-                    width: '50.8mm', height: '25.4mm', padding: '1.5mm',
-                    border: '1px solid #e5e7eb', borderRadius: '1mm', background: '#fff'
-                  }}>
-                    {/* lightweight inline preview */}
-                    <div style={{ fontSize: 10, fontWeight: 600 }}>{row.name || row.sku}</div>
-                    <div style={{ fontSize: 10 }}>SKU: {row.sku}</div>
-                    <div style={{ fontSize: 10 }}>₹{row.sellingPrice}</div>
-                  </div>
+                  <ThermalLabel2x1
+                    key={`${row.id}-${i}`}
+                    brand={brandName}
+                    name={row.name || row.sku}
+                    sku={row.sku}
+                    uom={row.uom_code}
+                    priceRupees={row.sellingPrice}  // NEW: show selling price on label
+                  />
                 ));
               })}
             </div>
           </div>
         </div>
 
-        {/* Inventory table */}
+        {/* Inventory table with alignment + delete + estimate */}
+        {/* Keep horizontal scrollbar reachable after ~15 rows */}
         <div className="table-scroll" style={{ maxHeight: 720, overflow: 'auto' }}>
           <table className="inventory-table">
+            {/* Exact widths per column */}
             <colgroup>
-              <col style={{ width: 160 }} />   {/* Select + Create Request */}
-              <col style={{ width: 120 }} />
-              <col style={{ width: 220 }} />
-              <col style={{ width: 80  }} />
-              <col style={{ width: 90  }} />
-              <col style={{ width: 110 }} />
-              <col style={{ width: 120 }} />
-              <col style={{ width: 90  }} />
-              <col style={{ width: 90  }} />
-              <col style={{ width: 140 }} />
-              <col style={{ width: 140 }} />
-              <col style={{ width: 160 }} />
-              <col style={{ width: 140 }} />
-              <col style={{ width: 360 }} />
+              <col style={{ width: 90  }} />   {/* Select */}
+              <col style={{ width: 120 }} />   {/* SKU */}
+              <col style={{ width: 220 }} />   {/* Item */}
+              <col style={{ width: 80  }} />   {/* UoM */}
+              <col style={{ width: 90  }} />   {/* Qty */}
+              <col style={{ width: 110 }} />   {/* Minimum */}
+              <col style={{ width: 120 }} />   {/* Purchase */}
+              <col style={{ width: 90  }} />   {/* GST % */}
+              <col style={{ width: 90  }} />   {/* Margin % */}
+              <col style={{ width: 140 }} />   {/* Unit Cost (GST) */}
+              <col style={{ width: 140 }} />   {/* Selling (NEW) */}
+              <col style={{ width: 160 }} />   {/* Total Value (₹) */}
+              <col style={{ width: 140 }} />   {/* Actions */}
+              <col style={{ width: 360 }} />   {/* Locations */}
             </colgroup>
 
             <thead className="sticky-head">
               <tr>
-                <th>Select / PR</th>
+                <th>Select</th>
                 <th><SortHeader label="SKU" active={sortKey==='sku'} dir={sortDir} onClick={() => toggleSort('sku')} /></th>
                 <th><SortHeader label="Item" active={sortKey==='name'} dir={sortDir} onClick={() => toggleSort('name')} /></th>
                 <th><SortHeader label="UoM" active={sortKey==='uom_code'} dir={sortDir} onClick={() => toggleSort('uom_code')} /></th>
@@ -867,7 +855,7 @@ ${(() => {
                 <th className="num">GST %</th>
                 <th className="num">Margin %</th>
                 <th className="num">Unit Cost (GST)</th>
-                <th className="num">Selling</th>
+                <th className="num">Selling</th>{/* NEW */}
                 <th className="num"><SortHeader label="Total Value (₹)" active={sortKey==='total_value'} dir={sortDir} onClick={() => toggleSort('total_value')} alignRight /></th>
                 <th>Actions</th>
                 <th><SortHeader label="Locations" active={sortKey==='locations_text'} dir={sortDir} onClick={() => toggleSort('locations_text')} /></th>
@@ -906,16 +894,6 @@ ${(() => {
                             onChange={(e) => setSel(prev => ({ ...prev, [r.id]: { checked: prev[r.id]?.checked ?? false, qty: Math.max(1, Math.floor(parseInt(e.target.value || '1', 10))) } }))}
                             title="Labels/Estimate qty for this item"
                           />
-                          {isLow && (
-                            <button
-                              type="button"
-                              className="rounded bg-amber-600 hover:bg-amber-700 text-white px-2 py-1 text-xs"
-                              onClick={() => createRequestForItem(r)}
-                              title="Create Purchase Request now"
-                            >
-                              Create Request
-                            </button>
-                          )}
                         </div>
                       </td>
                       <td>{r.sku}</td>
@@ -924,11 +902,12 @@ ${(() => {
                       <td className="num">{r.stock_qty}</td>
                       <td className="num">{r.low_stock_threshold != null ? r.low_stock_threshold : '—'}</td>
 
+                      {/* Pricing cells */}
                       <td className="num">{INR0.format(Number(r.purchase_price ?? r.unit_cost ?? 0))}</td>
                       <td className="num">{Number(r.gst_percent ?? 0).toFixed(2)}%</td>
                       <td className="num">{Number(r.margin_percent ?? 0).toFixed(2)}%</td>
                       <td className="num">{INR0.format(r.unitCostGst)}</td>
-                      <td className="num">{INR0.format(r.sellingPrice)}</td>
+                      <td className="num">{INR0.format(r.sellingPrice)}</td>{/* NEW */}
                       <td className="num">{INR0.format(r.total_value)}</td>
 
                       <td>
@@ -941,14 +920,7 @@ ${(() => {
                           </Link>
                           <button
                             className="rounded bg-red-600 text-white px-2 py-1 text-sm hover:bg-red-700"
-                            onClick={() => {
-                              if ((r.stock_qty ?? 0) > 0) return alert('Cannot delete: move/issue stock to 0 first.');
-                              if (!confirm(`Delete item:\n${r.sku} — ${r.name}\n\nThis cannot be undone.`)) return;
-                              supabase.from('items').delete().eq('id', r.id).then(({ error }) => {
-                                if (error) return alert('Delete failed: ' + error.message);
-                                setRows(prev => prev.filter(x => x.id !== r.id));
-                              });
-                            }}
+                            onClick={() => deleteRow(r)}
                             title="Delete item"
                           >
                             Delete
@@ -989,11 +961,8 @@ ${(() => {
               </tr>
             </tfoot>
           </table>
-        </div>
+        </div>HOW IT IS SHOWING HERE AND WHY NOT SHOWING FROM THAT CODE
       </div>
-
-      {toast && <Toast text={toast} onClose={() => setToast(null)} />}
     </div>
   );
-}
-``
+} 
