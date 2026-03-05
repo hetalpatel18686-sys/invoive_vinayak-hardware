@@ -8,12 +8,20 @@
 /* ================================
    Small utility classes
    ================================ */
-.table { @apply w-full text-sm; }
-.table th { @apply text-left text-gray-600 font-semibold py-2; }
-.table td { @apply py-2 border-t; }
-.card { @apply bg-white rounded shadow-sm p-4; }
-.input { @apply border rounded px-3 py-2 w-full; }
-.label { @apply text-sm text-gray-600; }
+@layer components {
+  .table { @apply w-full text-sm; }
+  .table th { @apply text-left text-gray-600 font-semibold py-2; }
+  .table td { @apply py-2 border-t; }
+  .card { @apply bg-white rounded shadow-sm p-4; }
+  .input { @apply border rounded px-3 py-2 w-full; }
+  .label { @apply text-sm text-gray-600; }
+
+  /* NEW: larger input/select for modals/tables */
+  .input-lg { @apply h-11 px-3 text-base; }  /* Taller + larger text */
+
+  /* NEW: larger button height to match input-lg nicely */
+  .btn-lg { @apply h-11 text-base px-4; }
+}
 
 /* =======================================================
    Inventory table alignment helpers (header/body alignment)
