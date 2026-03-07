@@ -374,7 +374,7 @@ export default function InventoryPage() {
         (r.name ?? '').toLowerCase().includes(t) ||
         (r.locations_text ?? '').toLowerCase().includes(t);
 
-      // Optional location filter (your earlier select controls)
+      // Optional location filter
       const inLocation = (() => {
         if (!selectedLocation) return true;
         const qAtLoc = r.locations_all.find(x => x.name === selectedLocation)?.qty ?? 0;
@@ -480,7 +480,6 @@ export default function InventoryPage() {
      Notifications (B & C)
      ========================= */
   async function callEdge(fnName: string, payload: any) {
-    // Uses Supabase Edge Functions (deployed in step 3)
     const url = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/${fnName}`;
     const res = await fetch(url, {
       method: 'POST',
@@ -492,8 +491,7 @@ export default function InventoryPage() {
   }
 
   async function notifyEmail(pr: PurchaseRequest) {
-    // Requires RESEND_API_KEY set in edge function secrets
-    const to = process.env.NEXT_PUBLIC_ALERT_EMAIL_TO; // set in .env.local
+    const to = process.env.NEXT_PUBLIC_ALERT_EMAIL_TO;
     if (!to) return;
     await callEdge('notify-email', {
       to,
@@ -551,8 +549,6 @@ html, body { margin: 0; padding: 0; background: #fff; }
 .sheet { width: 50.8mm; height: 25.4mm; page-break-after: always; }
 .thermal-label-2x1 { width: 50.8mm; height: 25.4mm; padding: 1.5mm; box-sizing: border-box; border: none !important; background: #fff; display: flex; flex-direction: column; gap: 0.6mm; justify-content: space-between; }
 .thermal-label-2x1 .label-row { display: flex; align-items: center; gap: 1mm; width: 100%; flex: 1; min-height: 0; }
-.thermal-label-2x1 .label-row .barcode-wrap { flex: 1 1 auto; min-width: 0; }
-.thermal-label-2x1 .label-row .qr-wrap { flex: 0 0 11mm; width: 11mm; height: 11mm; }
 .thermal-label-2x1 .label-row .barcode-wrap svg { display: block; width: 100% !important; height: auto !important; }
 .thermal-label-2x1 .label-row .qr-wrap svg { display: block; width: 100% !important; height: 100% !important; }
 svg text { font-size: 8px; }
@@ -614,6 +610,37 @@ ${(() => {
     window.open(`/estimate/new?seed=1`, '_blank', 'noopener,noreferrer');
   };
 
+  /* --------------------------------
+     CSV export uses rounded values (includes Selling)
+     -------------------------------- */
+  const exportCsv = () => {
+    const header = [
+      'SKU','Item','UoM','Qty','Minimum',
+      'Purchase Price','GST %','Margin %',
+      'Unit Cost (GST)','Selling Price','Total Value (₹)','Locations'
+    ];
+
+    const lines = sorted.map((r) => {
+      return [
+        r.sku,
+        (r.name ?? '').replaceAll('"','""'),
+        r.uom_code || '',
+        String(r.stock_qty),
+        r.low_stock_threshold != null ? String(r.low_stock_threshold) : '',
+        String(r.purchase_price ?? r.unit_cost ?? 0),
+        String(r.gst_percent ?? 0),
+        String(r.margin_percent ?? 0),
+        String(r.unitCostGst),
+        String(r.sellingPrice),
+        String(r.total_value),
+        (r.locations_text ?? '').replaceAll('"','""'),
+      ].map(v => `"${v}"`).join(',');
+    });
+
+    const date = new Date().toISOString().slice(0,10);
+    downloadCsv(`inventory_${date}.csv`, [header.join(','), ...lines]);
+  };
+
   /* ========= RENDER ========= */
   return (
     <div className="space-y-4">
@@ -666,7 +693,7 @@ ${(() => {
                     <td className="text-right">{r.min_stock}</td>
                     <td className="capitalize">{r.status}</td>
                     <td className="space-x-2">
-                      {/* B — Email */}
+                      {/* Email */}
                       <button
                         type="button"
                         className="rounded bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 text-sm"
@@ -675,7 +702,7 @@ ${(() => {
                       >
                         Email
                       </button>
-                      {/* C — WhatsApp */}
+                      {/* WhatsApp */}
                       <button
                         type="button"
                         className="rounded bg-green-600 hover:bg-green-700 text-white px-2 py-1 text-sm"
@@ -684,7 +711,7 @@ ${(() => {
                       >
                         WhatsApp
                       </button>
-                      {/* E — PDF PO */}
+                      {/* PDF PO */}
                       <button
                         type="button"
                         className="rounded bg-gray-800 hover:bg-black text-white px-2 py-1 text-sm"
