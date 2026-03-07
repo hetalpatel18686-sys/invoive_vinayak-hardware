@@ -38,6 +38,9 @@ interface InvRow {
 
   // Optional selling price column (from DB if present)
   selling_price_per_unit?: number | null;
+
+  // NEW: latest Receive.reason treated as Vendor
+  last_vendor?: string | null;
 }
 
 type PurchaseRequest = {
@@ -47,6 +50,7 @@ type PurchaseRequest = {
   name: string | null;
   current_stock: number | null;
   min_stock: number | null;
+  vendor?: string | null;      // NEW
   status: 'pending' | 'ordered' | 'received';
   created_at: string;
 };
@@ -59,7 +63,8 @@ type SortKey =
   | 'low_stock_threshold'
   | 'unit_cost'
   | 'total_value'
-  | 'locations_text';
+  | 'locations_text'
+  | 'vendor';
 
 type LocationScope = 'all_items' | 'has_stock' | 'appears_any';
 type Sel = Record<string, { checked: boolean; qty: number }>;
@@ -114,6 +119,181 @@ function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   return (
     <div className="fixed bottom-4 right-4 z-[60] rounded bg-black text-white/90 px-3 py-2 shadow-lg">
       {text}
+    </div>
+  );
+}
+
+/* ======================================================
+   BARCODE + QR helpers (Thermal 2×1)
+   ====================================================== */
+const JSBARCODE_STATIC_URL =
+  process.env.NEXT_PUBLIC_JSBARCODE_URL
+  || '/vendor/jsbarcode.min.js';
+
+async function ensureJsBarcode(): Promise<any> {
+  if (typeof window !== 'undefined' && (window as any).JsBarcode) return (window as any).JsBarcode;
+  await new Promise<void>((resolve, reject) => {
+    const id = 'injected-jsbarcode';
+    if (document.getElementById(id)) return resolve();
+    const s = document.createElement('script');
+    s.id = id;
+    s.src = JSBARCODE_STATIC_URL;
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Failed to load JsBarcode'));
+    document.head.appendChild(s);
+  });
+  return (window as any).JsBarcode;
+}
+
+const QRCODE_STATIC_URL =
+  process.env.NEXT_PUBLIC_QRCODE_URL
+  || '/vendor/qrcode.min.js';
+
+async function ensureQRCodeFromStatic(): Promise<any> {
+  const g: any = typeof window !== 'undefined' ? window : {};
+  if (g.QRCode || g.qrcode) return g.QRCode || g.qrcode;
+
+  await new Promise<void>((resolve, reject) => {
+    const id = 'injected-qrcode';
+    if (document.getElementById(id)) return resolve();
+    const s = document.createElement('script');
+    s.id = id;
+    s.src = QRCODE_STATIC_URL;
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Failed to load QRCode'));
+    document.head.appendChild(s);
+  });
+  return (window as any).QRCode || (window as any).qrcode;
+}
+
+function BarcodeSvg({
+  value,
+  options,
+}: {
+  value: string;
+  options?: Partial<{
+    format: string; width: number; height: number; displayValue: boolean;
+    fontSize: number; textMargin: number; margin: number; lineColor: string;
+  }>;
+}) {
+  const svgRef = React.useRef<SVGSVGElement | null>(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!svgRef.current || !value) return;
+      try {
+        const JsBarcode = await ensureJsBarcode();
+        if (cancelled || !svgRef.current) return;
+        while (svgRef.current.firstChild) svgRef.current.removeChild(svgRef.current.firstChild);
+        JsBarcode(svgRef.current, value, {
+          format: 'CODE128',
+          width: 1.4,
+          height: 12,
+          displayValue: true,
+          fontSize: 8,
+          textMargin: 0,
+          margin: 0,
+          lineColor: '#000',
+          ...(options || {}),
+        });
+      } catch {
+        if (!svgRef.current) return;
+        const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        txt.setAttribute('x', '0'); txt.setAttribute('y', '10');
+        txt.setAttribute('fill', '#000'); txt.setAttribute('font-size', '8');
+        txt.textContent = value;
+        svgRef.current.appendChild(txt);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [value, options]);
+  return <svg ref={svgRef} className="w-full h-auto" />;
+}
+
+function QrSvg({ value, sizeMm = 11 }: { value: string; sizeMm?: number }) {
+  const wrapRef = React.useRef<HTMLDivElement | null>(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!wrapRef.current || !value) return;
+      try {
+        const QR: any = await ensureQRCodeFromStatic();
+        if (cancelled || !wrapRef.current) return;
+        const px = Math.max(40, Math.round((sizeMm / 25.4) * 96));
+        const toString = QR?.toString || QR?.default?.toString || QR?.toString;
+        if (!toString) throw new Error('QR lib missing toString()');
+        const svg = await toString(String(value), { type: 'svg', margin: 0, width: px });
+        wrapRef.current.innerHTML = svg;
+        const svgEl = wrapRef.current.querySelector('svg') as SVGSVGElement | null;
+        if (svgEl) {
+          svgEl.setAttribute('width', '100%');
+          svgEl.setAttribute('height', '100%');
+        }
+      } catch {
+        if (!wrapRef.current) return;
+        wrapRef.current.textContent = value;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [value, sizeMm]);
+  return <div ref={wrapRef} style={{ width: `${sizeMm}mm`, height: `${sizeMm}mm`, display: 'block' }} />;
+}
+
+function ThermalLabel2x1({
+  brand, name, sku, uom, priceRupees,
+}: { brand?: string; name: string; sku: string; uom?: string; priceRupees?: number; }) {
+  return (
+    <div
+      className="thermal-label-2x1"
+      style={{
+        width: '50.8mm',
+        height: '25.4mm',
+        padding: '1.5mm',
+        boxSizing: 'border-box',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '0.6mm',
+        justifyContent: 'space-between',
+        border: '1px solid #e5e7eb', // preview only
+        borderRadius: '1mm',
+        background: '#fff',
+      }}
+    >
+      {/* Top line */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '1mm' }}>
+        <div style={{ fontSize: '8px', fontWeight: 700, lineHeight: '10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '60%' }}>
+          {brand || ''}
+        </div>
+        <div style={{ display: 'flex', gap: '4px', alignItems: 'baseline' }}>
+          {uom ? <div style={{ fontSize: '8px', lineHeight: '10px' }}>UoM: {uom}</div> : null}
+          {typeof priceRupees === 'number' && priceRupees > 0 ? (
+            <div style={{ fontSize: '9px', fontWeight: 700, lineHeight: '10px' }}>₹{priceRupees}</div>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Name */}
+      <div style={{ fontSize: '9px', lineHeight: '10px', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {name}
+      </div>
+
+      {/* Barcode + QR row */}
+      <div
+        className="label-row"
+        style={{ display: 'flex', alignItems: 'center', gap: '1mm', width: '100%', flex: 1, minHeight: 0 }}
+      >
+        {/* Barcode stretches to remaining width */}
+        <div className="barcode-wrap" style={{ flex: 1, minWidth: 0 }}>
+          <BarcodeSvg value={sku} options={{ height: 12, width: 1.4, displayValue: true, fontSize: 8, textMargin: 0, margin: 0 }} />
+        </div>
+
+        {/* QR has fixed physical size */}
+        <div className="qr-wrap" style={{ width: '11mm', height: '11mm', flex: '0 0 11mm' }}>
+          <QrSvg value={sku} sizeMm={11} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -174,6 +354,7 @@ function buildPoHtml(opts: {
         <div><strong>SKU</strong>: ${request.sku ?? '-'}</div>
         <div><strong>Item</strong>: ${request.name ?? '-'}</div>
         <div><strong>Current</strong>: ${request.current_stock ?? '-'} • <strong>Min</strong>: ${request.min_stock ?? '-'}</div>
+        <div><strong>Vendor</strong>: ${request.vendor ?? '-'}</div>
         <div><strong>PR ID</strong>: ${request.id}</div>
       </div>
     </div>
@@ -211,11 +392,12 @@ export default function InventoryPage() {
   const [sortKey, setSortKey] = useState<SortKey>('sku');
   const [sortDir, setSortDir] = useState<'asc'|'desc'>('asc');
 
-  // location filter
+  // location & vendor filters
   const [allLocations, setAllLocations] = useState<string[]>([]);
   const [selectedLocation, setSelectedLocation] = useState<string>('');
   const [locationScope, setLocationScope] = useState<LocationScope>('all_items');
   const [showZeroQtyLocations, setShowZeroQtyLocations] = useState<boolean>(false);
+  const [vendorFilter, setVendorFilter] = useState<string>('');       // NEW
 
   // selection for labels & estimate
   const [sel, setSel] = useState<Sel>({});
@@ -227,6 +409,7 @@ export default function InventoryPage() {
 
   const [purchaseRequests, setPurchaseRequests] = useState<PurchaseRequest[]>([]);
   const [loadingPRs, setLoadingPRs] = useState(false);
+  const [prVendorFilter, setPrVendorFilter] = useState<string>('');   // NEW
 
   // Toast notification
   const [toast, setToast] = useState<string | null>(null);
@@ -265,13 +448,16 @@ export default function InventoryPage() {
       const uomMap = new Map<string, string>();
       (uoms ?? []).forEach((u: any) => uomMap.set(u.id, u.code));
 
+      // include reason + created_at (for vendor)
       const { data: moves, error: movesErr } = await supabase
         .from('stock_moves')
-        .select('item_id, move_type, qty, location');
+        .select('item_id, move_type, qty, location, reason, created_at');
       if (movesErr) throw movesErr;
 
       const perItemLocMap = new Map<string, Map<string, number>>();
       const allLocSet = new Set<string>();
+      const lastVendorByItemId = new Map<string, { at: number; vendor: string | null }>();
+
       (moves ?? []).forEach((m: any) => {
         const itemId = String(m.item_id);
         const mt = String(m.move_type || '').toLowerCase();
@@ -284,6 +470,13 @@ export default function InventoryPage() {
         const map = perItemLocMap.get(itemId)!;
         map.set(loc, (map.get(loc) ?? 0) + delta);
         allLocSet.add(loc);
+
+        // latest receive.reason -> vendor
+        if (mt === 'receive') {
+          const at = new Date(m.created_at).valueOf();
+          const rec = lastVendorByItemId.get(itemId);
+          if (!rec || at > rec.at) lastVendorByItemId.set(itemId, { at, vendor: m.reason ?? null });
+        }
       });
 
       const allLocArr = Array.from(allLocSet.values()).sort((a, b) => a.localeCompare(b));
@@ -310,6 +503,7 @@ export default function InventoryPage() {
           gst_percent: it.gst_percent ?? null,
           margin_percent: it.margin_percent ?? null,
           selling_price_per_unit: it.selling_price_per_unit ?? null,
+          last_vendor: lastVendorByItemId.get(itemId)?.vendor ?? null,
         };
       });
 
@@ -374,7 +568,7 @@ export default function InventoryPage() {
         (r.name ?? '').toLowerCase().includes(t) ||
         (r.locations_text ?? '').toLowerCase().includes(t);
 
-      // Optional location filter
+      // Location filter
       const inLocation = (() => {
         if (!selectedLocation) return true;
         const qAtLoc = r.locations_all.find(x => x.name === selectedLocation)?.qty ?? 0;
@@ -388,9 +582,11 @@ export default function InventoryPage() {
         r.low_stock_threshold > 0 &&
         r.stock_qty <= r.low_stock_threshold;
 
-      return textHit && inLocation && (!lowOnly || isLow);
+      const vendorOk = !vendorFilter || (r.last_vendor || '') === vendorFilter;
+
+      return textHit && inLocation && vendorOk && (!lowOnly || isLow);
     });
-  }, [rowsWithDisplayLocations, search, lowOnly, selectedLocation, locationScope]);
+  }, [rowsWithDisplayLocations, search, lowOnly, selectedLocation, locationScope, vendorFilter]);
 
   // Compute rounded prices for display and totals
   const sorted = useMemo(() => {
@@ -423,6 +619,7 @@ export default function InventoryPage() {
         case 'unit_cost': va = Number(a.unit_cost); vb = Number(b.unit_cost); break;
         case 'total_value': va = Number(a.total_value); vb = Number(b.total_value); break;
         case 'locations_text': va = (a.locations_text ?? '').toLowerCase(); vb = (b.locations_text ?? '').toLowerCase(); break;
+        case 'vendor': va = (a.last_vendor ?? '').toLowerCase(); vb = (b.last_vendor ?? '').toLowerCase(); break;
         default: va = 0; vb = 0;
       }
       if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir;
@@ -453,18 +650,13 @@ export default function InventoryPage() {
       name: row.name,
       current_stock: row.stock_qty,
       min_stock: row.low_stock_threshold ?? 0,
+      vendor: row.last_vendor ?? null,          // NEW: store vendor
       status: 'pending',
     }).select('*').single();
 
     if (error) return alert('Create request failed: ' + error.message);
     setToast(`Request created: ${row.sku}`);
     await loadPurchaseRequests();
-
-    // Optional: notify email/WhatsApp automatically
-    if (process.env.NEXT_PUBLIC_NOTIFY_ON_CREATE === '1') {
-      try { await notifyEmail(data as PurchaseRequest); } catch {}
-      try { await notifyWhatsapp(data as PurchaseRequest); } catch {}
-    }
   }
 
   /* =========================
@@ -477,7 +669,7 @@ export default function InventoryPage() {
   }
 
   /* =========================
-     Notifications (B & C)
+     Notifications (Email / WhatsApp) – optional edge functions
      ========================= */
   async function callEdge(fnName: string, payload: any) {
     const url = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/${fnName}`;
@@ -501,6 +693,7 @@ export default function InventoryPage() {
         <p>SKU: <b>${pr.sku ?? ''}</b><br/>
         Item: <b>${pr.name ?? ''}</b><br/>
         Current: <b>${pr.current_stock ?? '-'}</b> • Min: <b>${pr.min_stock ?? '-'}</b><br/>
+        Vendor: <b>${pr.vendor ?? '-'}</b><br/>
         PR ID: <b>${pr.id}</b></p>
       `,
     });
@@ -512,29 +705,16 @@ export default function InventoryPage() {
     if (!to) return;
     await callEdge('notify-whatsapp', {
       to,
-      body: `LOW STOCK\nSKU: ${pr.sku ?? ''}\nItem: ${pr.name ?? ''}\nStock: ${pr.current_stock ?? '-'} / Min: ${pr.min_stock ?? '-'}\nPR: ${pr.id}`,
+      body: `LOW STOCK\nSKU: ${pr.sku ?? ''}\nItem: ${pr.name ?? ''}\nStock: ${pr.current_stock ?? '-'} / Min: ${pr.min_stock ?? '-'}\nVendor: ${pr.vendor ?? '-'}\nPR: ${pr.id}`,
     });
     setToast('WhatsApp sent');
   }
 
   /* --------------------------------
-     PRINT thermal labels (unchanged)
+     PRINT thermal labels (uses previewRef HTML)
      -------------------------------- */
   const handlePrintThermal = () => {
-    const selectedItems = (() => {
-      const arr: { row: InvRow & { unitCostGst: number; sellingPrice: number; total_value: number }; qty: number }[] = [];
-      for (const r of sorted) {
-        const s = sel[r.id];
-        if (s?.checked && r.sku) arr.push({ row: r, qty: Math.max(1, Math.min(500, Math.floor(s.qty || 1))) });
-      }
-      return arr;
-    })();
-
-    const totalLabels = selectedItems.reduce((sum, it) => sum + it.qty, 0);
-    if (totalLabels === 0) {
-      alert('Please select items and set label quantities.');
-      return;
-    }
+    // Build innerHTML snapshot (ThermalLabel2x1 cards)
     const html = previewRef.current?.innerHTML || '';
     if (!html) {
       alert('Please select items (checkbox) and set quantities first.');
@@ -611,11 +791,11 @@ ${(() => {
   };
 
   /* --------------------------------
-     CSV export uses rounded values (includes Selling)
+     CSV export uses rounded values (includes Selling & Vendor)
      -------------------------------- */
   const exportCsv = () => {
     const header = [
-      'SKU','Item','UoM','Qty','Minimum',
+      'SKU','Item','Vendor','UoM','Qty','Minimum',
       'Purchase Price','GST %','Margin %',
       'Unit Cost (GST)','Selling Price','Total Value (₹)','Locations'
     ];
@@ -624,6 +804,7 @@ ${(() => {
       return [
         r.sku,
         (r.name ?? '').replaceAll('"','""'),
+        (r.last_vendor ?? '').replaceAll('"','""'),
         r.uom_code || '',
         String(r.stock_qty),
         r.low_stock_threshold != null ? String(r.low_stock_threshold) : '',
@@ -657,11 +838,23 @@ ${(() => {
 
       {/* ==================== Low Stock – Purchase Requests (Panel) ==================== */}
       <div className="card border border-amber-300 bg-amber-50">
-        <div className="flex items-center justify-between mb-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h3 className="font-semibold text-amber-800">
             Low Stock – Purchase Requests {loadingPRs ? '(loading...)' : `(${purchaseRequests.length})`}
           </h3>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
+            {/* PR vendor filter */}
+            <select
+              className="input"
+              value={prVendorFilter}
+              onChange={(e) => setPrVendorFilter(e.target.value)}
+              title="Filter by vendor"
+            >
+              <option value="">All vendors</option>
+              {Array.from(new Set(purchaseRequests.map(p => (p.vendor || '')).filter(Boolean)))
+                .sort((a,b) => a.localeCompare(b))
+                .map(v => <option key={v} value={v}>{v}</option>)}
+            </select>
             <Button type="button" onClick={loadPurchaseRequests}>Refresh</Button>
           </div>
         </div>
@@ -678,19 +871,23 @@ ${(() => {
                   <th>Item</th>
                   <th className="text-right">Stock</th>
                   <th className="text-right">Min</th>
+                  <th>Vendor</th>
                   <th>Status</th>
                   <th>Notify / PO</th>
                   <th>Mark</th>
                 </tr>
               </thead>
               <tbody>
-                {purchaseRequests.map((r) => (
+                {purchaseRequests
+                  .filter(r => !prVendorFilter || (r.vendor || '') === prVendorFilter)
+                  .map((r) => (
                   <tr key={r.id}>
                     <td>{new Date(r.created_at).toLocaleString()}</td>
                     <td>{r.sku}</td>
                     <td>{r.name}</td>
                     <td className="text-right">{r.current_stock}</td>
                     <td className="text-right">{r.min_stock}</td>
+                    <td>{r.vendor || '—'}</td>
                     <td className="capitalize">{r.status}</td>
                     <td className="space-x-2">
                       {/* Email */}
@@ -717,7 +914,7 @@ ${(() => {
                         className="rounded bg-gray-800 hover:bg-black text-white px-2 py-1 text-sm"
                         onClick={() => {
                           const supplier = {
-                            name: (process.env.NEXT_PUBLIC_DEFAULT_SUPPLIER_NAME || '').trim() || 'Preferred Supplier',
+                            name: (process.env.NEXT_PUBLIC_DEFAULT_SUPPLIER_NAME || '').trim() || (r.vendor || 'Preferred Supplier'),
                             email: process.env.NEXT_PUBLIC_DEFAULT_SUPPLIER_EMAIL || '',
                             phone: process.env.NEXT_PUBLIC_DEFAULT_SUPPLIER_PHONE || '',
                             address: process.env.NEXT_PUBLIC_DEFAULT_SUPPLIER_ADDR || '',
@@ -765,6 +962,7 @@ ${(() => {
             Low stock only
           </label>
 
+          {/* Location filters */}
           <div className="flex items-center gap-2">
             <select className="input" value={selectedLocation} onChange={(e) => setSelectedLocation(e.target.value)}>
               <option value="">All locations</option>
@@ -782,6 +980,19 @@ ${(() => {
               Show zero-qty
             </label>
           </div>
+
+          {/* NEW: Vendor filter (inventory) */}
+          <select
+            className="input"
+            value={vendorFilter}
+            onChange={(e) => setVendorFilter(e.target.value)}
+            title="Filter by vendor"
+          >
+            <option value="">All vendors</option>
+            {Array.from(new Set(rows.map(r => r.last_vendor).filter(Boolean) as string[]))
+              .sort((a,b) => a.localeCompare(b))
+              .map(v => <option key={v} value={v}>{v}</option>)}
+          </select>
 
           <Button type="button" onClick={exportCsv}>Export CSV</Button>
           <Button type="button" onClick={loadInventory}>Refresh</Button>
@@ -834,7 +1045,7 @@ ${(() => {
             </div>
           </div>
 
-          {/* Preview grid (renders selected labels) */}
+          {/* Preview grid (renders selected labels with BARCODE + QR) */}
           <div className="mt-3">
             <div
               ref={previewRef}
@@ -846,15 +1057,14 @@ ${(() => {
                 const row = sorted.find(r => r.id === id);
                 if (!row) return [];
                 return Array.from({ length: Math.max(1, Math.min(500, Math.floor(s.qty || 1))) }).map((_, i) => (
-                  <div key={`${row.id}-${i}`} style={{
-                    width: '50.8mm', height: '25.4mm', padding: '1.5mm',
-                    border: '1px solid #e5e7eb', borderRadius: '1mm', background: '#fff'
-                  }}>
-                    {/* lightweight inline preview */}
-                    <div style={{ fontSize: 10, fontWeight: 600 }}>{row.name || row.sku}</div>
-                    <div style={{ fontSize: 10 }}>SKU: {row.sku}</div>
-                    <div style={{ fontSize: 10 }}>₹{row.sellingPrice}</div>
-                  </div>
+                  <ThermalLabel2x1
+                    key={`${row.id}-${i}`}
+                    brand={brandName}
+                    name={row.name || row.sku}
+                    sku={row.sku}
+                    uom={row.uom_code}
+                    priceRupees={(row as any).sellingPrice}
+                  />
                 ));
               })}
             </div>
@@ -877,7 +1087,7 @@ ${(() => {
               <col style={{ width: 140 }} />
               <col style={{ width: 140 }} />
               <col style={{ width: 160 }} />
-              <col style={{ width: 140 }} />
+              <col style={{ width: 160 }} />   {/* Vendor */}
               <col style={{ width: 360 }} />
             </colgroup>
 
@@ -896,7 +1106,7 @@ ${(() => {
                 <th className="num">Unit Cost (GST)</th>
                 <th className="num">Selling</th>
                 <th className="num"><SortHeader label="Total Value (₹)" active={sortKey==='total_value'} dir={sortDir} onClick={() => toggleSort('total_value')} alignRight /></th>
-                <th>Actions</th>
+                <th><SortHeader label="Vendor" active={sortKey==='vendor'} dir={sortDir} onClick={() => toggleSort('vendor')} /></th>
                 <th><SortHeader label="Locations" active={sortKey==='locations_text'} dir={sortDir} onClick={() => toggleSort('locations_text')} /></th>
               </tr>
             </thead>
@@ -954,34 +1164,10 @@ ${(() => {
                       <td className="num">{INR0.format(Number(r.purchase_price ?? r.unit_cost ?? 0))}</td>
                       <td className="num">{Number(r.gst_percent ?? 0).toFixed(2)}%</td>
                       <td className="num">{Number(r.margin_percent ?? 0).toFixed(2)}%</td>
-                      <td className="num">{INR0.format(r.unitCostGst)}</td>
-                      <td className="num">{INR0.format(r.sellingPrice)}</td>
-                      <td className="num">{INR0.format(r.total_value)}</td>
-
-                      <td>
-                        <div className="flex gap-2">
-                          <Link
-                            href={`/estimate/new?sku=${encodeURIComponent(r.sku)}&qty=1`}
-                            className="rounded bg-emerald-600 text-white px-2 py-1 text-sm hover:bg-emerald-700"
-                          >
-                            Estimate
-                          </Link>
-                          <button
-                            className="rounded bg-red-600 text-white px-2 py-1 text-sm hover:bg-red-700"
-                            onClick={() => {
-                              if ((r.stock_qty ?? 0) > 0) return alert('Cannot delete: move/issue stock to 0 first.');
-                              if (!confirm(`Delete item:\n${r.sku} — ${r.name}\n\nThis cannot be undone.`)) return;
-                              supabase.from('items').delete().eq('id', r.id).then(({ error }) => {
-                                if (error) return alert('Delete failed: ' + error.message);
-                                setRows(prev => prev.filter(x => x.id !== r.id));
-                              });
-                            }}
-                            title="Delete item"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </td>
+                      <td className="num">{INR0.format((r as any).unitCostGst)}</td>
+                      <td className="num">{INR0.format((r as any).sellingPrice)}</td>
+                      <td className="num">{INR0.format((r as any).total_value)}</td>
+                      <td>{r.last_vendor || '—'}</td>
 
                       <td>
                         {r.locations.length === 0 ? '—' : (
